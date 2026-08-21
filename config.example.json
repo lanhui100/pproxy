@@ -1,0 +1,26 @@
+{
+  "listen_host": "127.0.0.1",
+  "listen_port": 8899,
+  "static_upstreams": [],
+  "countries": [],
+  "worker_url": "https://edge.example.com",
+  "worker_secret": "REPLACE_ME",
+  "routes": {
+    "anthropic": "api.anthropic.com",
+    "openai": "api.openai.com"
+  },
+  "upstreams": {
+    "vercel": {
+      "url": "https://upstream.example.com/api/proxy",
+      "secret": "REPLACE_ME"
+    }
+  },
+  "route_upstreams": {
+    "openai": "vercel"
+  },
+  "pool_refresh_sec": 300,
+  "pool_ttl_sec": 180,
+  "max_retries": 3,
+  "verify_concurrency": 30,
+  "check_url": "https://ipinfo.io/json"
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=pproxy - Free Proxy Pool Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dm
+WorkingDirectory=/home/USER/pproxy
+ExecStart=/home/USER/pproxy/target/release/pproxy-server
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+Environment=PPROXY_CONFIG=/home/USER/pproxy/config.json
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+# 凭据文件（600 权限，禁止入库）
+.secrets.env
+
+# 真实配置（含 worker_secret，S-P1-2 裁决）；示例文件 config.example.json 入库
+config.json
+config.json.bak
+
+# 构建产物与 SQLite 运行时文件
+/target
+*.db
+*.db-wal
+*.db-shm

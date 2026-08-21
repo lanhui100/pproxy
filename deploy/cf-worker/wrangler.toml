@@ -1,0 +1,12 @@
+name = "pproxy-edge"
+main = "worker.js"
+compatibility_date = "2026-08-20"
+workers_dev = true
+
+routes = [
+  { pattern = "edge.ponyjob.top", custom_domain = true }
+]
+
+[vars]
+ALLOWED_ORIGINS = "*"
+PROXY_SECRET = "<REDACTED_DEV_SECRET>"
