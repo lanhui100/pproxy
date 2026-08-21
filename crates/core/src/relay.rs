@@ -68,7 +68,7 @@ pub async fn socks5_connect(
     Ok(stream)
 }
 
-pub async fn relay(mut client: TcpStream, mut upstream: TcpStream) {
+pub async fn relay(client: TcpStream, upstream: TcpStream) {
     let (mut cr, mut cw) = client.into_split();
     let (mut ur, mut uw) = upstream.into_split();
 

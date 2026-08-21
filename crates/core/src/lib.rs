@@ -10,6 +10,10 @@ pub mod usage;
 
 pub use pool::Pool;
 pub use edge::{EdgeClient, ForwardRequest};
+pub use route::RouteTable;
+pub use store::Store;
+pub use token::TokenService;
+pub use usage::UsageTracker;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
