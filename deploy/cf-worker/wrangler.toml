@@ -1,7 +1,8 @@
 name = "pproxy-edge"
 main = "worker.js"
 compatibility_date = "2026-08-20"
-workers_dev = true
+# F1：关闭 workers.dev 默认域名，仅经 custom domain 暴露
+workers_dev = false
 
 routes = [
   { pattern = "edge.ponyjob.top", custom_domain = true }
@@ -9,4 +10,5 @@ routes = [
 
 [vars]
 ALLOWED_ORIGINS = "*"
-PROXY_SECRET = "<REDACTED_DEV_SECRET>"
+# F1：PROXY_SECRET 为共享凭据，禁止入库。部署时执行：
+#   npx wrangler secret put PROXY_SECRET

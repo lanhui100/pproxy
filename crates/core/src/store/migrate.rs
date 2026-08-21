@@ -54,10 +54,22 @@ impl Store {
         let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         let mut count = 0usize;
+        let mut skipped = 0usize;
         for (name, target) in routes {
             let Some(target_host) = target.as_str() else {
-                return Err(StoreError::Migration(format!("route {name}: target_host 非字符串")));
+                tracing::warn!(route = %name, "migration skip: target_host not a string");
+                skipped += 1;
+                continue;
             };
+            // F4：旧 config 不经管理 API，入库前过与 create_route 相同的
+            // name/host 校验；非法项跳过（迁移不因单条脏数据整体失败）。
+            if crate::route::validate_name(name).is_err()
+                || crate::route::validate_host(target_host).is_err()
+            {
+                tracing::warn!(route = %name, host_kind = "invalid", "migration skip: validation failed");
+                skipped += 1;
+                continue;
+            }
             tx.execute(
                 "INSERT INTO routes (name, target_host, upstream, override_upstream, enabled, created_at)
                  VALUES (?1, ?2, ?3, NULL, 1, ?4)",
@@ -71,6 +83,9 @@ impl Store {
             count += 1;
         }
         tx.commit()?;
+        if skipped > 0 {
+            tracing::warn!(skipped, "migration skipped invalid legacy routes");
+        }
         Ok(count)
     }
 }

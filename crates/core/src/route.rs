@@ -85,8 +85,9 @@ fn parse_upstream(s: &str) -> Option<Upstream> {
     }
 }
 
-/// §6.0 name 校验（先于一切 host 校验）。
-fn validate_name(name: &str) -> Result<(), RouteError> {
+/// §6.0 name 校验（先于一切 host 校验）。pub 供迁移导入复用（F4：旧
+/// config.json routes 键入库前必须过同一套校验，非法项跳过不阻断）。
+pub fn validate_name(name: &str) -> Result<(), RouteError> {
     // 保留前缀显式校验（S-P1-4/C-P1-2 裁决）：数据面以 `pony_` 前缀区分
     // 路径中的 token 段与 route 段（T3 §4.1），该歧义必须由路由创建时显式
     // 排除，不能依赖正则"天然排除"的错误断言。`__admin__`（下划线开头）

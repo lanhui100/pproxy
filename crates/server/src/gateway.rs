@@ -329,15 +329,25 @@ async fn handle_conn(
     let first = &peek_buf[..n];
     if first.len() >= 7 && first[..7].eq_ignore_ascii_case(b"CONNECT") {
         // P0-1：CONNECT 直接禁用，写 403 后关闭
-        let resp_bytes: &[u8] = b"HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: 33\r\n\r\n{\"error\":\"connect_forbidden\"}";
+        let body = br#"{"error":"connect_forbidden"}"#;
+        let resp = format!(
+            "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        );
         use tokio::io::AsyncWriteExt;
-        let _ = stream.write_all(resp_bytes).await;
+        let _ = stream.write_all(resp.as_bytes()).await;
+        let _ = stream.write_all(body).await;
         let _ = stream.flush().await;
         return;
     }
-    // 普通 HTTP：axum Router 经适配器作为 hyper Service 驱动（TokioIo 桥接 tokio stream）
+    // 普通 HTTP：axum Router 经适配器作为 hyper Service 驱动（TokioIo 桥接 tokio stream）。
+    // F3：header_read_timeout 限首部读取窗口，防慢速连接占满 Semaphore 配额。
+    use hyper_util::rt::{TokioTimer, tokio::TokioExecutor};
     let adapter = RouterHyperAdapter { router };
-    let _ = hyper::server::conn::http1::Builder::new()
+    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+        .http1()
+        .header_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .timer(TokioTimer::new())
         .serve_connection(hyper_util::rt::TokioIo::new(stream), adapter)
         .await;
 }

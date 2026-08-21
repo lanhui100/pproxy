@@ -87,9 +87,6 @@ async fn main() -> anyhow::Result<()> {
 
     // 8. 管理面绑定非回环地址时 warn（S-P2-额外 裁决：提示暴露面扩大，不阻止启动）
     let admin_host = listen_admin.rsplit_once(':').map(|(h, _)| h).unwrap_or("").to_string();
-    if !matches!(admin_host.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "" | "::1" | "0.0.0.0") {
-        // 0.0.0.0 也非回环；上面 matches 已含。此处仅对明确非回环 host 提示。
-    }
     if !is_loopback_host(&admin_host) {
         warn!(addr = %listen_admin, "admin plane bound to non-loopback address; exposure widened");
     }

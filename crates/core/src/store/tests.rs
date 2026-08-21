@@ -256,6 +256,38 @@ fn migrate_imports_and_rewrites_config() {
     assert_eq!(bak, original);
 }
 
+// F4：旧 config 含非法路由（name/host 校验不过、target 非字符串）→ 跳过不阻断，
+// 合法项照常入库。
+#[test]
+fn migrate_skips_invalid_routes_without_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+    write_file(
+        &cfg_path,
+        r#"{
+  "worker_url": "https://edge.ponyjob.top",
+  "worker_secret": "s",
+  "routes": {
+    "good_route": "api.example.com",
+    "pony_bad": "api.example.com",
+    "BadName": "api.example.com",
+    "bad_host": "http://evil.com/path",
+    "not_string": 12345
+  }
+}"#,
+    );
+    let db = dir.path().join("state.db");
+    let store = Store::open(&db).unwrap().0;
+
+    let out = store.migrate_config_if_needed(&cfg_path).unwrap();
+    assert_eq!(out, MigrationOutcome::Imported(1), "仅 good_route 入库");
+
+    let routes = store.list_routes().unwrap();
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].name, "good_route");
+    assert_eq!(routes[0].target_host, "api.example.com");
+}
+
 // ---- §8.8 迁移幂等 ----
 
 #[test]
