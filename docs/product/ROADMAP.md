@@ -12,13 +12,14 @@
 **验收**：curl 带 token 走通 openai/zen；无 token 401；`/api/routes` 可增删路由并即时生效
 （在线步骤 4/5 因 dev 服务器外网不可达按 T8 §1 离线子集口径验收）
 
-## M2 CLI — 预计 1 天
-- [ ] pony status / start / stop / restart
-- [ ] pony route list/add/rm/test
-- [ ] pony token create/list/revoke
-- [ ] pony usage / doctor / config export
-- [ ] cargo install 分发 + ~/.pony/config.toml
-**验收**：纯 CLI 完成添加新服务（如 Gemini）→ 生成 token → 导出配置 → doctor 通过
+## M2 CLI — ✅ 已完成（2026-08-21）
+- [x] pony status / start / stop / restart（systemd 直调，不经 shell）
+- [x] pony route list/add/rm/test/enable/disable（--all 并发实测）
+- [x] pony token create/list/revoke（明文仅创建时打印一次）
+- [x] pony usage / doctor / config export（7 服务模板）
+- [x] ~/.pony/config.toml（0600）+ 退出码契约 0/1/2/3；cargo install 待发布仓库后补
+**验收**：纯 CLI 完成 Gemini 添加 → 生成 token → 导出配置 → doctor 通过
+（集成脚本 m2_test.sh 隔离环境全绿：12 步 26 断言；workspace 测试 23+55 全绿）
 
 ## M3 监控与告警 — 预计 1 天
 - [ ] CF GraphQL 限额轮询（Workers 10万/天）
