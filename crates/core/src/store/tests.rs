@@ -220,11 +220,13 @@ fn migrate_imports_and_rewrites_config() {
     let routes = store.list_routes().unwrap();
     assert_eq!(routes.len(), 7);
     let by_name = |n: &str| routes.iter().find(|r| r.name == n).unwrap().clone();
-    assert_eq!(by_name("openai").upstream.as_deref(), Some("vercel"));
-    assert_eq!(by_name("opencode").upstream.as_deref(), Some("vercel"));
-    assert!(by_name("anthropic").upstream.is_none(), "无映射 → NULL 自动选择");
+    // F8：route_upstreams 绑定写入 override_upstream（resolve 实际读取列）；
+    // upstream 列留 NULL（自动选择快照仅展示用途，迁移无快照）。
+    assert_eq!(by_name("openai").upstream, None, "upstream 列为快照列，迁移无快照");
+    assert_eq!(by_name("openai").override_upstream.as_deref(), Some("vercel"));
+    assert_eq!(by_name("opencode").override_upstream.as_deref(), Some("vercel"));
+    assert!(by_name("anthropic").override_upstream.is_none(), "无映射 → NULL 自动选择");
     assert!(by_name("openai").enabled);
-    assert!(by_name("openai").override_upstream.is_none());
 
     // config 重写为删除 routes 键后的原对象 + db_path（T1 §6.1.7）
     let rewritten: Value = serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
@@ -286,6 +288,41 @@ fn migrate_skips_invalid_routes_without_failing() {
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].name, "good_route");
     assert_eq!(routes[0].target_host, "api.example.com");
+}
+
+// F8：route_upstreams 绑定经迁移写入 override_upstream 列，resolve 据此选中
+// 绑定上游（echo→localstub 场景，T8 步骤 5.5 的单测级回归）。
+#[test]
+fn migrate_binding_lands_in_override_upstream_and_resolve_picks_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.json");
+    write_file(
+        &cfg_path,
+        r#"{
+  "worker_url": "https://edge.ponyjob.top",
+  "worker_secret": "s",
+  "routes": { "echo": "echo.example.com" },
+  "route_upstreams": { "echo": "localstub" }
+}"#,
+    );
+    let store = Store::open(&dir.path().join("state.db")).unwrap().0;
+    assert_eq!(
+        store.migrate_config_if_needed(&cfg_path).unwrap(),
+        MigrationOutcome::Imported(1)
+    );
+
+    let row = &store.list_routes().unwrap()[0];
+    assert_eq!(row.override_upstream.as_deref(), Some("localstub"));
+    assert_eq!(row.upstream, None, "upstream 列为快照列，迁移无快照");
+
+    // resolve 层验证：Named 绑定优先于 host 规则（echo.example.com 非 Vercel host）
+    let rt = crate::route::RouteTable::new(
+        std::sync::Arc::new(store),
+        std::sync::Arc::new(std::collections::HashMap::new()),
+    )
+    .unwrap();
+    let (_, up) = rt.resolve("echo", "/ping").unwrap();
+    assert_eq!(up.as_str(), "localstub");
 }
 
 // ---- §8.8 迁移幂等 ----

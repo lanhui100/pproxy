@@ -60,28 +60,54 @@ impl From<StoreError> for RouteError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
+/// 上游标识（F8 扩展）：Worker/Vercel 为自动选择结果；Named 承载迁移导入的
+/// route_upstreams 绑定（任意已配置上游名，如 localstub）。序列化为名字字符串。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Upstream {
     Worker,
     Vercel,
+    Named(String),
 }
 
 impl Upstream {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Worker => "worker",
             Self::Vercel => "vercel",
+            Self::Named(s) => s,
+        }
+    }
+
+    /// 已知名归一为枚举值（保持既有相等语义），其余进 Named。
+    fn from_name(s: &str) -> Self {
+        match s {
+            "worker" => Self::Worker,
+            "vercel" => Self::Vercel,
+            other => Self::Named(other.to_string()),
         }
     }
 }
 
-/// 精确小写匹配（S-P2-7：override 仅接受 "worker"|"vercel"）。
+impl serde::Serialize for Upstream {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// 精确小写匹配（S-P2-7：override 仅接受 "worker"|"vercel"；F8 扩展：
+/// 迁移导入的 route_upstreams 绑定名同样合法——与 T1 §6.1.6 迁移语义一致）。
 fn parse_upstream(s: &str) -> Option<Upstream> {
+    Some(Upstream::from_name(s))
+}
+
+/// F8：create/update 的 override 值域校验——"worker"|"vercel" 恒合法
+/// （worker 由 config.worker_url 提供，不经 upstreams map），其余须为
+/// 已配置上游名（edges 表键）。空串拒绝（语义=未设置，应传 null 清除）。
+fn valid_override(edges: &HashMap<String, EdgeClient>, s: &str) -> bool {
     match s {
-        "worker" => Some(Upstream::Worker),
-        "vercel" => Some(Upstream::Vercel),
-        _ => None,
+        "worker" | "vercel" => true,
+        "" => false,
+        other => edges.contains_key(other),
     }
 }
 
@@ -280,14 +306,20 @@ impl RouteTable {
 
     /// 上游自动选择（C-P1-5 改 pub）：override 优先，否则按 host 规则。
     /// T6 /api/routes 列表的 effective_upstream 字段与 resolve 共用此决策。
+    ///
+    /// F8：override 值域扩展——除 "worker"|"vercel" 外，迁移导入的
+    /// route_upstreams 绑定名（任意已配置上游名）同样生效；空串视作未设置
+    /// （回退 host 规则）。
     pub fn pick_upstream(&self, target_host: &str, override_upstream: Option<&str>) -> Upstream {
         if let Some(o) = override_upstream {
-            return parse_upstream(o).unwrap_or_else(|| {
-                // 非法值视作 Worker 并 warn（DB 手工篡改的兜底；API 层已在
-                // create/update 前置校验拒绝）
-                tracing::warn!(host = %target_host, override = %o, "invalid override_upstream, fallback to worker");
-                Upstream::Worker
-            });
+            if !o.is_empty() {
+                return parse_upstream(o).unwrap_or_else(|| {
+                    // 非法值视作 Worker 并 warn（DB 手工篡改的兜底；API 层已在
+                    // create/update 前置校验拒绝）
+                    tracing::warn!(host = %target_host, override = %o, "invalid override_upstream, fallback to worker");
+                    Upstream::Worker
+                });
+            }
         }
         if VERCEL_HOSTS.contains(&target_host.to_ascii_lowercase().as_str()) {
             Upstream::Vercel
@@ -305,11 +337,14 @@ impl RouteTable {
     }
 
     /// 管理面 CRUD（写库 + 同步刷新内存，模式同 T2 单一写路径）。
+    ///
+    /// F8：override_upstream 值域扩展——"worker"|"vercel"（S-P2-7）之外，
+    /// 已配置上游名（edges 表键）同样合法；未知名仍 InvalidUpstream。
     pub fn create_route(&self, r: &NewRoute) -> Result<(), RouteError> {
         validate_name(&r.name)?;
         validate_host(&r.target_host)?;
         if let Some(o) = &r.override_upstream {
-            if parse_upstream(o).is_none() {
+            if !valid_override(&self.edges, o) {
                 return Err(RouteError::InvalidUpstream);
             }
         }
@@ -328,7 +363,8 @@ impl RouteTable {
 
     /// 三态参数（C-P0-2，serde double_option 配合）：None=不改；Some(None)=清除；
     /// Some(Some(v))=设置。override_upstream 提供值时必须为 "worker"|"vercel"
-    /// （S-P2-7），否则 InvalidUpstream。返回是否命中（false=路由不存在）。
+    /// 或已配置上游名（F8，S-P2-7 扩展），否则 InvalidUpstream。
+    /// 返回是否命中（false=路由不存在）。
     pub fn update_route(
         &self,
         name: &str,
@@ -336,7 +372,7 @@ impl RouteTable {
         enabled: Option<bool>,
     ) -> Result<bool, RouteError> {
         if let Some(Some(o)) = &override_upstream {
-            if parse_upstream(o).is_none() {
+            if !valid_override(&self.edges, o) {
                 return Err(RouteError::InvalidUpstream);
             }
         }
@@ -446,6 +482,17 @@ mod tests {
         (dir, RouteTable::new(store, empty_edges()).unwrap())
     }
 
+    /// F8：带 localstub 上游的表（Named 绑定用例）。
+    fn table_with_stub(tag: &str) -> (tempfile::TempDir, RouteTable) {
+        let (dir, store) = temp_store(tag);
+        let mut edges = HashMap::new();
+        edges.insert(
+            "localstub".to_string(),
+            EdgeClient::new("http://127.0.0.1:1", "s").unwrap(),
+        );
+        (dir, RouteTable::new(store, Arc::new(edges)).unwrap())
+    }
+
     // ---- §8.1 pick_upstream 规则 ----
 
     #[test]
@@ -457,15 +504,22 @@ mod tests {
         assert_eq!(rt.pick_upstream("www.google.com", None), Upstream::Worker);
         // 大小写不敏感
         assert_eq!(rt.pick_upstream("API.OPENAI.COM", None), Upstream::Vercel);
-        // override 优先于 host 规则；非法值 → Worker
+        // override 优先于 host 规则；已知名归一为枚举值
         assert_eq!(
             rt.pick_upstream("api.anthropic.com", Some("vercel")),
             Upstream::Vercel
         );
         assert_eq!(
-            rt.pick_upstream("api.anthropic.com", Some("bogus")),
+            rt.pick_upstream("api.anthropic.com", Some("worker")),
             Upstream::Worker
         );
+        // F8：Named 绑定（迁移导入的 route_upstreams 名）原样生效；
+        // 空串视作未设置，回退 host 规则。
+        assert_eq!(
+            rt.pick_upstream("echo.example.com", Some("localstub")),
+            Upstream::Named("localstub".into())
+        );
+        assert_eq!(rt.pick_upstream("echo.example.com", Some("")), Upstream::Worker);
     }
 
     // ---- §8.2 override 优先 ----
@@ -477,6 +531,13 @@ mod tests {
             .unwrap();
         let (_, up) = rt.resolve("openai", "/").unwrap();
         assert_eq!(up, Upstream::Worker);
+
+        // F8：Named 绑定在 resolve 中同样优先于 host 规则（须已配置上游名）
+        let (_dir2, rt2) = table_with_stub("override_named");
+        rt2.create_route(&new_route("echo", "echo.example.com", Some("localstub")))
+            .unwrap();
+        let (_, up) = rt2.resolve("echo", "/ping").unwrap();
+        assert_eq!(up, Upstream::Named("localstub".into()));
     }
 
     // ---- §8.3 effective_upstream 与 resolve 决策一致 ----
@@ -651,7 +712,7 @@ mod tests {
             .unwrap());
         assert_eq!(rt.effective_upstream("anthropic"), Some(Upstream::Vercel));
 
-        // Some(Some("bogus"))：InvalidUpstream（S-P2-7）
+        // Some(Some("bogus"))：InvalidUpstream（S-P2-7；F8 后未配置名仍拒绝）
         assert!(matches!(
             rt.update_route("anthropic", Some(Some("bogus".into())), None),
             Err(RouteError::InvalidUpstream)

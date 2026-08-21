@@ -10,6 +10,16 @@ use serde_json::Value;
 
 use super::{now_unix, MigrationOutcome, Store, StoreError};
 
+/// F8：迁移导入的 route_upstreams 绑定值白名单——"worker"|"vercel" 或
+/// 任意非空、无空白/控制字符的上游名（与 config upstreams 键同域）。
+/// 迁移期无法访问 edges 表（构造先于迁移），故做格式校验而非存在性校验；
+/// 未知名在转发期由 gateway "upstream not configured" 兜底。
+fn validate_upstream_binding(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 impl Store {
     pub fn migrate_config_if_needed(&self, config_path: &Path)
         -> Result<MigrationOutcome, StoreError>
@@ -70,13 +80,18 @@ impl Store {
                 skipped += 1;
                 continue;
             }
+            // F8：route_upstreams 绑定写入 override_upstream 列（resolve 的
+            // 实际读取列）；upstream 列留 NULL（创建时自动选择快照，迁移无快照）。
+            // 绑定值经 validate_upstream_binding 白名单校验，非法绑定忽略
+            // （回退 host 规则，不阻断迁移）。
+            let binding = route_upstreams.get(name).filter(|b| validate_upstream_binding(b));
             tx.execute(
                 "INSERT INTO routes (name, target_host, upstream, override_upstream, enabled, created_at)
-                 VALUES (?1, ?2, ?3, NULL, 1, ?4)",
+                 VALUES (?1, ?2, NULL, ?3, 1, ?4)",
                 params![
                     name,
                     target_host,
-                    route_upstreams.get(name),
+                    binding,
                     now_unix() as i64
                 ],
             )?;
