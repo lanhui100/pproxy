@@ -4,6 +4,7 @@ pub mod pool;
 pub mod relay;
 pub mod edge;
 pub mod store;
+pub mod usage;
 
 pub use pool::Pool;
 pub use edge::{EdgeClient, ForwardRequest};
