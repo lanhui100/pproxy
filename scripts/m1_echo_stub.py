@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""m1_echo_stub.py — M1 集成测试本地回显 stub（T8 §2）。
+"""m1_echo_stub.py — M1/M2 集成测试本地回显 stub（T8 §2）。
 
-监听 127.0.0.1:18901，对任何请求返回 200 JSON：
+监听 STUB_PORT 环境变量指定的端口（缺省 18901，兼容 m1_test.sh），
+对任何请求返回 200 JSON：
   {"url": "<x-stub-url 头或路径>", "headers": {<全部请求头小写键值对>}}
 
 用于 x-pony-token 泄露断言（步骤 5.5）与离线转发链路验证。
@@ -9,6 +10,7 @@ EdgeClient 直连本 stub（经临时 config 的 upstreams.localstub），不经
 """
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
@@ -34,4 +36,5 @@ class EchoHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    HTTPServer(("127.0.0.1", 18901), EchoHandler).serve_forever()
+    port = int(os.environ.get("STUB_PORT", "18901"))
+    HTTPServer(("127.0.0.1", port), EchoHandler).serve_forever()

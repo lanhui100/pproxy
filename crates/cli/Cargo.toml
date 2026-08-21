@@ -1,0 +1,24 @@
+[package]
+name = "pproxy-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pony"
+path = "src/main.rs"
+
+[dependencies]
+pproxy-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+tokio.workspace = true
+libc = "0.2"
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tempfile.workspace = true
