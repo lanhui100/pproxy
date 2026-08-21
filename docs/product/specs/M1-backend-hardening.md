@@ -1,6 +1,6 @@
 # M1 Spec: 后端强化（鉴权 + 管理面 + 存储）
 
-> 状态: 待实现 | 优先级: P0 | 预计: 1.5 天 | 依赖: 无
+> 状态: 已实现（2026-08-21，任务级 specs 见 [m1/](m1/README.md)） | 优先级: P0 | 预计: 1.5 天 | 依赖: 无
 
 ## 1. 背景与目标
 
@@ -56,7 +56,7 @@ admin:   pony_admin_<48hex>，首个 admin 首次启动生成 → 打印日志 +
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | /api/tokens | POST | `{name, expires_days?}` → 明文 token（仅此一次） |
-| /api/tokens | GET | 列表（脱敏：前 8 位 + 状态） |
+| /api/tokens | GET | 列表（脱敏：不返回 token_hash/明文前缀——C-P1-8 偏离修订：仅 name/状态/过期，防前缀穷举） |
 | /api/tokens/{id} | DELETE | 撤销（软删 revoked_at） |
 | /api/routes | GET / POST | 列表 / 新增 `{name, target_host, override_upstream?}` |
 | /api/routes/{name} | PATCH / DELETE | 改 upstream/enabled / 删除 |

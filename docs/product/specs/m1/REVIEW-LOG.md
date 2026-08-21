@@ -85,3 +85,22 @@
 6. T6：double_option PATCH；错误文案统一 §4；偏离声明；PATCH 移除 upstream 字段；usage 独立 DTO；admin 撤销保护已有
 7. T8：CONNECT→403 断言；重启持久化步骤 11；x-pony-token 泄露断言；zen 命令写死（/zen/v1/chat/completions，CreditsError|DataPolicyError）；python3 查 DB；trap 清理；离线门禁子集
 8. README：同步签名修正；0.0.0.0 删除；已知债务节；并发上限约定
+
+## 实现期裁决（F 系列，2026-08-21）
+
+实现完成后由 code-reviewer ∥ security-auditor 对代码二次对抗审核，修复记录于 git 提交 `233b7b0`（F1/F3/F4/F5/F7）与 `bbf86cc`（F8）。
+
+| # | 发现 | 修复 |
+|---|------|------|
+| F1 | wrangler.toml workers_dev 开启 + PROXY_SECRET 明文入 vars | 关闭 workers_dev；secret 改 wrangler secret |
+| F3 | 数据面 serve_connection 无 header 读超时（慢连接占满 Semaphore） | hyper-util auto::Builder + header_read_timeout 30s + TokioTimer |
+| F4 | 迁移导入未过 name/host 校验，脏数据直接入库 | 逐条 validate_name/validate_host，非法项跳过不阻断 |
+| F5 | CONNECT 403 响应 content-length 硬编码 | 由 body 实际长度计算 |
+| F7 | main.rs 空 if 死代码块 | 删除 |
+| **F8** | **routes 表双列语义断裂**：T1 §6.1.6 原 spec 让迁移把 route_upstreams 绑定写入 `upstream` 列（创建时快照列，仅展示用途），而 resolve/pick_upstream 实际读取 `override_upstream` 列 → 迁移后绑定全部失效（openai/zen 落 Worker 而非 Vercel） | ① Upstream 枚举扩展 `Named(String)` 变体承载任意已配置上游名；② 迁移改写 override_upstream 列（upstream 列留 NULL），绑定值经格式白名单校验；③ parse_upstream 接受任意非空值归一为枚举，pick_upstream 加空串守卫回退 host 规则；④ create/update 校验统一 valid_override——"worker"\|"vercel" 恒合法（worker 由 config.worker_url 提供不经 upstreams map）、空串拒绝、其余须在 edges 表键中。T1 §6.1.6 / T4 §2-§8 已同步修订 |
+
+## 验收结论
+
+- 单测：`cargo test --workspace --tests` 55 passed / 1 ignored（网络用例）
+- 集成：`M1_TEST_OFFLINE=1 bash scripts/m1_test.sh` 52 项断言全绿退出 0（步骤 4/5 在线用例因本机外网不可达按 T8 §1 离线子集口径跳过）
+- 生产服务 systemd pproxy 全程 active（脚本首尾断言）

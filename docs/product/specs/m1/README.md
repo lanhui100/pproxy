@@ -1,6 +1,6 @@
 # M1 任务级 Specs — 总纲
 
-> 上游: [M1-backend-hardening.md](../M1-backend-hardening.md) | 状态: 待实现 | 日期: 2026-08-21
+> 上游: [M1-backend-hardening.md](../M1-backend-hardening.md) | 状态: 已实现（2026-08-21） | 日期: 2026-08-21
 >
 > 本目录 8 份任务 spec（T1-T8）精确到开发智能体无需再做设计决策。实现代码前必读本 README 的共享约定。
 

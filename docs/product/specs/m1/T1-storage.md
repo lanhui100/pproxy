@@ -222,7 +222,7 @@ pub struct UsageRow {
 3. `routes` 键缺失或空对象 → `NoLegacyRoutes`。
 4. `list_routes()` 非空 → `AlreadyMigrated`（幂等保障，**不**重写 config.json——无论 config 是否已重写，均原样返回，T8 步骤 11 断言此态下服务正常）。
 5. 备份：`config.json` → `config.json.bak`（已存在 .bak 则不覆盖——.bak 永远是原始文件）。
-6. 事务内逐条 `insert_route`：`upstream` 取 `route_upstreams[route]`（无则 NULL），`override_upstream=NULL`，`enabled=1`，`created_at=now_unix()`。
+6. 事务内逐条 `insert_route`：**F8 修订（实现期裁决）**——`route_upstreams[route]` 绑定写入 `override_upstream` 列（resolve/pick_upstream 的实际读取列；原 spec 写入 `upstream` 列属语义错误，该列是创建时自动选择快照，仅展示用途，T4/C-P2-9 不可 PATCH）；`upstream` 快照列留 NULL（迁移无快照）。绑定值经格式白名单校验（非空、无空白/控制字符），非法绑定忽略并回退 host 规则，不阻断迁移。`enabled=1`，`created_at=now_unix()`。
 7. 事务提交后原子重写 config.json（写 `.tmp` 再 `rename`）：**仅删除顶层 `routes` 键，其余键全部原样保留**（P0-2 裁决：listen_host/listen_port/worker_url/worker_secret/upstreams/route_upstreams 均为基础设施项，与 listen 同类，重启后仍需从 config 读出构造 EdgeClient）；另新增 `"db_path"` 字段记录实际 DB 路径（便于运维排查）。禁止把 config 重写为仅含 listen 的精简格式——那会导致重启后上游凭据丢失、全路由 503。
 8. `worker_url` / `worker_secret` / `upstreams` / `route_upstreams` **不落库**，但**保留在 config.json 中**（含 secret 本就不应入 git，见第 2 节 .gitignore 联动）。迁移时由调用方（main.rs）从 config.json 读出后传入 EdgeClient 构造；main.rs 必须**先**读完整旧 config 构造 EdgeClient，**再**调 `migrate_config_if_needed`（顺序硬性约定，T3 spec 重复声明；重写后 config 仍含这些键，但先读后写可彻底规避读写竞态）。
 

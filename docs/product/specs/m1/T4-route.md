@@ -26,15 +26,16 @@ pub enum RouteError {
     Disabled,
     InvalidName,        // 创建时：^[a-z][a-z0-9_-]{0,63}$，且禁止 pony_ 前缀（§6 第 0 条）
     InvalidHost,        // 创建时：SSRF 校验失败（§6）
-    InvalidUpstream,    // override_upstream 非 "worker"|"vercel"（S-P2-7）
+    InvalidUpstream,    // override_upstream 非法（F8：非 worker|vercel 且非已配置上游名/空串）
     Duplicate,          // name 已存在
     Store(StoreError),
 }
 impl Display + Error + From<StoreError>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Upstream { Worker, Vercel }
+// F8 修订：Named(String) 承载迁移导入的 route_upstreams 绑定（任意已配置上游名）。
+// 序列化为名字字符串；"worker"|"vercel" 归一为对应变体。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Upstream { Worker, Vercel, Named(String) }
 
 pub struct RouteTable { ... }   // 内部见 §4
 
@@ -60,7 +61,9 @@ impl RouteTable {
     pub fn create_route(&self, r: &NewRoute) -> Result<(), RouteError>;
     pub fn list_routes(&self) -> Result<Vec<RouteRow>, RouteError>;
     /// 三态参数（C-P0-2，serde double_option 配合）：None=不改；Some(None)=清除；Some(Some(v))=设置。
-    /// override_upstream 提供值时必须为 "worker"|"vercel"（S-P2-7），否则 InvalidUpstream。
+    /// F8：override 值域——"worker"|"vercel" 恒合法（worker 由 config.worker_url 提供，
+    /// 不经 upstreams map）；空串拒绝（语义=未设置，应传 null 清除）；其余须为已配置上游名
+    /// （edges 表键），否则 InvalidUpstream。
     pub fn update_route(&self, name: &str,
         override_upstream: Option<Option<String>>, enabled: Option<bool>) -> Result<bool, RouteError>;
     pub fn delete_route(&self, name: &str) -> Result<bool, RouteError>;
@@ -86,7 +89,7 @@ pub struct TestResult {
 pub struct NewRoute {
     pub name: String,
     pub target_host: String,
-    pub override_upstream: Option<String>,  // 提供时必须 "worker"|"vercel"（S-P2-7）
+    pub override_upstream: Option<String>,  // F8 值域：worker|vercel|已配置上游名（见 update_route 注）
 }
 ```
 
@@ -95,13 +98,19 @@ pub struct NewRoute {
 ```rust
 pub fn pick_upstream(&self, target_host: &str, override_upstream: Option<&str>) -> Upstream {
     if let Some(o) = override_upstream {
-        return parse_upstream(o).unwrap_or(Upstream::Worker);  // 非法值视作 Worker 并 warn
+        if !o.is_empty() {  // F8：空串视作未设置，回退 host 规则
+            return parse_upstream(o).unwrap_or_else(|| {
+                Upstream::Worker  // 非法值视作 Worker 并 warn（DB 手工篡改兜底）
+            });
+        }
     }
     match target_host.to_ascii_lowercase().as_str() {
         "api.openai.com" | "opencode.ai" => Upstream::Vercel,
         _ => Upstream::Worker,
     }
 }
+// F8：parse_upstream 接受任意非空值——"worker"|"vercel" 归一为对应变体，
+// 其余归一为 Named(名字)。
 ```
 
 - `resolve` 的 upstream 决策：直接调用 `pick_upstream(target_host, override_upstream.as_deref())`。
@@ -168,7 +177,7 @@ T1（Store/RouteRow）。`test_route` 需要 EdgeClient（core 已有，经 `new
 8. `validate_host` 拒绝：`http://api.anthropic.com`（scheme）、`api.anthropic.com/path`（路径）、`api.anthropic.com:8443`（端口）、`192.168.1.1`（IP）、`127.0.0.1`、`localhost`、`foo.localhost`、`svc.internal`、`metadata.google.internal`、空串、`*.example.com`（通配，C-P2-1）、含下划线/空格非法字符（大写输入先小写化再校验——`Api.Example.com` 合法）。
 9. Duplicate：重复 name create → RouteError::Duplicate。
 10. name 校验：`pony_x`（保留前缀，S-P1-4）→ InvalidName；`pony`（无下划线，不匹配正则首段约束）→ InvalidName；`OpenAI`（大写）→ InvalidName；`a`（合法单字符）→ 通过；64+ 字符 → InvalidName。
-11. update_route 三态（C-P0-2）：`None` 不改列；`Some(None)` 清除 override；`Some(Some("vercel"))` 设置；`Some(Some("bogus"))` → InvalidUpstream（S-P2-7）。
+11. update_route 三态（C-P0-2）：`None` 不改列；`Some(None)` 清除 override；`Some(Some("vercel"))` 设置；F8 值域：`Some(Some("worker"))` 合法、`Some(Some(""))` 拒绝、`Some(Some("<已配置上游名>"))` 合法、`Some(Some("bogus"))`（非配置名）→ InvalidUpstream。
 12. `test_route`：对 `api.openai.com` 实测返回 `status=Some(401)` 且 `ok=true`（网络用例标记 `#[ignore]`，集成时 `cargo test -- --ignored` 跑；CI/门禁跑非网络用例）。
 13. `test_route` 上游未配置（C-P1-5）：edges 空表构造 → `Ok(ok=false, error=Some("upstream not configured"))`，非 Err。
 

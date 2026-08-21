@@ -2,14 +2,15 @@
 
 > 原则：每个里程碑结束时可验证、可演示；后端先行，客户端跟进。
 
-## M1 后端强化（数据面鉴权 + 管理面 + 存储）— 预计 1.5 天
-- [ ] token 模型（哈希存储、路径鉴权 `/{token}/{route}/...`、header 兼容）
-- [ ] 管理面 REST API：tokens/routes/usage/health CRUD
-- [ ] SQLite 落地（tokens/routes/usage_hourly），config.json 迁移导入
-- [ ] per-route/per-token 请求与字节计数（实时内存 + 每小时落库）
-- [ ] 路由自动上游选择 + override
-- [ ] 现有 7 路由迁移验证（doctor 全绿）
+## M1 后端强化（数据面鉴权 + 管理面 + 存储）— ✅ 已完成（2026-08-21）
+- [x] token 模型（哈希存储、路径鉴权 `/{token}/{route}/...`、header 兼容）
+- [x] 管理面 REST API：tokens/routes/usage/health CRUD
+- [x] SQLite 落地（tokens/routes/usage_hourly），config.json 迁移导入
+- [x] per-route/per-token 请求与字节计数（实时内存 + 每小时落库）
+- [x] 路由自动上游选择 + override
+- [x] 现有 7 路由迁移验证（集成脚本 m1_test.sh 全绿；离线模式 52 断言）
 **验收**：curl 带 token 走通 openai/zen；无 token 401；`/api/routes` 可增删路由并即时生效
+（在线步骤 4/5 因 dev 服务器外网不可达按 T8 §1 离线子集口径验收）
 
 ## M2 CLI — 预计 1 天
 - [ ] pony status / start / stop / restart

@@ -7,11 +7,13 @@
 ```
 客户端 SDK (base_url 指向网关)
   → pony-server (dev 服务器, systemd 常驻, 127.0.0.1:8899)
+      ├─ token 鉴权（SQLite，路径模式 /{token}/{route}/... 或 header X-Pony-Token）
       ├─ anthropic/google/github/x/facebook → CF Worker  (edge.ponyjob.top)
       └─ openai/opencode                   → Vercel 函数 (vedge.ponyjob.top, AWS 出口)
 ```
 
-- 数据面协议：HTTP 网关模式（`/{route}/*path` → 上游 `?url=` 转发），非 CONNECT 隧道
+- 数据面协议：HTTP 网关模式（`/{token}/{route}/*path` → 上游 `?url=` 转发），非 CONNECT 隧道（CONNECT 一律 403）
+- 路由/token/用量存 SQLite（`~/.pony/state.db`），路由增删热生效；首次启动自动从 config.json `routes` 键迁移导入
 - 上游密钥 `X-Proxy-Secret` 仅存服务器，客户端无感
 
 ## 快速开始
@@ -20,16 +22,25 @@
 # 服务管理
 sudo systemctl status pproxy
 
+# 创建数据面 token（明文仅返回一次）
+curl -X POST http://127.0.0.1:8900/api/tokens \
+  -H "Authorization: Bearer <admin_token>" -H "Content-Type: application/json" \
+  -d '{"name":"my-laptop"}'
+
 # 使用（示例：Anthropic）
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8899/anthropic
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8899/<token>/anthropic
 export ANTHROPIC_API_KEY=<your-key>
 
-# 健康检查
-curl http://127.0.0.1:8899/
-curl http://127.0.0.1:8900/stats
+# 健康检查（管理面）
+curl http://127.0.0.1:8900/api/health -H "Authorization: Bearer <admin_token>"
 ```
 
+- admin_token：首启日志打印一次，或以 `PPROXY_ADMIN_TOKEN` 环境变量注入
+- 完整协议见 [docs/ops/API.md](docs/ops/API.md)
+
 ## 当前路由
+
+路由存 SQLite 热管理（`/api/routes` 增删改即时生效）。初始 7 路由由 config.json 迁移：
 
 | 路由 | 目标 | 上游 |
 |------|------|------|
@@ -57,12 +68,13 @@ curl http://127.0.0.1:8900/stats
 ## 代码结构
 
 ```
-crates/core/    # EdgeClient（上游转发协议）、代理池（已停用）、relay
-crates/server/  # 数据面网关 + stats API
+crates/core/    # store（SQLite）/token/route/usage/EdgeClient（上游转发协议）
+crates/server/  # 数据面网关（gateway）+ 管理 API（api）
+scripts/        # m1_test.sh 集成门禁 + echo stub
 deploy/cf-worker/   # CF Worker（edge.ponyjob.top）
 deploy/vercel/      # Vercel 函数（vedge.ponyjob.top）
 deploy/hf-space/    # 已废弃（免费层不含 Docker）
-config.json     # 运行配置（路由、上游、密钥）
+config.json     # 运行配置（上游、密钥；路由已迁 SQLite，勿提交）
 systemd/        # pproxy.service
 .secrets.env    # 凭据（chmod 600，勿提交）
 ```
