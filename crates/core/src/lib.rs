@@ -3,6 +3,7 @@ pub mod check;
 pub mod pool;
 pub mod relay;
 pub mod edge;
+pub mod route;
 pub mod store;
 pub mod token;
 pub mod usage;
