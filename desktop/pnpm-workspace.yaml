@@ -1,6 +1,8 @@
 # 单包工程：pnpm 11 设置项（package.json 的 pnpm 字段已废弃；
 # onlyBuiltDependencies 已更名 allowBuilds，strictDepBuilds 默认 fatal）
+# 注意：安装失败时 pnpm 会自动追加 "xxx: set this to true or false" 提示行，
+# 需手工清理为显式布尔值
 allowBuilds:
   vue-demi: true
   esbuild: true
-  msw: set this to true or false
+  msw: true
