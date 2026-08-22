@@ -19,6 +19,7 @@ import {
   saveBackendUrl,
   savePollIntervalMin,
 } from '@/lib/config'
+import { normalizeBaseUrl, normalizeToken } from '@/lib/normalize'
 
 const router = useRouter()
 
@@ -55,6 +56,8 @@ async function tokenFromStore(): Promise<string | null> {
 async function testConnection(): Promise<void> {
   testing.value = true
   testResult.value = ''
+  url.value = normalizeBaseUrl(url.value)
+  tokenInput.value = normalizeToken(tokenInput.value)
   const prevUrl = url.value
   saveBackendUrl(prevUrl)
   setBaseUrlProvider(() => prevUrl)
@@ -74,6 +77,8 @@ async function testConnection(): Promise<void> {
 
 async function save(): Promise<void> {
   saved.value = false
+  url.value = normalizeBaseUrl(url.value)
+  tokenInput.value = normalizeToken(tokenInput.value)
   saveBackendUrl(url.value)
   if (tokenInput.value) await saveAdminToken(tokenInput.value)
   savePollIntervalMin(pollMin.value)
