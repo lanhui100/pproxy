@@ -31,10 +31,12 @@
 **验收**：人为调低阈值触发告警；Dashboard 数据源就绪
 （集成脚本 m3_test.sh 离线 stub 口径全绿：7 步 23 断言——cf pct≈85/sources 健康口径/告警不重发/read 幂等/401/prod_guard；workspace 测试 80+23 全绿零警告，m1/m2 无回归。生产真实凭据注入属 R2 手动步骤，待用户提供 CF_API_TOKEN/accountTag 后按 systemd EnvironmentFile 步骤启用）
 
-## M4 公网入口（CF Tunnel）— 预计 0.5 天
-- [ ] cloudflared 安装 + tunnel 配置（access.ponyjob.top → :8899）
-- [ ] 外网手机（热点）实测数据面 + 国内可达性
-**验收**：手机 4G 网络下 SDK 经 access.ponyjob.top 调用 zen 成功
+## M4 公网入口（CF Tunnel）— ✅ 服务端完成（2026-08-22）；手机端验收按裁决顺延至 M5 后
+- [x] cloudflared 安装 + tunnel 配置（access.ponyjob.top → :8899，pony-tunnel.service 托管，协议钉死 http2）
+- [x] m4_test.sh 服务端全链路 smoke：27 断言全绿且幂等（三重断言+停隧道对照负例+e2e token 生命周期闭环）
+- [x] 附带修复：生产过期二进制（无鉴权）、gateway header 模式恒 401 缺陷、m2 doctor 门禁假阳性（误打生产实例）
+- [ ] 手机 4G 实测 —— **用户裁决（2026-08-22）：非阻塞项，顺延至 M5 Windows 端验收后一并安排**
+**验收**：服务端口径已闭环；真机口径待上述顺延项执行后补录
 
 ## M5 Windows 桌面端（Tauri 2）— 预计 3-4 天
 - [ ] 脚手架：Tauri 2 + React + shadcn/ui，管理 API client
