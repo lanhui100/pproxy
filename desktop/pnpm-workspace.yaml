@@ -1,4 +1,5 @@
-# 单包工程：pnpm 11 设置项迁移至此（package.json 的 pnpm 字段已废弃）
-onlyBuiltDependencies:
-  - vue-demi
-  - esbuild
+# 单包工程：pnpm 11 设置项（package.json 的 pnpm 字段已废弃；
+# onlyBuiltDependencies 已更名 allowBuilds，strictDepBuilds 默认 fatal）
+allowBuilds:
+  vue-demi: true
+  esbuild: true
