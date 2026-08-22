@@ -1,159 +1,165 @@
 # M6 任务级 Specs — 系统级白名单代理（桌面隧道通道）
 
-> 上游: [ROADMAP M6](../../ROADMAP.md) | 状态: 待审核 | 日期: 2026-08-22
+> 上游: [ROADMAP M6](../../ROADMAP.md) | 状态: 已审核（2026-08-22 对抗评审 F1-F23 → R1-R8 回填；**开工前置 P0 spike 见 §0.1，结论可能推翻出口通道裁决**） | 日期: 2026-08-22
 >
-> 方向裁决（2026-08-22 用户立项）：产品从 SDK 网关升维为"自有可控的白名单代理"。**本 spec 修订 ADR-001 的适用边界**：SDK 数据面维持 API 网关模式不变（CONNECT 拒绝仍成立）；新增的桌面隧道是**独立通道**（新协议/新端点），两者并存，产出物含 **ADR-008**。
+> 方向裁决（2026-08-22 用户立项）：产品从 SDK 网关升维为"自有可控的白名单代理"。修订 ADR-001 适用边界：SDK 数据面维持网关模式不变；新增桌面隧道为独立通道（ADR-008）。
 >
-> 关键前提裁决：
-> - **出口通道 = CF Worker WebSocket↔TCP 桥**（`cloudflare:sockets`）：TLS 端到端透传，Worker 全程只见密文（ADR-006 明文顾虑在此通道天然消失）
-> - **MITM 明确不做**：不解密任何流量，白名单按 CONNECT 目标 host 判定
-> - **分发复用**：桌面端改动随 pony-desktop 常规版本发布（v0.3.0 起），更新走既有自更新链路
+> 审核裁决摘要：
+> - **R1（P0 前置 spike）**：Workers 免费计划单次调用 **10ms CPU** 上限对 WS↔TCP relay 拷贝型负载是真实威胁（视频吞吐为最坏负载）；实现前必须完成"单隧道拉 1080p ≥10 分钟"spike 并回填数据；若撑不住则重裁出口通道（$5 paid / 替代出口）。另：同账户下 gate 与 edge **共享免费额度**（日请求/CPU），存在互挤风险须登记。
+> - **R2**：凭据统一为**独立 tunnel_token**（哈希入 wrangler secret）：收益=泄漏面隔离+轮换不伤 SDK；代价=worker 仅持哈希无在线撤销能力（轮换走重部署分钟级窗口）——取舍成文。明文仅经 keyring，严禁与 whitelist.json 同目录落盘。§2/§3 全文同步，删除"吊销即时生效"表述。
+> - **R3**：白名单种子补 `googlevideo.com`（YouTube 视频流）、`githubassets.com`、`googleusercontent.com`——否则验收场景必然假失败；验收前置子资源域名清点。
+> - **R4**：PAC 返回串钉死格式：命中条目返回**单条 `PROXY 127.0.0.1:18900`，禁止 DIRECT 兜底**（防隧道失败静默裸连的安全错觉）；kill 引擎反证测试并入清单。
+> - **R5**：私网防护显式声明依赖 workerd 平台层解析后 IP 阻断（引用官方文档），sanitize 测试扩充变形集（IPv6 字面量/十进制 IP/八进制/末尾点）。
+> - **R6**：手动模式降格为实验性：ProxyOverride 默认写 `<local>`+内网段排除；Firefox 不读 WinINET 的边界写入验收声明。
+> - **R7**：connect() 测试 spike（vitest-pool-workers 可行性）结论回填 §9.5；mock 层与平台层证明力分层表述。
+> - **R8**：ACL 默认仅 443（80 需显式开关，避免明文透传复活 ADR-006 顾虑）；gate 日志 host 哈希化；轮换停机窗口明示。
 
 ## 0. 现状探测结论（2026-08-22 实测/查证）
 
 | 项 | 结论 | 来源 |
 |----|------|------|
-| `cloudflare:sockets` 可行性 | GA 能力：`connect(host, port)` 可出站 443，社区大规模验证（Workers 承载代理协议） | 官方文档 + 实践 |
-| **CF 自家托管站点禁止直连** | 出站到 Cloudflare IP 段被设计性阻断 → **白名单中"托管在 CF 的域名永远连不通"**（如部分 AI 站） | 官方 Considerations 原文 |
-| 其他禁则 | localhost/私网 IP 禁止；25 端口禁止；TCP 回环检测（Worker→自身） | 同上 |
-| 并发上限 | 免费版存在同时打开连接数上限（个位数，精确值实现期实测钉住）；HTTP/2 多路复用使"每域名一条隧道"成为常态，单用户浏览场景可控 | 官方 limits 页 |
-| 现有 edge worker | 单文件 fetch 代理（deploy/cf-worker/worker.js，X-Proxy-Secret 鉴权，wrangler.toml 就绪） | 实测 |
-| 桌面端 | v0.2.x 已有 updater/keyring/notification/http 插件底座；无本地代理能力 | 实测 |
-| 国内可达 | edge.ponyjob.top 经 CF 边缘可达已被长期验证；wss 与 https 同源同路径特征 | 生产先例 |
+| `cloudflare:sockets` 可行性 | GA：`connect(host, port)` 可出站 443，社区大规模验证 | 官方文档 |
+| **CF 自家托管站点禁止直连** | 出站到 CF IP 段被设计性阻断 → 白名单中此类域名永远连不通 | 官方 Considerations |
+| 其他禁则 | localhost/私网字面量禁止（解析后 IP 由 **workerd 平台层强制**，R5 声明依赖）；25 端口禁止；TCP 回环检测 | 同上 |
+| **CPU 限制（R1 核心）** | 免费计划**每次调用 10ms CPU**（付费 30s 起）；WS↔TCP relay 的每帧内存拷贝计 CPU，视频吞吐为最坏负载；idle 等待不计费救不了拷贝 | Workers Limits 页 |
+| **额度账户级共享（F2）** | gate 与 edge 生产 worker 共享同账户的日请求数/CPU 额度——互挤风险成立，edge 承载全部生产 SDK 流量 | 平台计费模型 |
+| 并发连接数 | 社区流传"个位数"可能已过时（2026-04 有放宽 changelog）；精确值以当前 limits 页实测钉住 | 待实测 |
+| 现有 edge worker | 单文件 fetch 代理（X-Proxy-Secret 鉴权，wrangler custom_domain 部署） | deploy/cf-worker/ |
+| 桌面端底座 | updater/keyring/notification/http 插件就绪；无本地代理能力 | v0.2.x 实测 |
+
+## 0.1 P0 前置 spike（实现开工闸门，R1）
+
+在写任何产品代码之前完成，结论写进 ADR-008：
+
+| Spike | 方法 | 通过标准 |
+|-------|------|---------|
+| S1 吞吐/CPU | 最小 gate worker + 单条 WS 拉 YouTube 1080p 视频 ≥10 分钟 | 无 CPU limit 错误、吞吐无明显衰减、CF Dashboard CPU 曲线留档 |
+| S2 并发 | 单站点页面加载 + 多站点并行，观测同时连接数峰值 vs 免费上限 | 峰值 < 上限 × 50% 或明确排队策略可行 |
+| S3 日请求基线 | 统计 edge 生产 worker 当前日请求量 | gate 预估增量 < 剩余额度 × 30%，否则评估 paid/独立账户 |
+| S4 connect() 测试可行性 | vitest-pool-workers 最小 connect() 用例跑通或证伪 | 结论决定 §9.5 自动化范围 |
+
+S1 失败的处理：升级 $5 paid 重测一轮；仍失败则回到用户重新裁决出口方案（spec 作废重写）。**S1 未出结论前不写一行产品代码。**
 
 ## 1. 目标与范围
 
-Windows 上实现**白名单式系统代理**：用户在 GUI 维护域名白名单（如 `youtube.com`、`github.com`），命中流量的 TLS 密文经 CF Worker 隧道从海外出口透传；未命中流量本机直连、不经任何代理组件。
+Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命中流量的 TLS 密文经 CF Worker 隧道从海外透传；未命中流量本机直连、不经任何代理组件。
 
-验收场景（ROADMAP 原文化）：Windows 浏览器开启代理开关后，youtube.com/google.com 正常播放/搜索；非白名单网站（如 baidu.com）确认不走隧道（服务器侧日志零命中）。
+验收场景：Windows 浏览器（Edge/Chrome，**Firefox 不读 WinINET 系统代理——超出本里程碑边界声明**，R6/F7）开启代理后 youtube.com 正常播放、google.com 正常搜索；非白名单网站确认不走隧道（证据链见 §9 反例口径）。
 
-不在范围内：
-- **MITM**：不解密 TLS（白名单按目标 host 判定足够，证书告警/隐私风险为零收益）
-- macOS/Linux 客户端、移动端（P2）
-- 全局 VPN 模式（exit node 已由 Tailscale 承担，与本产品正交）
-- UDP/QUIC 代理（浏览器对代理后的站点自动回落 TCP/TLS，HTTP/3 被禁用是业界通行做法）
-- 服务端带宽/流量计费（CF 免费额度 + 配额告警沿用现有 monitor）
+不在范围内：MITM；macOS/Linux/移动端；全局 VPN（Tailscale 正交）；UDP/QUIC 代理（浏览器自动回落 TCP）；流量计量计费（告警≠计量，配额告警沿用 monitor）；80 端口明文透传（默认禁用，见 §3 ACL）。
 
 ## 2. 架构
 
 ```
-[Windows] pony-desktop v0.3.0（新增本地代理引擎，嵌入应用进程）
-   ├─ 引擎监听 127.0.0.1:18900（HTTP 代理语义：absolute-form + CONNECT）
-   ├─ PAC 服务 http://127.0.0.1:18900/pac （白名单粗筛：命中→PROXY 127.0.0.1:18900，否则 DIRECT）
-   ├─ 系统代理两种模式：PAC 模式（推荐）/ 手动模式（全量进引擎二次分流）
-   ├─ 分流判定：host 后缀匹配白名单 → 是：WS 隧道；否：本机直接 dial
-        │ wss://gate.ponyjob.top/ws （Authorization: Bearer <pony-token>）
+[Windows] pony-desktop v0.3.0（本地代理引擎嵌入进程）
+   ├─ 引擎监听 127.0.0.1:18900（CONNECT + absolute-form；端口已在 Windows 本机专用约定中登记，F11）
+   ├─ PAC 服务 /pac（命中→单条 PROXY 无兜底；未命中→DIRECT；格式钉死见 §5，R4）
+   ├─ 系统代理模式：PAC（推荐）/ 手动（实验性，Override=<local>+内网排除，F7）
+   ├─ 分流：host 后缀匹配 → 是：wss 隧道；否：本机 dial
+        │ wss://gate.ponyjob.top/ws （Authorization: Bearer <tunnel_token>）
         ▼
-[CF Worker] gate worker（新部署，独立于 edge 生产通道 —— 故障隔离）
-   ├─ 校验 Bearer（复用 pony 数据 token，Tokens 页统一管理）
-   ├─ 首帧 JSON {"host":"www.youtube.com","port":443} → ACL 校验（仅 80/443）
-   ├─ cloudflare:sockets connect(host, port) ──▶ 目标站（TLS 字节透传，不解密）
+[CF Worker] gate worker（新部署，独立于 edge；账户级额度共享风险见 §10）
+   ├─ Bearer 校验（TUNNEL_TOKEN_HASH，sha256(tunnel_token)）
+   ├─ 首帧 {"host","port":443} → ACL → connect() TLS 字节透传
    ▼
-[youtube.com 等]
+[目标站]
 ```
 
-- **独立 worker + 独立主机名 `gate.ponyjob.top`**（ADR-003 中性命名）：不碰 edge 生产通道（所有 SDK 流量经此），故障隔离优先于少一个部署面。
-- 本地引擎为**纯 TCP 分流器**：CONNECT 取目标 host；absolute-form HTTP 取 Host 头。白名单命中与否都只是"换一条 TCP 出口"，无协议转换、无缓存、无解密。
-- 引擎嵌入 pony-desktop 进程（tokio 任务），托盘开关控制"系统代理总开关"（写/还原 WinINET 注册表 + 启停引擎）。
+- 引擎为纯 TCP 分流器：无协议转换、无缓存、无解密。
+- 托盘开关 = 总开关（WinINET 写/还原 + 启停引擎）。
 
-## 3. 协议规格（WS 隧道）
+## 3. WS 协议规格
 
 | 项 | 规格 |
 |----|------|
 | 端点 | `wss://gate.ponyjob.top/ws` |
-| 鉴权 | Upgrade 请求头 `Authorization: Bearer <pony-data-token>`（401 拒绝；token 复用现有 Tokens 页凭据，吊销即时生效） |
-| 首帧 | 客户端发文本帧 `{"host":"…","port":443}`；服务端校验 port ∈ {80,443}、host 非空非私网字面量 → 回 `{"ok":true}` 或 `{"ok":false,"reason":"…"}` 后关闭 |
-| 数据帧 | 二进制帧双向透传（CF 默认单帧上限内分块） |
-| 心跳/超时 | 服务端 30s ping、5min 空闲关闭；客户端断线自动重建（浏览器侧表现为连接刷新） |
-| 并发 | 每 CONNECT 一条 WS（HTTP/2 多路复用下每站点通常 1 条）；客户端设全局并发上限 32，超出排队 |
+| 鉴权 | Upgrade 头 `Authorization: Bearer <tunnel_token>`；服务端 sha256 后比对 TUNNEL_TOKEN_HASH；失败 401 关闭 |
+| 首帧 | 文本帧 `{"host":"…","port":443}`；ACL 校验后回 `{"ok":true}` / `{"ok":false,"reason":"…"}` 后关闭 |
+| ACL | **port 仅允许 443**（80 明文透传默认禁用，需显式配置开关才放行——R8/F12）；host 经归一化后拒绝空值/私网与 CF 字面量（解析级校验视 S4 spike 决定，平台依赖声明见 §7/R5） |
+| 数据帧 | 二进制双向透传（背压处理见 §5 工程规格） |
+| 心跳/超时 | 服务端 30s ping、5min 空闲关闭；**进行中连接失败即向浏览器报错，不透明恢复；新 CONNECT 自动按当前配置重试**（F14 措辞修正） |
+| 凭据语义（R2） | tunnel_token 为独立凭据：泄漏面隔离、轮换不影响数据 token；**代价=worker 仅持哈希、无在线撤销检查**，轮换=服务器生成新 token → wrangler secret 更新（分钟级停机窗口，双活方案 P2）→ GUI 重新录入；**明文仅存 keyring，严禁落盘至 whitelist.json 同目录** |
 
 ## 4. 白名单语义与数据模型
 
-- 匹配规则：**域名后缀匹配**——条目 `youtube.com` 命中 `youtube.com` 与 `*.youtube.com`；不含路径/通配符语法（保持心智简单）
-- 存储：`%APPDATA%/pony-desktop/proxy-whitelist.json`（本地资产，不上服务器——仅本设备路由语义）；格式 `{"entries":["youtube.com","github.com"],"updated_at":…}`
-- GUI：新页面 **Proxy**——白名单 CRUD + 总开关 + 当前状态（引擎运行/系统代理生效中）+ 导入/导出
-- 预置种子：首次启用时预填 `github.com`、`google.com`、`youtube.com`、`gstatic.com`、`googleapis.com`、`ytimg.com`、`ggpht.com`（覆盖三大站的资源域，避免"主站通而图片挂"）
+- 匹配：域名后缀匹配（条目 `youtube.com` 命中自身与全部子域）；输入规范化（大小写折叠、末尾点剥离、IDN→punycode 归一、拒绝前导点条目，F15 用例覆盖）
+- 存储：`%APPDATA%/pony-desktop/proxy-whitelist.json`（本地资产）；`{"entries":[…],"updated_at":…}`
+- GUI：新 **Proxy** 页——CRUD + 总开关状态 + 导入导出 + 条目连通性标记（失败提示可能为 CF 托管站）
+- 预置种子（R3/F3 补齐）：`github.com`、`google.com`、`youtube.com`、**`googlevideo.com`**（YouTube 视频流域，缺失=视频转圈假故障）、**`githubassets.com`**、**`googleusercontent.com`**、`gstatic.com`、`googleapis.com`、`ytimg.com`、`ggpht.com`
+- 验收前置任务：三大站子资源域名清点（DevTools 过滤非直连域名），结果回填种子表
 
 ## 5. 本地代理引擎规格
 
 | 项 | 规格 |
 |----|------|
-| 监听 | `127.0.0.1:18900`（仅回环；端口常量避开既有段） |
-| CONNECT | 解析 host:port → 分流判定 → 隧道或直连；返回 `200 Connection Established` |
-| absolute-form | 读 Host 头分流；请求体原样转发（罕见路径，尽力而为） |
-| PAC 端点 | `/pac` 返回由当前白名单动态生成的 PAC 脚本（FindProxyForURL 后缀匹配同 §4 规则） |
-| 系统代理写入 | PAC 模式：WinINET 设 PacUrl；手动模式：ProxyServer=127.0.0.1:18900 + Override 留空；关闭时完整还原快照 |
-| 生命周期 | 托盘菜单：启用/停用/退出；随主程序退出自动还原系统代理设置（防"退出后断网"经典事故） |
-| 失败语义 | 隧道建立失败（Worker 不可达/token 失效/目标被 CF 禁）→ 关闭该 CONNECT 并让浏览器报错；**绝不静默回落直连**（防"以为在走代理实际裸连"的安全错觉，UI 有明确错误计数） |
+| 监听 | `127.0.0.1:18900`（Windows 本机专用端口登记） |
+| CONNECT | 解析 host:port → 分流 → 隧道或直连 + `200 Connection Established` |
+| absolute-form | 读 Host 头分流；尽力而为（现代浏览器 HTTPS 场景几乎不触达） |
+| PAC 端点 | `/pac` 动态生成；**返回串格式钉死（R4/F5）：命中 → `return "PROXY 127.0.0.1:18900";`（无 DIRECT 兜底）；未命中 → `return "DIRECT";`** |
+| 系统代理写入（F10） | PAC 模式设 AutoConfigURL；手动实验模式设 ProxyServer + Override=`<local>`+内网段排除；写入后广播 `WM_SETTINGCHANGE("Internet Settings")` + `InternetSetOption(REFRESH)`；快照还原区分"用户原本自设代理"（还原原值而非清零），崩溃修复同时处理 ProxyEnable 与 AutoConfigURL 两套键 |
+| 工程细节（F10） | TCP connect 显式超时；keepalive 半开检测；WS↔TCP 双向拷贝用带容量 channel 做背压（禁 unbounded OOM）；关停顺序=先还原系统代理再停引擎 |
+| 生命周期 | 托盘启用/停用/退出；退出钩子还原系统代理 + 下次启动检测残留并修复 |
+| 失败语义 | 隧道失败 → 关闭该 CONNECT 让浏览器报错 + UI 错误计数；**绝不静默回落直连** |
 
-## 6. Worker 改造规格（新 gate worker）
+## 6. Worker 改造规格（deploy/cf-gate-worker/）
 
-```js
-// gate worker 核心流程（deploy/cf-gate-worker/）
-export default {
-  async fetch(request, env) {
-    if (url.pathname !== "/ws") return404
-    if (request.headers.get("Upgrade") !== "websocket") return400
-    if (!await verifyToken(request.headers.get("Authorization"), env)) return401  // 复用 Tokens 表哈希校验?
-    const { host, port } = 首帧JSON
-    aclCheck(port ∈ {80,443}) && 私网/CF字面量拒绝
-    const sock = connect({ hostname: host, port })
-    return WebSocketPair 双向 pipe（背压用 ws sender 原生机制）
-  }
-}
-```
-
-- **token 校验方式**：worker 内嵌 SHA-256 校验逻辑与 pproxy 一致——但 worker 无法读服务器 SQLite！方案：env 注入**专用隧道 token 的哈希**（部署时由服务器生成随机 token 并同步给 GUI/服务端两侧；独立于数据 token，泄漏影响面更小）。Tokens 页展示该隧道凭据状态（只读）。此为 §4 的修正：**不复用数据 token**，改用独立 `tunnel_token`（生成/轮换走 GUI Settings 按钮 + 服务端 env 更新，spec 评审可挑战）。
-- 变量：`TUNNEL_TOKEN_HASH`（wrangler secret）
-- 可观测：每连接 log 一行（时间/host/时长/上下行字节），配合 CF Analytics 看用量
+- 流程：/ws 校验 Bearer→sha256 比对 env.TUNNEL_TOKEN_HASH→首帧 ACL→connect()→WebSocketPair 双向 pipe（背压感知）
+- 可观测：每连接记录 `{ts, host_hash, port, duration, up_bytes, down_bytes}`——**host 只记 SHA-256 前 16 字节**（浏览画像隐私，F13），映射表仅存本地 GUI 供展示；observability 采样率固定 100%（DEPLOY.md 登记）
+- 部署：wrangler secret 注入 TUNNEL_TOKEN_HASH；route 绑定 gate.ponyjob.top
 
 ## 7. 安全
 
-- 防开放跳板：三重门——tailnet 之外的公网扫描者无 token 即 401；ACL 仅 80/443 且拒绝私网/CF 字面量；签名流量特征为 wss（与正常 Websocket 应用无异）
-- 凭据纪律：隧道 token 哈希入 wrangler secret 不入库不入日志；明文仅创建时展示一次（沿 M1 口径）
-- 引擎仅绑回环：局域网设备不可借用（想借=对方自己装 pony-desktop 入 tailnet）
-- ADR-008 记录：与 ADR-001 的边界区分（SDK 网关无 CONNECT ≠ 桌面隧道通道）+ CF 托管域名不可代理的限制声明
+- 三重门（修正后口径，R5/F6）：token 哈希门 + ACL 门（443-only、归一化校验）+ **私网阻断主防线=workerd 平台层解析后 IP 强制**——此为显式平台依赖而非自有设计，ADR-008 引用官方文档并声明"平台放宽即失效"的风险归属
+- 凭据纪律：TUNNEL_TOKEN_HASH 入 wrangler secret；tunnel_token 明文仅 keyring（硬约束）
+- ADR-008 必录三项（评审指定）：账户级额度共享边界（F2）、私网阻断的平台依赖（F6）、443-only 决策（F12）；另记明文字节全程不出设备边界的事实
+- 日志留存位置/期限：CF observability（平台保留期）+ 本地计数器（用户可清）
 
 ## 8. 部署与配合点
 
 | 步骤 | 谁 |
 |------|-----|
-| gate worker 部署（wrangler deploy + route 绑定 gate.ponyjob.top） | 需要 **CF API Token（Account.Workers Scripts:Edit + Zone.Workers Routes:Edit）**——用户配合点①（dashboard 创建，同 cfat_ 流程） |
-| 隧道 token 生成/下发 | 服务端生成 → GUI 展示一次 → wrangler secret 更新（脚本化） |
-| 桌面端发布 | 常规 tag 流程（v0.3.0） |
-| 白名单种子/托盘 | 随包交付 |
+| gate worker 部署（wrangler deploy + route/custom-domain 绑定） | 用户配合点①：CF API Token——scope 以 wrangler 实际要求核全（Workers Scripts:Edit + Zone 级 Routes/Custom Domains 权限，F16：创建前对照 wrangler 报错清单核全，避免返工） |
+| 隧道 token 生成/secret 更新 | 服务端脚本化（生成→keyring/GUI 展示一次→wrangler secret put） |
+| 桌面端发布 | 常规 tag 流程（v0.3.0，签名产物含 latest.json 自更新链） |
 
 ## 9. 测试清单
 
-自动化（能测的尽量测）：
-1. 白名单匹配器纯函数：后缀命中/未命中/大小写/端口变体/恶意输入
-2. PAC 生成器：快照测试（给定 entries → 脚本字符串）
-3. sanitize/ACL 纯函数：私网字面量、非 80/443、空 host
-4. 引擎集成（Rust tokio test）：起引擎 + mock WS 服务端 → CONNECT 白名单域名 → 断言字节透传；CONNECT 非白名单 → 断言直连 dial 发生；CONNECT 失败 → 断言无静默回落
-5. Worker 侧：wrangler 自带 vitest-pool-workers 对 ACL/鉴权分支单测（connect 本身 mock）
+自动化：
+1. 白名单匹配器：后缀命中/未命中/大小写/末尾点/IDN-punycode/前导点拒绝/恶意输入（F15）
+2. PAC 生成器快照测试：**断言输出不含 "DIRECT" 于命中分支**（R4 回归锚点）
+3. sanitize/ACL 纯函数：变形全集——IPv6 字面量 `[::1]`、十进制整数 IP `2130706433`、八进制 `0177.0.0.1`、末尾点、私网段各变体（F6/R5）
+4. 引擎集成（tokio test + mock WS 服务端）：白名单透传字节一致；非白名单断言发生本地 dial；隧道失败断言**无静默回落**；kill 引擎进程 → 浏览器侧必须报错（PAC 无兜底反证，R4）
+5. Worker 分支测试：ACL/鉴权纯函数全覆盖（connect 依赖注入 mock）——**证明力分层声明（R7/F9）：mock 层只证明逻辑，平台行为（CPU/连接限制）只能由 S1-S3 spike 与实机验收证明**
+6. 会话计数器：per-domain 直连/隧道计数正确累加并可导出
 
-手动验收（Windows 实机）：
-1. 开启代理 → 浏览器 youtube.com 视频播放、google.com 搜索正常
-2. baidu.com 正常访问且服务器 gate 日志零命中（直连证据）
-3. 关闭总开关 → 系统代理设置还原 → 一切直连
-4. token 错误时浏览器明确报错而非静默直连
-5. 休眠恢复/网络切换后自愈
+手动验收（Edge/Chrome 边界内，F7）：
+1. 开启代理 → youtube.com 视频播放（含 googlevideo 流域验证）、google.com 搜索
+2. **baidu.com 直连证据链（R8/F8 升级口径）**：本地会话统计导出显示 baidu 直连 N 次、隧道 0 次（gate 日志降为辅助证据）
+3. 关闭总开关 → 注册表还原（含 AutoConfigURL 快照分支）→ 一切直连
+4. token 错误 → 浏览器明确报错而非静默直连
+5. 休眠恢复/网络切换自愈；自更新重启窗口期浏览器报错属预期（注册表短暂指向重启中的引擎，F18）
+6. 手动实验模式（如启用）：非浏览器应用行为记录 + 内网地址不走引擎验证
+7. 卸载残留：系统代理设置与凭据清理路径验证（F18）
 
 ## 10. 风险与缓解
 
 | 风险 | 缓解 |
 |------|------|
-| **CF 托管域名无法代理**（设计性阻断） | 文档明示 + GUI 白名单条目加"最近连通性"标记（失败即提示可能为 CF 托管站）；后续可为这类站点评估 Vercel 侧透传（P2 探索） |
-| 免费版并发连接上限 | 每域名单连接（H2 复用）+ 客户端排队；实测钉住精确值后再定是否需要付费版 |
-| Worker 被扫描滥用 | Bearer 强制 + token 哈希 secret + monitor 配额告警沿用；异常流量在 CF Dashboard 可见 |
-| wss 特征被识别 | 与正常 WebSocket 应用同类特征；个人低流量规模下风险极低；不做主动对抗（超出个人工具定位） |
-| 退出/崩溃残留系统代理导致断网 | 引擎生命周期守卫：进程退出钩子 + 下次启动检测残留并修复（DEPLOY 文档含手工还原步骤） |
-| edge 生产通道回归风险 | gate 为完全独立 worker，零共享代码路径；edge 不动 |
-| 用户配合点阻塞（CF Workers 部署凭据） | 同 M3-R2/M4 模式：自动化先行，凭据到位前挂起 |
+| **免费版 10ms CPU 对 relay 拷贝型负载**（R1） | P0 S1 spike 前置；失败则 paid/换出口重裁——不带着侥幸心理开工 |
+| **gate/edge 账户级额度互挤**（F2） | S3 基线核查 + ADR-008 登记共享边界；必要时 gate 迁独立账户/paid |
+| CF 托管域名无法代理 | 文档明示 + GUI 连通性标记；Vercel 侧透传 P2 探索 |
+| 免费并发连接上限（数值待 S2 实测） | H2 复用 + 排队 + 上限实测钉值 |
+| 被扫描滥用 | Bearer 哈希门 + ACL + monitor 配额告警（告警≠计量） |
+| wss 特征识别 | 个人低流量不做主动对抗 |
+| 系统/注册表残留断网 | 生命周期守卫（§5）+ DEPLOY 手工还原步骤 |
+| edge 回归 | gate 完全独立部署面；edge 不动 |
+| 配合点阻塞 | 凭据到位前自动化先行挂起（沿 M3-R2 模式） |
 
 ## 11. 验收标准
 
-- 自动化全绿（§9.1-9.5）+ desktop-gate/desktop-release CI 绿
-- 手动验收 §9 五项全过（含 baidu 直连零命中的反例证据）
-- 文档同步：ADR-008、TECH_DESIGN §2.5、ROADMAP M6 ✅、DEPLOY.md（gate worker 运维）、API.md 不涉及
-- 版本：pony-desktop v0.3.0；gate worker 独立版本号
+- P0 spike（S1-S4）结论文档化进 ADR-008 且通过标准全达成
+- 自动化全绿（§9.1-9.6）+ desktop-gate/release CI 绿
+- 手动验收 §9 全过（含 baidu 直连的本地计数器正向证据）
+- 文档同步：**ADR-008**（必录三项见 §7）、TECH_DESIGN §2.5、ROADMAP M6 ✅、DEPLOY.md（gate worker 运维/日志采样率/token 轮换 runbook）
+- 版本：pony-desktop v0.3.0（自更新链路交付）
+- 手机 4G 验收（M4 顺延项）仍挂起待用户安排
