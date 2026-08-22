@@ -65,3 +65,38 @@ sudo systemctl restart pproxy
 | 全路由体检 | （M2: pony doctor） | — |
 
 日志：`journalctl -u pproxy -f`
+
+## CF Tunnel 公网入口（pony-tunnel.service，M4）
+
+### 组件
+
+| 项 | 值 |
+|----|-----|
+| 二进制 | cloudflared（pkg.cloudflare.com apt 源，`/usr/local/bin/cloudflared`） |
+| 隧道 | `pony-access`（UUID 见 `~/.cloudflared/config.yml`） |
+| 凭据 | `~/.cloudflared/`（cert.pem + tunnel UUID.json + config.yml，均 dm/600，不入库） |
+| 配置模板 | `deploy/cloudflared/config.yml`（占位符 `<TUNNEL_ID>`） |
+| systemd | `systemd/pony-tunnel.service` → `/etc/systemd/system/`，User=dm |
+| 公网入口 | `https://access.ponyjob.top/{token}/{route}/...` |
+| metrics | `127.0.0.1:19099/metrics`（只读观测） |
+
+### 更新 / 重启
+```bash
+sudo systemctl restart pony-tunnel && sleep 5
+curl -s -o /dev/null -w '%{http_code}\n' https://access.ponyjob.top/openai/models   # 期望 401
+```
+
+### 回滚 / 卸载（公网入口关闭程序）
+```bash
+sudo systemctl disable --now pony-tunnel
+sudo rm /etc/systemd/system/pony-tunnel.service && sudo systemctl daemon-reload
+cd ~/pproxy && cloudflared tunnel route ip delete access.ponyjob.top   # 或 dashboard 删 CNAME
+cloudflared tunnel delete pony-access                                   # 需先确认隧道已停
+# 局域网路径不受影响：http://127.0.0.1:8899 照常服务
+```
+
+### 运维红线
+- **本机 WARP 与本隧道互斥**：`warp-cli connect` 会把 cloudflared 出站连接卷入 WARP 隧道（延迟/可达性全部污染）。两者只能二选一连接。
+- **禁止** `cloudflared service install`——会生成同名 root 权限 unit 覆盖加固配置；本机 unit 名为 `pony-tunnel.service` 即为规避。
+- 凭据命令（login/create/route dns）一律以 dm 身份执行，sudo 执行会产生 root 属主文件导致服务无限崩溃循环。
+- 平台限制：非流式请求 >100s 被 CF 边缘 524；请求体上限 ~100MB。长任务走 streaming。

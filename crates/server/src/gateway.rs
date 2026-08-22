@@ -92,18 +92,19 @@ pub async fn auth_middleware(
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
     let rest = path.strip_prefix('/').unwrap_or(&path).to_string();
 
-    let (token_plaintext, remaining) = split_first_segment(&rest);
-    let route_path: String =
-        if token_plaintext.starts_with(pproxy_core::token::TOKEN_PREFIX) {
+    let (first_seg, remaining) = split_first_segment(&rest);
+    // F-fix(m4)：token 与 route_path 必须同源绑定——header 模式此前只消费了
+    // 匹配结果却未把 header 值赋给 token，导致 verify 的是路径首段、header
+    // 模式恒 401（公网入口联调发现，路径模式不受影响）。
+    let (token_plaintext, route_path): (String, String) =
+        if first_seg.starts_with(pproxy_core::token::TOKEN_PREFIX) {
             // 路径模式：首段为 token 段（route 名创建时已禁 pony_ 前缀，T4 §6 无歧义）。
             // 首段以 pony_ 开头但无 header 也按路径模式处理（T3 §4.1 歧义规则）。
-            remaining.to_string()
+            (first_seg.to_string(), remaining.to_string())
         } else {
             // header 模式：首段即 route，token 取 X-Pony-Token
             match req.headers().get(X_PONY_TOKEN).and_then(|v| v.to_str().ok()) {
-                Some(t) if !t.is_empty() => {
-                    rest.clone()
-                }
+                Some(t) if !t.is_empty() => (t.to_string(), rest.clone()),
                 _ => return unauthorized(),
             }
         };
@@ -369,5 +370,105 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for RouterHy
 
     fn call(&self, req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
         Box::pin(tower::Service::call(&mut self.router.clone(), req.map(Body::new)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! 鉴权中间件回归（M4 公网入口联调发现 header 模式恒 401 的缺陷后补齐）：
+    //! 路径/双模式的 token 绑定正确性——此前自动化只覆盖路径模式成功路径。
+    use super::*;
+    use axum::http::Request;
+    use pproxy_core::{Store, UsageTracker};
+    use tower::ServiceExt;
+
+    /// 标准库临时目录建库（不引 tempfile 依赖，Cargo.toml 冻结）。
+    fn temp_store(tag: &str) -> Arc<pproxy_core::Store> {
+        let dir = std::env::temp_dir().join(format!("m4-gwtest-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (store, _) = Store::open(&dir.join("state.db")).unwrap();
+        Arc::new(store)
+    }
+
+    /// WHY 返回 TokenService 本体：缓存即全量权威快照（token.rs §5，cache miss
+    /// 不回库），token 必须经 router 持有的同一实例创建才能被 verify 命中。
+    fn build_router(tag: &str) -> (Router, Arc<TokenService>) {
+        let store = temp_store(tag);
+        let tokens = Arc::new(TokenService::new(Arc::clone(&store)).unwrap());
+        let routes = Arc::new(pproxy_core::RouteTable::new(
+            Arc::clone(&store),
+            Arc::new(HashMap::new()),
+        )
+        .unwrap());
+        let router = data_router(GatewayState {
+            tokens: Arc::clone(&tokens),
+            edges: Arc::new(HashMap::new()),
+            routes,
+            usage: Arc::new(UsageTracker::new(store)),
+        });
+        (router, tokens)
+    }
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// 局部命名 req_get：避免与模块级 axum::routing::get 歧义。
+    fn req_get(uri: &str, token_header: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method("GET").uri(uri);
+        if let Some(t) = token_header {
+            b = b.header(X_PONY_TOKEN, t);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    // ---- header 模式：有效 token 必须穿透鉴权层抵达路由解析（404 unknown_route）----
+
+    #[tokio::test]
+    async fn header_mode_valid_token_reaches_route_layer() {
+        let (router, tokens) = build_router("hdr-ok");
+        let (_, plaintext) = tokens.create_token("hdr-test", None).unwrap();
+        let resp = router.oneshot(req_get("/nosuchroute-x/v1/x", Some(&plaintext))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "header 模式有效 token 应穿过鉴权层");
+        assert!(body_string(resp).await.contains("unknown_route"));
+    }
+
+    // ---- 路径模式：同判据（防修复回归路径模式）----
+
+    #[tokio::test]
+    async fn path_mode_valid_token_unknown_route_404() {
+        let (router, tokens) = build_router("path-ok");
+        let (_, plaintext) = tokens.create_token("path-test", None).unwrap();
+        let resp = router.oneshot(req_get(&format!("/{plaintext}/nosuchroute-x/v1/x"), None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(body_string(resp).await.contains("unknown_route"));
+    }
+
+    // ---- 无效/缺失 token：401 同体（两种模式一致）----
+
+    #[tokio::test]
+    async fn invalid_and_missing_token_unauthorized_both_modes() {
+        let (router, _tokens) = build_router("neg");
+        // header 模式：无效值
+        let r1 = router.clone().oneshot(req_get("/openai/models", Some("pony_ffffffff"))).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_string(r1).await, r#"{"error":"unauthorized"}"#);
+        // header 模式：缺失头
+        let r2 = router.clone().oneshot(req_get("/openai/models", None)).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::UNAUTHORIZED);
+        // 路径模式：无效 token
+        let r3 = router.oneshot(req_get("/pony_00000000000000000000000000000000/openai/models", None)).await.unwrap();
+        assert_eq!(r3.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ---- 根路径 info 端点无鉴权（T3 §4.3 既有行为守卫）----
+
+    #[tokio::test]
+    async fn root_info_endpoint_no_auth() {
+        let (router, _tokens) = build_router("root");
+        let resp = router.oneshot(req_get("/", None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.contains("service"));
     }
 }

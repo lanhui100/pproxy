@@ -1,0 +1,26 @@
+# pony-tunnel.service — Cloudflare Tunnel 托管 pproxy 数据面公网入口（M4）
+#
+# WHY 改名 pony-tunnel 而非 cloudflared：规避与官方 `cloudflared service install`
+# 生成的同名 unit 冲突——后者以 root 运行且无加固，手滑执行会静默覆盖本文件
+# （R2/F3）。部署文档须同步写明禁用 `cloudflared service install` 子命令。
+#
+# 凭据经文件路径引用（~/.cloudflared/），本 unit 不含任何 secret（spec §4）。
+
+[Unit]
+Description=pony tunnel - Cloudflare Tunnel for pproxy data plane (access.ponyjob.top)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dm
+ExecStart=/usr/local/bin/cloudflared tunnel --config /home/USER/.cloudflared/config.yml run pony-access
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

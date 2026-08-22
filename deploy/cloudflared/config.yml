@@ -1,0 +1,18 @@
+# pony-access 隧道配置（M4，spec docs/product/specs/m4/README.md §3）
+# 模板占位符 <TUNNEL_ID> 由部署时替换为实际 tunnel-id；
+# 实际生效文件位于 ~/.cloudflared/config.yml（不入库）。
+#
+# protocol 钉死 http2（TCP）：大陆运营商 UDP 劣化风险，不依赖 QUIC 默认值（R3/F5）
+# metrics 显式绑回环：locally-managed 默认随机端口不可接受（F11）；19099 避开
+# 业务端口与 m1-m3 测试段 18893-18899
+tunnel: <TUNNEL_ID>
+credentials-file: /home/USER/.cloudflared/<TUNNEL_ID>.json
+protocol: http2
+metrics: 127.0.0.1:19099
+
+ingress:
+  # 唯一业务规则：仅数据面，管理面 8900 结构性隔离（spec §4）
+  - hostname: access.ponyjob.top
+    service: http://127.0.0.1:8899
+  # catch-all 兜底：未匹配域名一律 404
+  - service: http_status:404

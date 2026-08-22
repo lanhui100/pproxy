@@ -25,6 +25,17 @@ header 模式：    http://127.0.0.1:8899/{route}/{path}?{query}  +  Header: X-P
 - 决策规则（resolve 实时决策）：routes 表 `override_upstream` 列优先；否则按 host 规则——`api.openai.com`/`opencode.ai` → vercel，其余 → worker
 - `override_upstream` 可经管理 API PATCH 热改；`upstream` 列是创建时快照仅展示
 
+## 外部访问（M4 公网入口）
+
+```
+https://access.ponyjob.top/{token}/{route}/{path}      # 与局域网路径模式完全同构
+https://access.ponyjob.top/{route}/{path} + X-Pony-Token  # header 模式
+```
+- 链路：CF 边缘（TLS 终结）→ CF Tunnel（出站长连接，服务器零入站端口）→ 本机 :8899
+- 鉴权与错误语义同数据面；token 等同密码，禁止写入客户端持久日志/剪贴板同步
+- 平台限制（CF 免费层，Tunnel 不豁免）：非流式请求边缘等待 ~100s → 524；请求体上限 ~100MB；长任务必须 streaming
+- 运维细节见 DEPLOY.md「CF Tunnel 公网入口」
+
 ## 管理面（:8900，仅 127.0.0.1，Bearer admin_token）
 
 ```

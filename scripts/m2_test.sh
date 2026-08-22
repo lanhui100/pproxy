@@ -184,7 +184,16 @@ run_pony "export nosuch 退出码 1" "1" config export nosuch >/dev/null
 
 # ---- 步骤 12：doctor 通过；server 停后 status → 3 ----
 echo "[步骤 12] pony doctor + 不可达场景"
-OUT="$(run_pony "doctor 退出码 0" "0" doctor --probe-token "$PLAINTEXT")"
+# 修复 1（探测确定性）：gemini 指向真实外网上游，其根路径响应码在 403/404 间
+# 漂移（Google 按 POP/策略变化），而 doctor 的 probe_pass 恰好排除 401/403 ——
+# 门禁会非确定性失败。数据面闭环已在步骤 8 经 localstub 验证，禁用外网路由
+# 使 doctor 探测本地 stub。
+run_pony "route disable gemini（探测确定性前置）" "0" route disable gemini >/dev/null
+# 修复 2（探测目标错位，2026-08-22 M4 联调期暴露）：doctor 缺省按"同主机 :8899"
+# 推导数据面 —— 即生产实例！临时 token 打到生产库必 401。此前该门禁通过纯属
+# 假阳性（旧生产二进制无鉴权、未知路径回 404 被 probe_pass 放行）。显式传
+# --data-plane 指向本测试的临时数据面，门禁才真正成立。
+OUT="$(run_pony "doctor 退出码 0" "0" doctor --probe-token "$PLAINTEXT" --data-plane "http://$DATA_ADDR")"
 expect_contains "$OUT" "0 failed" "doctor failed: 0"
 kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null || true
 SERVER_PID=""

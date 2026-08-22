@@ -1,12 +1,15 @@
 # 当前系统架构（现状）
 
-> 更新: 2026-08-21 | 状态: 生产运行中（dev 服务器）
+> 更新: 2026-08-22 | 状态: 生产运行中（dev 服务器）
 
 ## 拓扑
 
 ```
 [本机 SDK]
    │ http://127.0.0.1:8899/{route}/...
+[手机 4G SDK]（M4 公网入口）
+   │ https://access.ponyjob.top/{token}/{route}/...  ← CF 边缘 TLS 终结
+   ▼ CF Tunnel（cloudflared, systemd: pony-tunnel.service，出站 http2，零入站端口）
    ▼
 pproxy-server (Rust, systemd: pproxy.service)
    ├─ 数据面 :8899（网关分发）
