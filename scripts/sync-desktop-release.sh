@@ -15,6 +15,22 @@ mkdir -p "$DEST"
 echo "[sync] $TAG -> $DEST"
 gh release download "$TAG" --repo lanhui100/pproxy --dir "$DEST" --clobber
 
+# 改写 latest.json 内的资产地址：私仓 GitHub 直链对 updater 不可达（404），
+# 指回本机 /dsk/ 分发端点（MagicDNS 名，节点重新认证才变更）
+python3 - "$DEST/latest.json" <<'PY'
+import json, sys, os
+path = sys.argv[1]
+d = json.load(open(path))
+prefix = f"https://github.com/lanhui100/pproxy/releases/download/{os.environ.get('TAG', '')}/"
+for plat in d.get("platforms", {}).values():
+    url = plat.get("url", "")
+    if url.startswith("https://github.com/"):
+        name = url.rsplit("/", 1)[-1]
+        plat["url"] = f"http://<tailnet-host>:8900/dsk/{name}"
+json.dump(d, open(path, "w"), indent=2)
+print("latest.json urls rewritten")
+PY
+
 echo "[sync] 内容清单："
 ls -la "$DEST"
 REQUIRED="latest.json"
