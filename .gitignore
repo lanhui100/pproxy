@@ -20,3 +20,6 @@ desktop/node_modules/
 desktop/dist/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+
+# M6 gate worker 本地依赖
+deploy/cf-gate-worker/node_modules/

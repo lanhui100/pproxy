@@ -163,3 +163,14 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 - 文档同步：**ADR-008**（必录三项见 §7）、TECH_DESIGN §2.5、ROADMAP M6 ✅、DEPLOY.md（gate worker 运维/日志采样率/token 轮换 runbook）
 - 版本：pony-desktop v0.3.0（自更新链路交付）
 - 手机 4G 验收（M4 顺延项）仍挂起待用户安排
+
+## 12. P0 Spike 执行记录（2026-08-22）
+
+| Spike | 结论 |
+|-------|------|
+| S4 connect() 测试可行性 | **证伪**：本机工具链（miniflare 5.20260820-alpha + workerd 1.20260820）对 WS 101 响应处理存在缺陷——旧式 `accept()` 后返回直接抛错；新式 `ctx.acceptWebSocket()` 下消息投递异常且 miniflare pretty-error 对 101 空响应体崩溃。结论：worker 自动化测试范围收敛为纯函数（ACL/鉴权/匹配器），WS 行为验证以真机为准；另发现新版运行时要求 `ctx.acceptWebSocket(server)` 替代手动 `accept()`（已迁移，生产代码就绪） |
+| S1 吞吐/CPU | **待部署后执行**：需真实 CF 边缘（本地 workerd 无法度量平台 CPU 计费）。测试台已就绪（scripts/spike-tunnel.mjs，TLS-over-tunnel 完整性由证书校验自然保证） |
+| S2 并发 | 待部署后执行（harness 支持 --concurrency） |
+| S3 日请求基线 | 已有数据：edge worker 今日 invocations=3642（GraphQL Analytics 实测），gate 预估增量远低于免费额度 |
+
+**下一步阻塞点**：CF API Token（Workers Scripts:Edit + Zone Routes 权限）→ gate worker 远程部署 → 执行 S1/S2。

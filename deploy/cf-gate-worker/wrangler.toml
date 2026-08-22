@@ -1,0 +1,10 @@
+# gate worker — 桌面隧道 WS↔TCP 桥（M6 spec §6）
+# 独立于 edge 生产通道；部署后经 dashboard 绑定自定义域 gate.ponyjob.top
+name = "pony-gate"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+[observability]
+enabled = true
+
+# TUNNEL_TOKEN_HASH 经 wrangler secret 注入（不入库）
