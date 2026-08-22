@@ -7,6 +7,7 @@
 //! 数据面热路径不触 Store（走内存缓存）。
 
 mod migrate;
+mod monitor;
 mod routes;
 #[cfg(test)]
 mod tests;
@@ -159,6 +160,8 @@ pub fn default_db_path() -> PathBuf {
 }
 
 // ---- 数据结构 ----
+
+pub use monitor::{AlertRow, MarkReadOutcome, QuotaSnapshotRow};
 
 #[derive(Debug, Clone)]
 pub struct TokenRow {

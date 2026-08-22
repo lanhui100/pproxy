@@ -45,9 +45,14 @@ Authorization: Bearer <admin_token>
 | `/api/routes/{name}/test` | POST | 连通性实测 `{ok, status?, latency_ms?, error?}`（10s 超时独立 client） |
 | `/api/usage` | GET | `?hours=24&route=&token_id=`（hours 限 1..=720）→ `{hours, since_hour, rows[{route,token_id,requests,bytes_in,bytes_out}], total}` |
 | `/api/health` | GET | `{status, routes{name:{enabled,upstream}}, tokens_active, db}`；DB 探测失败 → 500 |
-| `/api/alerts` | GET | 预留（M3 写入），当前恒 `{alerts:[]}` |
+| `/api/alerts` | GET | `?unread=1&limit=50`（limit 钳制 ≤500）→ `{alerts:[{id,ts,level,message,read_at}]}`，倒序；level ∈ {warning, critical} |
+| `/api/alerts/{id}/read` | POST | 标记已读 `{read:true}`；重复标记幂等 200（R4）；不存在 → 404 |
+| `/api/quota` | GET | `{snapshots:[{ts,upstream,metric,used,quota,pct}], sources:[{name,state,last_ok}]}`——snapshots 为每 (upstream,metric) 最新值；sources 状态 ∈ {ok,disabled,error,unsupported_plan}；quota=-1/pct=-1 为"未知上限"哨兵（Vercel Hobby 降级） |
 
 注：M0 的 `/stats`、`/refresh` 已随代理池停用一并下线。
+
+### 监控配置（M3，全环境变量，config.json 零改动）
+`PPROXY_CF_API_TOKEN`/`PPROXY_CF_ACCOUNT_TAG`（缺失 → cf 来源 disabled）、`PPROXY_VERCEL_TOKEN`/`PPROXY_VERCEL_TEAM_ID`、`PPROXY_ALERT_WEBHOOK_URL`（告警 POST `{event:"quota_alert", level, message, ts}`）、`PPROXY_ALERT_THRESHOLD_PCT`（默认 80，≥95 critical）、`PPROXY_POLL_INTERVAL_SEC`（默认 3600）；测试覆盖专用：`PPROXY_CF_GRAPHQL_URL`/`PPROXY_VERCEL_API_BASE`。
 
 ## 上游协议（服务器 ↔ 出口）
 

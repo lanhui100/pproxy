@@ -478,3 +478,129 @@ fn migrate_missing_config_no_legacy() {
         MigrationOutcome::NoLegacyRoutes
     );
 }
+
+// ==== M3 监控存储（spec §9.3：upsert/latest/mark_read/prune，tempfile 内存库）====
+
+use monitor::{MarkReadOutcome, QuotaSnapshotRow};
+
+fn quota_row(ts: u64, upstream: &str, metric: &str, used: i64, pct: f64) -> QuotaSnapshotRow {
+    QuotaSnapshotRow {
+        ts,
+        upstream: upstream.into(),
+        metric: metric.into(),
+        used,
+        quota: if pct < 0.0 { -1 } else { 100_000 },
+        pct,
+    }
+}
+
+// ---- M3.1 upsert：INSERT OR REPLACE 同主键覆盖不累加 ----
+
+#[test]
+fn upsert_quota_snapshot_replaces_same_pk() {
+    let (_dir, db) = temp_db("qup");
+    let store = Store::open(&db).unwrap().0;
+    store
+        .upsert_quota_snapshot(&quota_row(3600, "cf", "requests_daily", 10_000, 10.0))
+        .unwrap();
+    // 同 PK 二次写入：覆盖而非报错/累加
+    store
+        .upsert_quota_snapshot(&quota_row(3600, "cf", "requests_daily", 85_000, 85.0))
+        .unwrap();
+    let rows = store.latest_quota_snapshots().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].used, rows[0].pct), (85_000, 85.0));
+}
+
+// ---- M3.2 latest：每 (upstream,metric) 最新一条 ----
+
+#[test]
+fn latest_quota_snapshots_per_key() {
+    let (_dir, db) = temp_db("qlatest");
+    let store = Store::open(&db).unwrap().0;
+    store.upsert_quota_snapshot(&quota_row(3600, "cf", "requests_daily", 10, 0.01)).unwrap();
+    store.upsert_quota_snapshot(&quota_row(7200, "cf", "requests_daily", 20, 0.02)).unwrap();
+    store.upsert_quota_snapshot(&quota_row(3600, "vercel", "bandwidth", 30, -1.0)).unwrap();
+    store.upsert_quota_snapshot(&quota_row(7200, "vercel", "function_invocations", 40, -1.0)).unwrap();
+
+    let rows = store.latest_quota_snapshots().unwrap();
+    assert_eq!(rows.len(), 3, "cf 1 条 + vercel 2 键各 1 条");
+    assert_eq!(rows[0].upstream, "cf", "按 upstream 排序输出稳定");
+    assert_eq!(rows[0].ts, 7200, "取每键最新 ts");
+    let vercel_bw = rows.iter().find(|r| r.metric == "bandwidth").unwrap();
+    assert_eq!((vercel_bw.ts, vercel_bw.used), (3600, 30));
+}
+
+// ---- M3.3 insert/list：倒序、unread 过滤、limit ----
+
+#[test]
+fn alerts_insert_list_unread_and_limit() {
+    let (_dir, db) = temp_db("alerts");
+    let store = Store::open(&db).unwrap().0;
+    for i in 0..5 {
+        store.insert_alert(1000 + i as u64, "warning", &format!("alert-{i}")).unwrap();
+    }
+    let all = store.list_alerts(false, 500).unwrap();
+    assert_eq!(all.len(), 5);
+    assert_eq!(all[0].message, "alert-4", "倒序（最新在前）");
+
+    let limited = store.list_alerts(false, 2).unwrap();
+    assert_eq!(limited.len(), 2);
+    assert_eq!(limited[0].message, "alert-4");
+
+    // 标记两条已读后 unread 过滤
+    store.mark_alert_read(all[0].id).unwrap();
+    store.mark_alert_read(all[1].id).unwrap();
+    let unread = store.list_alerts(true, 500).unwrap();
+    assert_eq!(unread.len(), 3);
+    assert!(unread.iter().all(|a| a.read_at.is_none()));
+    assert_eq!(unread[0].message, "alert-2");
+    // 已读行 read_at 非空
+    let reread = store.list_alerts(false, 500).unwrap();
+    let marked: Vec<_> = reread.iter().filter(|a| a.read_at.is_some()).collect();
+    assert_eq!(marked.len(), 2);
+}
+
+// ---- M3.4 mark_alert_read 三态幂等（R4）----
+
+#[test]
+fn mark_alert_read_three_outcomes() {
+    let (_dir, db) = temp_db("markread");
+    let store = Store::open(&db).unwrap().0;
+    let id = store.insert_alert(42, "critical", "boom").unwrap();
+    assert_eq!(store.mark_alert_read(id).unwrap(), MarkReadOutcome::Marked);
+    assert_eq!(store.mark_alert_read(id).unwrap(), MarkReadOutcome::AlreadyRead);
+    assert_eq!(store.mark_alert_read(999_999).unwrap(), MarkReadOutcome::NotFound);
+    // AlreadyRead 路径不得覆盖首次 read_at
+    let row = &store.list_alerts(false, 500).unwrap()[0];
+    assert!(row.read_at.is_some());
+}
+
+// ---- M3.5 prune：usage 30 天 / quota 90 天保留策略 ----
+
+#[test]
+fn prune_usage_and_quota_by_cutoff() {
+    let (_dir, db) = temp_db("prune");
+    let store = Store::open(&db).unwrap().0;
+
+    // usage_hourly：ts_hour=0 与 3600 各一行（借 UsageRow 结构）
+    store
+        .upsert_usage(&[
+            UsageRow { ts_hour: 0, route: "r".into(), token_id: 1, requests: 1, bytes_in: 0, bytes_out: 0 },
+            UsageRow { ts_hour: 3600, route: "r".into(), token_id: 1, requests: 2, bytes_in: 0, bytes_out: 0 },
+        ])
+        .unwrap();
+    assert_eq!(store.prune_usage_before(3600).unwrap(), 1, "仅删除 < cutoff 的行");
+    let left_usage = store.query_usage(0, None, None).unwrap();
+    assert_eq!(left_usage.len(), 1);
+    assert_eq!(left_usage[0].ts_hour, 3600);
+    assert_eq!(store.prune_usage_before(u64::MAX / 2).unwrap(), 1, "全删返回计数");
+
+    // quota_snapshots：同口径
+    store.upsert_quota_snapshot(&quota_row(1000, "cf", "requests_daily", 1, 0.001)).unwrap();
+    store.upsert_quota_snapshot(&quota_row(2000, "cf", "requests_daily", 2, 0.002)).unwrap();
+    assert_eq!(store.prune_quota_before(2000).unwrap(), 1);
+    let left = store.latest_quota_snapshots().unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].ts, 2000);
+}

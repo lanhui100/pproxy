@@ -7,6 +7,8 @@ pub mod route;
 pub mod store;
 pub mod token;
 pub mod usage;
+pub mod quota;
+pub mod alert;
 
 pub use pool::Pool;
 pub use edge::{EdgeClient, ForwardRequest};

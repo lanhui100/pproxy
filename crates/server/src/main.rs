@@ -5,6 +5,7 @@
 
 mod api;
 mod gateway;
+mod monitor;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -76,6 +77,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // 5.5 M3 监控轮询：环境变量配置（config.json 零改动），缺失来源 disabled
+    //     仅 info 一行非错误；spawn 后句柄交 AdminState 供 /api/quota 读健康状态。
+    //     首 tick 立即采集且不丢弃（启动即采一轮）。
+    let monitor_cfg = monitor::MonitorConfig::from_env();
+    monitor_cfg.log_disabled();
+    let monitor = monitor::spawn_monitor(Arc::clone(&store), monitor_cfg);
+
     // 7a. 数据面 listener + accept 循环（CONNECT 拦截 + http1::Builder）
     let data_addr = if listen_data.is_empty() {
         format!("{}:{}", config.listen_host, config.listen_port)
@@ -96,6 +104,8 @@ async fn main() -> anyhow::Result<()> {
         tokens: Arc::clone(&tokens),
         routes: Arc::clone(&routes),
         usage: Arc::clone(&usage),
+        store: Arc::clone(&store),
+        monitor,
     };
     let admin_router = api::admin_router(admin_state);
     let admin_listener = TcpListener::bind(&listen_admin).await?;

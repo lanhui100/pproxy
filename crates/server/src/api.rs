@@ -13,10 +13,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use pproxy_core::route::Upstream;
-use pproxy_core::store::{RevokeOutcome, RouteRow, TokenRow};
+use pproxy_core::store::{MarkReadOutcome, RevokeOutcome, RouteRow, TokenRow};
 use pproxy_core::token::ADMIN_NAME;
 use pproxy_core::{RouteTable, TokenService, UsageTracker};
 use serde::Deserialize;
+
+use crate::monitor::MonitorHandle;
 
 /// 管理面共享状态。
 #[derive(Clone)]
@@ -24,6 +26,10 @@ pub struct AdminState {
     pub tokens: Arc<TokenService>,
     pub routes: Arc<RouteTable>,
     pub usage: Arc<UsageTracker>,
+    /// M3：alerts/quota 直查 store（比经 tokens 间接达更高内聚）。
+    pub store: Arc<pproxy_core::Store>,
+    /// M3：采集来源健康状态（monitor 任务写，此处只读）。
+    pub monitor: Arc<MonitorHandle>,
 }
 
 // ---- 固定文案常量（C-P1-7：单一出处，handler 禁止各自拼写） ----
@@ -123,6 +129,8 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/api/usage", get(usage_handler))
         .route("/api/health", get(health_handler))
         .route("/api/alerts", get(alerts_handler))
+        .route("/api/alerts/:id/read", post(mark_alert_read_handler))
+        .route("/api/quota", get(quota_handler))
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
         .with_state(state)
 }
@@ -591,7 +599,81 @@ async fn health_handler(State(st): State<AdminState>) -> Response {
         .into_response()
 }
 
-async fn alerts_handler() -> Response {
-    // M3: 读取 alerts 表
-    (StatusCode::OK, Json(serde_json::json!({ "alerts": [] }))).into_response()
+// ---- handler：alerts / quota（M3） ----
+
+#[derive(Deserialize)]
+struct AlertsQuery {
+    /// ?unread=1 仅未读
+    #[serde(default)]
+    unread: Option<u8>,
+    /// 默认 50，钳制 ≤500（spec §8）
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+async fn alerts_handler(State(st): State<AdminState>, Query(q): Query<AlertsQuery>) -> Response {
+    let unread_only = q.unread.map(|v| v != 0).unwrap_or(false);
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let store = Arc::clone(&st.store);
+    match tokio::task::spawn_blocking(move || store.list_alerts(unread_only, limit)).await {
+        Ok(Ok(rows)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "alerts": rows })), // AlertRow 已 Serialize，倒序
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "alerts query failed");
+            err_body(StatusCode::INTERNAL_SERVER_ERROR, ERR_INTERNAL)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "list_alerts spawn_blocking panic");
+            err_body(StatusCode::INTERNAL_SERVER_ERROR, ERR_INTERNAL)
+        }
+    }
+}
+
+/// POST /api/alerts/{id}/read：R4 三态幂等——Marked/AlreadyRead 均 200，
+/// NotFound → 404 not_found。
+async fn mark_alert_read_handler(State(st): State<AdminState>, Path(id): Path<i64>) -> Response {
+    let store = Arc::clone(&st.store);
+    match tokio::task::spawn_blocking(move || store.mark_alert_read(id)).await {
+        Ok(Ok(MarkReadOutcome::Marked | MarkReadOutcome::AlreadyRead)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "read": true })),
+        )
+            .into_response(),
+        Ok(Ok(MarkReadOutcome::NotFound)) => err_body(StatusCode::NOT_FOUND, ERR_NOT_FOUND),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "mark alert read failed");
+            err_body(StatusCode::INTERNAL_SERVER_ERROR, ERR_INTERNAL)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "mark_alert_read spawn_blocking panic");
+            err_body(StatusCode::INTERNAL_SERVER_ERROR, ERR_INTERNAL)
+        }
+    }
+}
+
+/// GET /api/quota：snapshots 为每 (upstream,metric) 最新值；
+/// sources 反映采集器健康（ok/disabled/error/unsupported_plan），spec §8。
+async fn quota_handler(State(st): State<AdminState>) -> Response {
+    let store = Arc::clone(&st.store);
+    match tokio::task::spawn_blocking(move || store.latest_quota_snapshots()).await {
+        Ok(Ok(snapshots)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "snapshots": snapshots, // QuotaSnapshotRow 已 Serialize
+                "sources": st.monitor.statuses(),
+            })),
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "quota snapshots query failed");
+            err_body(StatusCode::INTERNAL_SERVER_ERROR, ERR_INTERNAL)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "latest_quota_snapshots spawn_blocking panic");
+            err_body(StatusCode::INTERNAL_SERVER_ERROR, ERR_INTERNAL)
+        }
+    }
 }
