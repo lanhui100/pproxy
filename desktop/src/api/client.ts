@@ -20,6 +20,19 @@ import {
 } from './schemas'
 import { z } from 'zod'
 
+// 视图层类型回导（统一入口）
+export type {
+  AlertDto,
+  HealthResp,
+  MonitorConfigResp,
+  QuotaResp,
+  QuotaSourceState,
+  RouteDto,
+  TokenDto,
+  TokenStatus,
+  UsageResp,
+} from './schemas' 
+
 // ---- 错误分类（分流表实现）----
 
 export type ApiError =
