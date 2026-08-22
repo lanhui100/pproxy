@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // spike-tunnel.mjs — M6 P0 S1/S2：经 gate worker 隧道拉大文件，测吞吐/CPU/并发
-// 用法：node scripts/spike-tunnel.mjs <ws-url> <token> [file-path] [--concurrency N]
-// 指标：ciphertext 总量（隧道吞吐）与明文总量（TLS 解密后），平台负载评估以前者为准。
+//
+// 用法：
+//   单轮（S2 并发口径）：node spike-tunnel.mjs <ws-url> <token> [file] [--concurrency N]
+//   持续（S1 口径）    ：node spike-tunnel.mjs <ws-url> <token> [file] --loop 600 [--concurrency 1]
+// 指标：ciphertext 总量（隧道吞吐）为主指标；plainMB 为 TLS 解密后明文量。
 import WebSocket from 'ws'
 import tls from 'node:tls'
 import { Duplex } from 'node:stream'
@@ -9,9 +12,14 @@ import { Duplex } from 'node:stream'
 const args = process.argv.slice(2)
 const wsUrl = args[0]
 const token = args[1]
-const filePath = args[2] ?? '/files/100Mb.dat'
-const concIdx = args.indexOf('--concurrency')
-const concurrency = concIdx > -1 ? Number(args[concIdx + 1]) : 1
+let filePath = args[2] ?? '/files/100Mb.dat'
+if (!filePath.startsWith('/')) filePath = '/' + filePath
+function numOpt(flag, dflt) {
+  const i = args.indexOf(flag)
+  return i > -1 ? Number(args[i + 1]) : dflt
+}
+const concurrency = numOpt('--concurrency', 1)
+const loopSec = numOpt('--loop', 0) // >0：重复下载直至满时长（S1 持续负载口径）
 
 if (!wsUrl || !token) {
   console.error('usage: spike-tunnel.mjs <ws-url> <token> [file-path]')
@@ -29,31 +37,22 @@ function bridge(ws) {
       cb()
     },
   })
-  return {
-    sock,
-    /** 入向密文入口：由 ws message 处理器调用 */
-    pushCipher(data) {
-      pushed += data.length
-      sock.push(Buffer.from(data))
-    },
-    pushed: () => pushed,
-  }
+  return { sock, pushCipher: (d) => { pushed += d.length; sock.push(Buffer.from(d)) }, pushed: () => pushed }
 }
 
-function one(id, downloadMs) {
+/** 单次下载：建隧道→TLS→GET→拉到连接关闭。st 为外部聚合容器。 */
+function oneDownload(id, st, deadlineMs) {
   return new Promise((resolve) => {
-    const t0 = Date.now()
-    const result = { id, ok: false, phase: 'connect', cipherIn: 0, plainMB: 0, ms: 0, error: '' }
+    if (Date.now() >= deadlineMs) return resolve({ ...st })
+    const result = { ...st, phase: 'connect', error: '' }
     const ws = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${token}` } })
-    const kill = setTimeout(() => finish(new Error(`timeout ${downloadMs}ms`)), downloadMs)
+    const remaining = deadlineMs - Date.now()
+    const kill = setTimeout(() => finish(new Error(`deadline hit (${remaining}ms left)`)), Math.max(remaining, 1000))
     let bridgeRef = null
 
     function finish(err) {
       clearTimeout(kill)
-      result.ms = Date.now() - t0
-      result.cipherIn = bridgeRef ? bridgeRef.pushed() : 0
-      if (err) result.error = String(err.message ?? err)
-      else result.ok = true
+      if (err) { result.error = String(err.message ?? err); result.ok = false }
       try { ws.close() } catch {}
       resolve(result)
     }
@@ -62,12 +61,12 @@ function one(id, downloadMs) {
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
         bridgeRef?.pushCipher(data)
+        result.cipherIn = bridgeRef.pushed()
         return
       }
       const msg = JSON.parse(data.toString())
       if (!msg.ok) return finish(new Error(`tunnel denied: ${msg.reason ?? ''}`))
 
-      // 隧道建立 → 在透传流上做 TLS 握手 + HTTP GET（证书校验自然发生=完整性验证）
       result.phase = 'tls'
       const br = bridge(ws)
       bridgeRef = br
@@ -92,7 +91,7 @@ function one(id, downloadMs) {
         }
         result.plainMB += chunk.length / 1048576
       })
-      tlsSock.on('close', () => finish(null))
+      tlsSock.on('close', () => finish(null)) // Connection: close → 服务端关=本轮完成
     })
 
     ws.on('open', () => {
@@ -101,12 +100,33 @@ function one(id, downloadMs) {
   })
 }
 
-console.log(`spike: url=${wsUrl} target=${TARGET_HOST}:443 file=${filePath} concurrency=${concurrency}`)
-const results = await Promise.all(Array.from({ length: concurrency }, (_, i) => one(i, 60_000)))
+/** 聚合 worker：持续模式循环下载至 deadline；单轮模式跑一次。 */
+async function worker(id) {
+  const st = { id, ok: true, cipherIn: 0, plainMB: 0, ms: 0, rounds: 0, error: '' }
+  const deadline = Date.now() + (loopSec > 0 ? loopSec : 60) * 1000
+  if (loopSec <= 0) {
+    const r = await oneDownload(id, st, Date.now() + 60_000)
+    return { ...st, ...r }
+  }
+  while (Date.now() < deadline && !st.error) {
+    const before = Date.now()
+    await oneDownload(id, st, deadline)
+    st.rounds++
+    if (Date.now() - before < 500) break // 防空转死循环（文件缺失等）
+  }
+  return st
+}
+
+console.log(
+  `spike: url=${wsUrl} target=${TARGET_HOST}:443 file=${filePath} concurrency=${concurrency}` +
+    (loopSec > 0 ? ` loopSec=${loopSec}（S1 持续负载口径）` : '（单轮，S2 口径）'),
+)
+const results = await Promise.all(Array.from({ length: concurrency }, (_, i) => worker(i)))
 for (const r of results) console.log(JSON.stringify(r))
 const totalIn = results.reduce((a, r) => a + r.cipherIn, 0)
-const maxMs = Math.max(...results.map((r) => r.ms), 1)
+const totalPlain = results.reduce((a, r) => a + r.plainMB, 0).toFixed(1)
+const wallMs = loopSec > 0 ? loopSec * 1000 : Math.max(...results.map((r) => r.ms), 1)
 console.log(
-  `SUMMARY ok=${results.filter((r) => r.ok).length}/${concurrency} cipherInMB=${(totalIn / 1048576).toFixed(1)} avgMbps=${((totalIn * 8) / maxMs).toFixed(1)} elapsedMs=${maxMs}`,
+  `SUMMARY ok=${results.filter((r) => r.ok && !r.error).length}/${concurrency} cipherInMB=${(totalIn / 1048576).toFixed(1)} plainMB=${totalPlain} avgMbps=${((totalIn * 8) / wallMs).toFixed(1)} errors=${results.map((r) => r.error).filter(Boolean).join(';') || 'none'}`,
 )
-process.exit(results.every((r) => r.ok) ? 0 : 1)
+process.exit(results.every((r) => !r.error) ? 0 : 1)
