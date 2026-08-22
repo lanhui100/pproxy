@@ -131,6 +131,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/api/alerts", get(alerts_handler))
         .route("/api/alerts/:id/read", post(mark_alert_read_handler))
         .route("/api/quota", get(quota_handler))
+        .route("/api/monitor/config", get(monitor_config_handler))
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
         .with_state(state)
 }
@@ -676,4 +677,14 @@ async fn quota_handler(State(st): State<AdminState>) -> Response {
             err_body(StatusCode::INTERNAL_SERVER_ERROR, ERR_INTERNAL)
         }
     }
+}
+
+/// GET /api/monitor/config（M5 §6.1）：服务端监控配置只读摘要。
+/// 白名单响应体仅两个字段——MonitorConfig 含凭据字段，严禁整体序列化。
+async fn monitor_config_handler(State(st): State<AdminState>) -> Response {
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(st.monitor.config()).unwrap_or_else(|_| serde_json::json!({}))),
+    )
+        .into_response()
 }

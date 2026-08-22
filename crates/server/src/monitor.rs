@@ -40,12 +40,31 @@ pub struct SourceStatus {
 /// 来源健康状态表：monitor 任务写、/api/quota 读。
 pub struct MonitorHandle {
     inner: Mutex<HashMap<String, (QuotaSourceState, Option<u64>)>>,
+    /// M5：/api/monitor/config 只读展示用白名单快照（仅两字段，
+    /// WHY 不持有整个 MonitorConfig——其含 token/webhook 凭据，禁止出网）。
+    threshold_pct: f64,
+    poll_interval_sec: u64,
+}
+
+/// /api/monitor/config 响应体（手写白名单，spec §6.1：禁序列化 MonitorConfig）。
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct MonitorConfigDto {
+    pub threshold_pct: f64,
+    pub poll_interval_sec: u64,
 }
 
 impl MonitorHandle {
+    pub fn config(&self) -> MonitorConfigDto {
+        MonitorConfigDto {
+            threshold_pct: self.threshold_pct,
+            poll_interval_sec: self.poll_interval_sec,
+        }
+    }
+
     /// 初始注册全部已知来源：缺凭据 → Disabled；有凭据但尚无成功采样 →
     /// Error（语义为"尚未 ok"，首个立即 tick 内即被真实结果覆盖）。
-    fn new(cf_enabled: bool, vercel_enabled: bool) -> Self {
+    fn new(cfg: &MonitorConfig) -> Self {
+        let (cf_enabled, vercel_enabled) = (cfg.cf_ready(), cfg.vercel_token.is_some());
         let mut m = HashMap::new();
         m.insert(
             SOURCE_CF.to_string(),
@@ -61,7 +80,11 @@ impl MonitorHandle {
                 None,
             ),
         );
-        MonitorHandle { inner: Mutex::new(m) }
+        MonitorHandle {
+            inner: Mutex::new(m),
+            threshold_pct: cfg.threshold_pct,
+            poll_interval_sec: cfg.poll_interval_sec,
+        }
     }
 
     fn set_state(&self, source: &str, state: QuotaSourceState) {
@@ -157,7 +180,7 @@ impl MonitorConfig {
 
 /// 装配入口：构建采集器与渠道，spawn 轮询任务，返回健康句柄给 AdminState。
 pub fn spawn_monitor(store: Arc<Store>, cfg: MonitorConfig) -> Arc<MonitorHandle> {
-    let handle = Arc::new(MonitorHandle::new(cfg.cf_ready(), cfg.vercel_token.is_some()));
+    let handle = Arc::new(MonitorHandle::new(&cfg));
     let h = Arc::clone(&handle);
     tokio::spawn(async move {
         run_loop(store, cfg, h).await;
@@ -368,5 +391,40 @@ async fn prune_retention(store: &Arc<Store>, now: u64) {
             }
         }
         _ => warn!("monitor: retention prune failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M5 §6.1：config 白名单 DTO 恰好两字段且与 MonitorConfig 凭据字段隔离。
+    #[test]
+    fn monitor_config_dto_whitelisted_shape() {
+        let cfg = MonitorConfig {
+            poll_interval_sec: 60,
+            threshold_pct: 50.0,
+            cf_token: Some("cf_secret".into()),
+            cf_account_tag: Some("tag".into()),
+            cf_graphql_url: None,
+            vercel_token: Some("vercel_secret".into()),
+            vercel_team_id: None,
+            vercel_api_base: None,
+            webhook_url: Some("http://hook".into()),
+        };
+        let handle = MonitorHandle::new(&cfg);
+        let dto = handle.config();
+        assert_eq!(dto.threshold_pct, 50.0);
+        assert_eq!(dto.poll_interval_sec, 60);
+
+        // 序列化键集精确等于两字段——凭据字段（cf_token/vercel_token/webhook_url）
+        // 永不出现在响应中
+        let json = serde_json::to_value(&dto).unwrap();
+        let mut keys: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["poll_interval_sec", "threshold_pct"]);
+        assert!(!json.to_string().contains("cf_secret"));
+        assert!(!json.to_string().contains("vercel_secret"));
+        assert!(!json.to_string().contains("http://hook"));
     }
 }

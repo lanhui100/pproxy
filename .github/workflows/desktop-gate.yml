@@ -37,9 +37,10 @@ jobs:
       - name: install frontend deps
         run: pnpm install --frozen-lockfile
 
-      - name: frontend gate (oxlint + vue-tsc + build)
+      - name: frontend gate (oxlint + vue-tsc + vitest + build)
         run: |
           pnpm lint
+          pnpm test
           pnpm build
 
       - name: rust gate (clippy + test)
