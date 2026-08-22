@@ -1,0 +1,48 @@
+# desktop-gate — M5 spec §7：desktop 变更的前端门禁 + Rust 门禁（不打包）
+# NSIS 打包独立在 desktop-release.yml（仅 tag），规避 paths×tags 组合歧义
+name: desktop-gate
+
+on:
+  push:
+    branches: [master]
+    paths: ["desktop/**", ".github/workflows/desktop-gate.yml"]
+  pull_request:
+    paths: ["desktop/**", ".github/workflows/desktop-gate.yml"]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@f40ffcd9367d
+        with:
+          version: 11.7.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: frontend gate (oxlint + vue-tsc + build)
+        run: |
+          pnpm lint
+          pnpm build
+
+      - name: rust gate (clippy + test)
+        run: |
+          cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml

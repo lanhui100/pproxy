@@ -1,0 +1,51 @@
+# desktop-release — 仅 tag 触发（无 paths，杜绝跳过）：NSIS 安装包挂 GitHub Release
+# 未签名构建：SmartScreen 提示属预期（spec §7.2）
+name: desktop-release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  nsis:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@f40ffcd9367d
+        with:
+          version: 11.7.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: install frontend deps
+        run: pnpm install --frozen-lockfile
+        working-directory: desktop
+
+      - name: frontend build
+        run: pnpm build
+        working-directory: desktop
+
+      - uses: tauri-apps/tauri-action@fce9c6108b31
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'pony-desktop ${{ github.ref_name }}'
+          releaseBody: 'Windows x64 NSIS 安装包（未签名，SmartScreen 提示属预期）'
+          releaseDraft: false
+          prerelease: false
+          projectPath: desktop
