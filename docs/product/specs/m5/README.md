@@ -22,7 +22,7 @@
 
 ## 1. 目标与范围
 
-Windows 桌面应用 `pony-desktop`：管理 pproxy 的 tokens/routes/usage/alerts，作为日常运维主界面。Tauri 2 + React 18 + TS + Tailwind + shadcn/ui，NSIS 安装包交付。
+Windows 桌面应用 `pony-desktop`：管理 pproxy 的 tokens/routes/usage/alerts，作为日常运维主界面。Tauri 2 + Vue 3 + TS + Tailwind + shadcn-vue，NSIS 安装包交付。
 
 验收场景（ROADMAP 原文）：Windows 上安装 → 连接 dev 服务器 → 完成路由/token 管理 → 收到告警通知（R4 前置条件见 §7.2）。
 
@@ -36,7 +36,7 @@ Windows 桌面应用 `pony-desktop`：管理 pproxy 的 tokens/routes/usage/aler
 
 ```
 ┌─ pony-desktop (Windows) ─────────────────────────────┐
-│  React 18 SPA（Vite + TS + Tailwind + shadcn/ui）     │
+│  Vue 3 SPA（Vite + TS + Tailwind + shadcn-vue）       │
 │   ├─ api client：双后适配器（Tauri→plugin-http /       │
 │   │              浏览器→原生 fetch+MSW），契约=API.md   │
 │   ├─ 页面×5：Dashboard/Routes/Tokens/Usage/Settings   │
@@ -71,7 +71,7 @@ Windows 桌面应用 `pony-desktop`：管理 pproxy 的 tokens/routes/usage/aler
 ```
 desktop/            # Tauri 2 应用根（独立构建图，workspace Cargo.toml 不吸收）
   src-tauri/        # Rust 壳：tauri.conf.json、keyring 命令对、插件注册
-  src/              # React SPA（含 api/ schema/ 页面/ 组件）
+  src/              # Vue 3 SPA（含 api/ schema/ views/ components/ stores/）
 ```
 
 ## 4. 页面规格（数据源全部来自现有 API）
@@ -81,7 +81,7 @@ desktop/            # Tauri 2 应用根（独立构建图，workspace Cargo.toml
 | Dashboard | `/api/health` + `/api/usage?hours=24` + `/api/alerts?unread=1` + `/api/quota` | 状态灯（health.status/db）、路由健康列表、**近 24h** requests/bytes 合计（滚动窗口语义，F16 文案）、未读告警条、quota 来源徽标（ok/error/disabled/unsupported_plan） |
 | Routes | `/api/routes` CRUD + `/api/routes/{name}/test` | 添加表单（name/host/override 可选）、行内 test（latency/status）、enable/disable 开关——**PATCH 三态 double_option 序列化必须覆盖 null（清除）与字段缺席（不改）两分支**（F17）、删除二次确认 |
 | Tokens | `/api/tokens` CRUD | status 徽标、创建对话框含 **expires_days 可选字段**（契约存在）、明文一次性展示 + 复制（剪贴板策略见 §6）、撤销二次确认 |
-| Usage | `/api/usage?hours=N&route=&token_id=` + `/api/quota` | recharts 按 route 聚合图表、token 维度表格、quota 进度条（pct=-1 显示"未知上限"哨兵语义而非进度条） |
+| Usage | `/api/usage?hours=N&route=&token_id=` + `/api/quota` | vue-chartjs（chart.js）按 route 聚合图表、token 维度表格、quota 进度条（pct=-1 显示"未知上限"哨兵语义而非进度条） |
 | Settings | 本地 + `GET /api/monitor/config`（§6） | 后端地址明文本地存、admin token 写 OS 凭据库、连接测试按钮、服务端监控配置只读展示、连接失败文案区分 DNS 失败/拒绝/超时（F10） |
 
 错误分流表（横切，R7/F8——优先级自上而下）：
@@ -128,7 +128,7 @@ desktop/            # Tauri 2 应用根（独立构建图，workspace Cargo.toml
 ## 7. 测试清单
 
 ### 7.1 自动化（CI）
-- Linux job：eslint + tsc + vitest（下述）+ `cargo test --workspace`（§6.1）
+- Linux job：oxlint + vue-tsc --noEmit + vitest（下述）+ `cargo test --workspace`（§6.1）
   1. MSW 契约测试：zod schema 双端复用，handler 覆盖查询串分支（hours 边界 400、unread=1、limit>500 钳制）
   2. **契约 smoke job**：node 脚本对 dev 服务器实拉只读端点（/api/health、/api/quota、/api/monitor/config）过同一 zod schema——真值防漂移（F12）
   3. 组件测试：Tokens 创建流程（明文一次性+复制+关闭不可回看）、Routes PATCH 三态两分支、401 去抖单次导航、401 不清凭据

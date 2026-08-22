@@ -6,7 +6,7 @@
 
 ```
 ┌─ pony-cli (Rust) ───┐
-├─ pony-desktop (Tauri 2 + React) ─┐
+├─ pony-desktop (Tauri 2 + Vue 3) ─┐
 └─ pony-mobile (Tauri 2, P2) ──────┘
         │ 管理 API（admin token 鉴权）
         ▼
@@ -74,7 +74,7 @@ pony config export <service> [--token <name>]   # 输出 env 片段
 ```
 连接配置 `~/.pony/config.toml`：`server = "http://192.168.101.161:8900"` + admin token。
 
-### 2.3 pony-desktop（Tauri 2 + React 18 + TS + Tailwind + shadcn/ui）
+### 2.3 pony-desktop（Tauri 2 + Vue 3 + TS + Tailwind + shadcn-vue；2026-08-22 用户裁决由 React 调整，ADR 见 M5 spec）
 | 页面 | 内容 |
 |------|------|
 | Dashboard | 服务状态灯、7 路由健康、今日请求/流量、最近告警 |
