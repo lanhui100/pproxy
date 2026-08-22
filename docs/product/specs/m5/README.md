@@ -138,9 +138,8 @@ desktop/            # Tauri 2 应用根（独立构建图，workspace Cargo.toml
 ### 7.2 手动验收（Windows 实机，含前置准备）
 
 **前置 A（网络）**：Windows 安装 Tailscale 入网 + ACL 生效验证（F23）——清单从"可达后端"开始，不再从零假设网络
-**前置 B（告警来源，R4/F4）**：生产 unit 现无任何监控 env → 永不告警。两档：
-- 首选：用户提供真实 CF 凭据 → unit 经 EnvironmentFile 注入（600 权限、去 export 前缀，M3-R2 口径）
-- 降级（无凭据时）：unit 临时注入 dummy 凭据 + `PPROXY_CF_GRAPHQL_URL=http://127.0.0.1:18894/graphql`（复用 m3_stub）+ `PPROXY_ALERT_THRESHOLD_PCT=50` + `PPROXY_POLL_INTERVAL_SEC=60` → 确定性告警，**验收后还原 unit**；预计触发延迟上界 = 1 个轮询周期 + 通知轮询 5min ≈ 6min
+**前置 B（告警来源，R4/F4）**：✅ 已就绪（2026-08-22）——真实 CF 凭据经 `/home/USER/pproxy/.pproxy.env`（600，systemd EnvironmentFile，与 export 格式的 .secrets.env 分离）注入生产 unit，/api/quota 已出真实数据（cf ok）。验收时仅需临时调低 `PPROXY_ALERT_THRESHOLD_PCT` 与 `PPROXY_POLL_INTERVAL_SEC`（追加 Environment= 行）→ 触发延迟上界 ≈ 轮询周期 + 通知轮询 5min；**验收后还原阈值行**
+- 已知问题登记：Vercel `/v1/usage` 端点行为漂移（各日期格式均 400 invalid_from_date；token 经 v9/projects 验证有效）→ sources.vercel=error 属预期，不影响 CF 配额告警链路
 
 验收步骤：
 1. NSIS 安装（预期 SmartScreen 未签名警告，F19）→ 启动 → Settings 配置 tailnet 地址 + admin token（凭据库写入验证：重启应用免重输）

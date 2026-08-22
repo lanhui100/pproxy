@@ -13,3 +13,4 @@ config.json.bak
 
 # clippy 独立 target 目录（工具链错配环境临时产物）
 /target-clippy
+.pproxy.env

@@ -4,6 +4,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
+# M3-R2/M5：监控凭据经环境文件注入（600，不入库）
+EnvironmentFile=/home/USER/pproxy/.pproxy.env
 Type=simple
 User=dm
 WorkingDirectory=/home/USER/pproxy

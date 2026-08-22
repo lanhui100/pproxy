@@ -29,7 +29,7 @@
 - [x] 管理 API：/api/alerts 真实实现（unread/limit≤500）+ /api/alerts/{id}/read（R4 三态幂等）+ /api/quota（snapshots + sources 健康）
 - [x] M1 债务清理：usage_hourly 30 天 / quota_snapshots 90 天保留策略
 **验收**：人为调低阈值触发告警；Dashboard 数据源就绪
-（集成脚本 m3_test.sh 离线 stub 口径全绿：7 步 23 断言——cf pct≈85/sources 健康口径/告警不重发/read 幂等/401/prod_guard；workspace 测试 80+23 全绿零警告，m1/m2 无回归。生产真实凭据注入属 R2 手动步骤，待用户提供 CF_API_TOKEN/accountTag 后按 systemd EnvironmentFile 步骤启用）
+（集成脚本 m3_test.sh 离线 stub 口径全绿：7 步 23 断言——cf pct≈85/sources 健康口径/告警不重发/read 幂等/401/prod_guard；workspace 测试 80+23 全绿零警告，m1/m2 无回归。生产真实凭据已于 2026-08-22 注入生效（EnvironmentFile=/home/USER/pproxy/.pproxy.env，cf source ok，真实配额 3.64%）；Vercel 源因上游 API 漂移暂为 error 态，见 TROUBLESHOOTING）
 
 ## M4 公网入口（CF Tunnel）— ✅ 服务端完成（2026-08-22）；手机端验收按裁决顺延至 M5 后
 - [x] cloudflared 安装 + tunnel 配置（access.ponyjob.top → :8899，pony-tunnel.service 托管，协议钉死 http2）

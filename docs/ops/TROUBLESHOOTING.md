@@ -63,3 +63,10 @@ curl -s "https://edge.ponyjob.top/get?url=https://httpbin.org/ip" -H "X-Proxy-Se
 curl -s "https://vedge.ponyjob.top/api/proxy?url=https%3A%2F%2Fhttpbin.org%2Fip" -H "X-Proxy-Secret: <REDACTED_DEV_SECRET>"
 # 期望: 3.x.x.x（AWS us-east）
 ```
+
+## 监控源状态异常（M3+）
+
+| 现象 | 判定 | 处理 |
+|------|------|------|
+| `/api/quota` sources.vercel=error，日志 `vercel collect failed ... http status 400` | **已知问题**：Vercel `/v1/usage` 端点行为漂移（2026-08-22 实测各日期格式均 400 invalid_from_date；token 本身经 v9/projects 200 验证有效）。Hobby 计划本无可用用量数据 | 无需处理；Dashboard 徽标语义即 error。待 Vercel 端点明确或升级 Pro 后重测 |
+| sources.cf=error | GraphQL errors 或网络失败，每 tick 自动重试 | 检查 `.pproxy.env` 凭据有效期（dashboard 可撤销）；journalctl 看 monitor warn 详情 |
