@@ -100,3 +100,12 @@ cloudflared tunnel delete pony-access                                   # 需先
 - **禁止** `cloudflared service install`——会生成同名 root 权限 unit 覆盖加固配置；本机 unit 名为 `pony-tunnel.service` 即为规避。
 - 凭据命令（login/create/route dns）一律以 dm 身份执行，sudo 执行会产生 root 属主文件导致服务无限崩溃循环。
 - 平台限制：非流式请求 >100s 被 CF 边缘 524；请求体上限 ~100MB。长任务走 streaming。
+
+## 管理面 tailnet 重绑（ADR-007，M5 落地）
+
+- `pproxy.service` 含 `Environment=PPROXY_LISTEN_ADMIN=<TAILNET_IP>:8900`
+  （tailnet IP；节点重新认证才会变更，变更时需同步 unit 与 Windows GUI Settings）
+- 防火墙放行：`sudo ufw allow in on tailscale0 to any port 8900 proto tcp`
+- 回滚 = 删 Environment 行 + `sudo ufw delete allow in on tailscale0 ...` + restart
+- GUI 连接失败三分支：地址解析失败→检查 Tailscale 连接；拒绝→检查 ufw 规则；
+  超时→检查对端入网状态

@@ -12,6 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUBLIC_URL="https://access.ponyjob.top"
 METRICS_URL="http://127.0.0.1:19099"
 DATA_ADDR="127.0.0.1:8899"
+# M5 ADR-007 重绑后：管理面监听 tailnet IP（可用 M4_ADMIN_BASE 覆盖）
+ADMIN_BASE="${M4_ADMIN_BASE:-http://<TAILNET_IP>:8900}"
 
 PASS=0
 expect_eq() {
@@ -75,7 +77,10 @@ echo "[步骤 5] 监听面隔离"
 BIND_8899="$(ss -tlnp 2>/dev/null | awk '$4 ~ /:8899$/ {print $4}' | head -1)"
 BIND_8900="$(ss -tlnp 2>/dev/null | awk '$4 ~ /:8900$/ {print $4}' | head -1)"
 expect_eq "$BIND_8899" "127.0.0.1:8899" "数据面仍仅绑 127.0.0.1（防公网直连绕过隧道）"
-expect_eq "$BIND_8900" "127.0.0.1:8900" "管理面保持 127.0.0.1（结构性隔离）"
+case "$BIND_8900" in
+  "127.0.0.1:8900"|"<TAILNET_IP>:8900") PASS=$((PASS + 1)); echo "  PASS: 管理面仅绑受控地址（$BIND_8900，ADR-007 口径）" ;;
+  *) echo "  FAIL: 管理面监听异常 = $BIND_8900"; exit 1 ;;
+esac
 
 # ---- 步骤 6：公网闭环三重断言（R1）——无 token ----
 echo "[步骤 6] 公网闭环：无 token → 精确 401 同体 + server: cloudflare"
@@ -98,7 +103,7 @@ fi
 
 E2E_NAME="m4-e2e-$(date +%s)"
 CREATE_RESP="$(curl -sS --max-time 10 -X POST -H "Authorization: Bearer $ADMIN" \
-  -H 'Content-Type: application/json' -d "{\"name\":\"$E2E_NAME\"}" http://127.0.0.1:8900/api/tokens)"
+  -H 'Content-Type: application/json' -d "{\"name\":\"$E2E_NAME\"}" $ADMIN_BASE/api/tokens)"
 E2E_TOKEN="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("token",""))' "$CREATE_RESP" 2>/dev/null || true)"
 E2E_ID="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("id",""))' "$CREATE_RESP" 2>/dev/null || true)"
 
@@ -107,7 +112,7 @@ cleanup() { # 幂等兜底：无论脚本从哪退出都尝试撤销 e2e token�
   if [ -n "${E2E_ID:-}" ] && [ -n "${ADMIN:-}" ]; then
     curl -sS --max-time 10 -o /dev/null -X DELETE \
       -H "Authorization: Bearer ${M4_ADMIN_FOR_CLEANUP:-$ADMIN}" \
-      "http://127.0.0.1:8900/api/tokens/$E2E_ID" 2>/dev/null || true
+      $ADMIN_BASE/api/tokens/$E2E_ID 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
@@ -152,7 +157,7 @@ expect_eq "${RECOVERED:-no}" "yes" "隧道恢复且 401 正例回归（${i}×2s 
 # ---- 步骤 10：撤销复验闭环（R4）----
 echo "[步骤 10] e2e token 撤销 + 401 复验"
 curl -sS --max-time 10 -o /dev/null -X DELETE \
-  -H "Authorization: Bearer $ADMIN" "http://127.0.0.1:8900/api/tokens/$E2E_ID"
+  -H "Authorization: Bearer $ADMIN" $ADMIN_BASE/api/tokens/$E2E_ID
 VCODE="$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' "$PUBLIC_URL/$E2E_TOKEN/openai/models")"
 expect_eq "$VCODE" "401" "撤销后经公网复验 → 401（token 生命周期闭环）"
 E2E_TOKEN=""; E2E_ID=""  # 已撤销，交给 trap 时跳过
@@ -160,7 +165,7 @@ E2E_TOKEN=""; E2E_ID=""  # 已撤销，交给 trap 时跳过
 # ---- 步骤 11：环境幂等终检（F16）----
 echo "[步骤 11] 环境幂等"
 expect_eq "$(systemctl is-active pony-tunnel.service)" "active" "终检：隧道运行中"
-LEFTOVER="$(curl -sS --max-time 10 -H "Authorization: Bearer $ADMIN" http://127.0.0.1:8900/api/tokens \
+LEFTOVER="$(curl -sS --max-time 10 -H "Authorization: Bearer $ADMIN" "$ADMIN_BASE/api/tokens" \
   | python3 -c 'import json,sys; print(sum(1 for t in json.load(sys.stdin)["tokens"] if t["name"].startswith("m4-e2e-") and t["status"] != "revoked"))')"
 expect_eq "$LEFTOVER" "0" "终检：无遗留【活跃】m4-e2e-* token（已撤销历史行不计）"
 

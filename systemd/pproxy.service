@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 # M3-R2/M5：监控凭据经环境文件注入（600，不入库）
 EnvironmentFile=/home/USER/pproxy/.pproxy.env
+# ADR-007：管理面走 tailnet 承载远程管理（数据面公网入口仍为 CF Tunnel）
+Environment=PPROXY_LISTEN_ADMIN=<TAILNET_IP>:8900
 Type=simple
 User=dm
 WorkingDirectory=/home/USER/pproxy
