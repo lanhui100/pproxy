@@ -1,0 +1,17 @@
+# ci — 服务端测试门禁（M5 §6.1：crates 测试此前不在任何 CI，补位）
+# desktop 前端 lint/vitest 与 Windows 打包 job 随 M5 脚手架另行添加。
+name: ci
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace
+        run: cargo test --workspace
