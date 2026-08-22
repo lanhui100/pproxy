@@ -25,7 +25,7 @@ tauri = { version = "2.11.3" }
 tauri-plugin-log = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-http = "2"
-keyring = "3"
+keyring = { version = "3", features = ["windows-native"] }
 
 # 独立构建图：不吸收进 pproxy workspace（M5 spec §3 约束）
 [workspace]
