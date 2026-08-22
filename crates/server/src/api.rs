@@ -87,6 +87,11 @@ async fn admin_auth_middleware(
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
+    // M5 /dsk/* 分发路由豁免鉴权（updater 插件无凭据可带；边界=tailnet，
+    // 文件为非机密产物+验签防篡改——理由见 crates/server/src/dsk.rs 头注）
+    if req.uri().path().starts_with("/dsk/") {
+        return next.run(req).await;
+    }
     let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -132,6 +137,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/api/alerts/:id/read", post(mark_alert_read_handler))
         .route("/api/quota", get(quota_handler))
         .route("/api/monitor/config", get(monitor_config_handler))
+        .route("/dsk/:filename", get(crate::dsk::dsk_file_handler))
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
         .with_state(state)
 }

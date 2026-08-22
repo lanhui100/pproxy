@@ -21,6 +21,8 @@
           "url": "http://<tailnet-host>:8900/*"
         }
       ]
-    }
+    },
+    "updater:default",
+    "process:allow-restart"
   ]
 }

@@ -6,6 +6,7 @@ import { Activity, Bell, Gauge, ListTree, Settings, Ticket } from '@lucide/vue'
 import { onUnauthorized } from '@/api/client'
 import { loadPollIntervalMin } from '@/lib/config'
 import { useAlertNotifications } from '@/composables/useAlertNotifications'
+import { updateAvailable, checkForUpdate } from '@/composables/useUpdater'
 
 const router = useRouter()
 
@@ -25,6 +26,8 @@ onUnauthorized(() => {
 // M5 §5：告警通知轮询（默认 5min，可配）；未读数驱动侧栏徽标与横幅
 const { unreadCount } = useAlertNotifications(() => loadPollIntervalMin())
 const bannerDismissed = ref(false)
+// M5 拓展：启动即检查更新（Tauri 环境；badge 挂 Settings 页签）
+void checkForUpdate()
 </script>
 
 <template>
@@ -46,6 +49,11 @@ const bannerDismissed = ref(false)
         >
           {{ unreadCount }}
         </span>
+        <span
+          v-else-if="item.label === 'Settings' && updateAvailable"
+          class="ml-auto inline-block size-2 rounded-full bg-red-500"
+          title="有新版本"
+        />
       </RouterLink>
     </nav>
     <main class="flex-1 overflow-auto p-6">

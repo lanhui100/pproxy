@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "pony-desktop",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "identifier": "com.ponyjob.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -35,5 +35,18 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFBMzM1MTQ1NjZDNjE1RTAKUldUZ0ZjWm1SVkV6R3AxQWVtWmFOQW15NUtoTTR6Q3JXQ0hZZ1N5dVljN0tHaEsxQ2I5U3Q2WjgK",
+      "endpoints": [
+        "http://<tailnet-host>:8900/dsk/latest.json",
+        "http://<TAILNET_IP>:8900/dsk/latest.json"
+      ],
+      "dangerous_insecure_transport_protocol": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

@@ -4,6 +4,7 @@
 //! 6. usage 落库 interval task → 7. 数据面 + 管理面双端口 serve → 8. admin 非回环 warn。
 
 mod api;
+mod dsk;
 mod gateway;
 mod monitor;
 

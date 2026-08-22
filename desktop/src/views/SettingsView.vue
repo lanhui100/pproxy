@@ -4,7 +4,20 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { getVersion } from '@tauri-apps/api/app'
+
 import { api, errorMessage, isUnauthorized, setBaseUrlProvider, setTokenProvider, type MonitorConfigResp } from '@/api/client'
+import {
+  checkForUpdate,
+  downloadAndInstall,
+  downloaded,
+  downloadProgress,
+  downloading,
+  updateAvailable,
+  updateError,
+  updateNotes,
+  updateVersion,
+} from '@/composables/useUpdater'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -22,6 +35,7 @@ import {
 import { normalizeBaseUrl, normalizeToken } from '@/lib/normalize'
 
 const router = useRouter()
+const appVersion = ref('')
 
 const url = ref(loadBackendUrl())
 const tokenInput = ref('')
@@ -33,6 +47,13 @@ const monitorConfig = ref<MonitorConfigResp | null>(null)
 const monitorError = ref('')
 
 onMounted(async () => {
+  if (isTauri()) {
+    try {
+      appVersion.value = await getVersion()
+    } catch {
+      appVersion.value = ''
+    }
+  }
   // 装配 client 提供者：地址/token 即时生效（其余页面随后请求即走新配置）
   setBaseUrlProvider(() => url.value)
   setTokenProvider(async () => (await tokenFromStore()) ?? (tokenInput.value || null))
@@ -153,6 +174,31 @@ async function forgetToken(): Promise<void> {
           <div class="flex justify-between"><dt>配额轮询间隔</dt><dd>{{ monitorConfig.poll_interval_sec }}s</dd></div>
         </dl>
         <p v-else class="text-sm text-muted-foreground">加载中…</p>
+      </CardContent>
+    </Card>
+
+    <Card>
+      <CardHeader><CardTitle class="text-sm">软件更新</CardTitle></CardHeader>
+      <CardContent class="space-y-3">
+        <div class="flex items-center justify-between text-sm">
+          <span>当前版本</span>
+          <span class="font-medium">{{ appVersion || '—' }}</span>
+        </div>
+        <template v-if="updateAvailable">
+          <div class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm dark:border-emerald-700 dark:bg-emerald-950">
+            新版本 <span class="font-semibold">{{ updateVersion }}</span> 可用
+            <pre v-if="updateNotes" class="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{{ updateNotes }}</pre>
+          </div>
+          <div v-if="downloading" class="text-sm">下载中… {{ downloadProgress }}%（安装器将自动接管）</div>
+          <Button :disabled="downloading" @click="downloadAndInstall">
+            {{ downloaded ? '重启完成更新' : downloading ? `下载中 ${downloadProgress}%` : '下载并安装更新' }}
+          </Button>
+        </template>
+        <template v-else>
+          <p class="text-sm text-muted-foreground">已是最新版本</p>
+          <Button variant="outline" size="sm" @click="checkForUpdate">检查更新</Button>
+        </template>
+        <p v-if="updateError" class="text-xs text-muted-foreground">检查失败：{{ updateError }}</p>
       </CardContent>
     </Card>
   </div>
