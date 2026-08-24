@@ -38,6 +38,11 @@ pub fn run() {
       credential_get,
       credential_set,
       credential_delete,
+      proxy_whitelist_get,
+      proxy_whitelist_set,
+      proxy_enable,
+      proxy_disable,
+      proxy_pac,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
