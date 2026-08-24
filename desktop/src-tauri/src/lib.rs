@@ -8,6 +8,23 @@ pub fn run() {
     .plugin(tauri_plugin_process::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .setup(|app| {
+      use tauri::menu::{Menu, MenuItem};
+      use tauri::tray::TrayIconBuilder;
+      let on = MenuItem::with_id(app, "proxy_on", "启用代理", true, None::<&str>)?;
+      let off = MenuItem::with_id(app, "proxy_off", "停用代理", true, None::<&str>)?;
+      let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+      let menu = Menu::with_items(app, &[&on, &off, &quit])?;
+      TrayIconBuilder::with_id("main")
+        .icon(app.default_window_icon().unwrap().clone())
+        .tooltip("pony-desktop")
+        .menu(&menu)
+        .on_menu_event(|app, ev| match ev.id.as_ref() {
+            "proxy_on" => { let _ = proxy_enable(); }
+            "proxy_off" => { let _ = proxy_disable(); }
+            "quit" => { let _ = proxy_disable(); app.exit(0); }
+            _ => {}
+        })
+        .build(app)?;
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()
