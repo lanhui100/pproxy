@@ -16,7 +16,7 @@ pub fn run() {
       let menu = Menu::with_items(app, &[&on, &off, &quit])?;
       TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("pony-desktop")
+        .tooltip("Pony Proxy")
         .menu(&menu)
         .on_menu_event(|app, ev| match ev.id.as_ref() {
             "proxy_on" => { let _ = proxy_enable(); }

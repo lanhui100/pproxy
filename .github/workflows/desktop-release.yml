@@ -47,8 +47,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'pony-desktop ${{ github.ref_name }}'
-          releaseBody: 'Windows x64 NSIS 安装包（未签名，SmartScreen 提示属预期）'
+          releaseName: 'Pony Proxy ${{ github.ref_name }}'
+          releaseBody: |
+            ${{ github.event.head_commit.message }}
+            
+            ---
+            Windows x64 NSIS 安装包（中文安装界面；未签名，SmartScreen 提示属预期）。应用内「检查更新」亦可自动升级。
           releaseDraft: false
           prerelease: false
           projectPath: desktop
