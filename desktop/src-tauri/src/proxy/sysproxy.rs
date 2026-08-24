@@ -30,7 +30,7 @@ pub fn enable(mode: Mode) -> Result<Snapshot, String> {
     use winreg::RegKey;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let key = hkcu.open_subkey_with_flags(INTERNET_SETTINGS, KEY_SET_VALUE | KEY_QUERY_VALUE)?;
+    let key = hkcu.open_subkey_with_flags(INTERNET_SETTINGS, KEY_SET_VALUE | KEY_QUERY_VALUE).map_err(|e| e.to_string())?;
 
     // 快照原值
     let snapshot = Snapshot {
@@ -62,9 +62,9 @@ pub fn disable(snapshot: &Snapshot) -> Result<(), String> {
     use winreg::RegKey;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let key = hkcu.open_subkey_with_flags(INTERNET_SETTINGS, KEY_SET_VALUE)?;
+    let key = hkcu.open_subkey_with_flags(INTERNET_SETTINGS, KEY_SET_VALUE).map_err(|e| e.to_string())?;
     if let Some(v) = snapshot.proxy_enable {
-        key.set_value("ProxyEnable", &v)?;
+        key.set_value("ProxyEnable", &v).map_err(|e| e.to_string())?;
     } else {
         key.delete_value("ProxyEnable").ok();
     }
@@ -96,7 +96,7 @@ fn broadcast_change() {
             "Internet Settings\0".as_ptr() as _,
             SMTO_ABORTIFHUNG,
             1000,
-            None,
+            std::ptr::null_mut(),
         );
     }
 }
