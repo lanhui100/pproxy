@@ -310,3 +310,33 @@ AlertLevel:       warning→警告  critical→严重
 | T3 | 添加一个新服务 | 服务页→添加→模板网格点选（如 Groq）→确认上游自动决策→创建 | 创建成功且出现在列表，全程 ≤1 分钟 |
 | T4 | 测速与线路切换 | 该服务行点「测速」→观察结果；若失败点「切换线路」→另一线路→自动重测 | 结果以彩点+中文呈现；切换后自动重测一次 |
 | T5 | 看用量与告警处理 | 用量统计切「近 7 天」→看图与明细令牌名列；回总览对告警「全部标为已读」 | 表头全中文、令牌显示名字非 id；toast 报「已读 N/M」 |
+
+## 12. R2 对抗审核裁决与修复记录
+
+R2 三路（回归 ENG / 安全 SEC / UX 终审）共提出 4×P0、5×P1、16×P2。裁决与处置：
+
+### P0（全部修复）
+| 编号 | 问题 | 处置 |
+|------|------|------|
+| SEC-1 | capabilities `http://*` 不匹配非默认端口（:8899/:8900 被拦），白名单改动未达成目的 | 实证矩阵（urlpattern 0.3.0 同版本复现）裁决：改 `http://*:*` + `https://*:*`；description 记录依据（tauri#12734 维护者背书、plugins-workspace#2131、scope.rs 仅补 pathname/search/hash）。ENG 附记③的相反判断被实证否定 |
+| UX-1/ENG-3 | useBackendGate computed 零响应式依赖永不失效 → 首启保存后门槛死锁 | config.ts 新增响应式源 `backendUrlSaved`，saveBackendUrl 写路径同步；gate 改 computed 消费；新增回归钉测试 |
+| ENG-1 | 有效期档位 d30/d90 缺 expires_days → 创建永久密钥 | 新增 lib/expiry.ts 纯函数 + 五分支形状测试；TokensView 消费 |
+| ENG-2 | readPollMin 把缺失 key 当 0 → 新装用户默认不自动轮询 | 仅显式存储值参与往返；缺失/空串回落默认 5；config.test.ts 三态钉住 |
+
+### P1（同批修复）
+ENG-4 告警时间秒当毫秒（×1000）；ENG-5 EmptyState #actions 插槽错配；ENG-6 deriveDataPlane
+IPv6/非数字尾段对齐 Rust；ENG-7 补轮询单测（config.test.ts）；UX-2 cf 枚举映射缺失；
+UX-3 连接成功下一步指引；UX-4 自动复制对象标注；SEC-2/ENG-10 useSecretCopy epoch 代际防在途竞态。
+
+### P2（择要同批，其余显式延后）
+已修：ENG-8 负数→5；UX-5 失败反馈统一 toast；UX-7①②③；UX-8 禁用原因提示；UX-9 模板覆盖防护；
+UX-10 last_ok 上下文；UX-12 空态 CTA+占位符中文化+「目标域名」；SEC-6 general Tab 注释式示例对齐 CLI；
+SEC-3/ENG-9 keyring 失败回滚快照+独立文案；SEC-5 清除凭据文案如实化。
+**显式延后（交付报告披露）**：UX-6 占位符记法统一余量；UX-11 Chip 抽象/ui-card 统一（重构性收敛）；
+SEC-4 check-invariants 行级过滤可绕过（脚本降级为辅助信号，验收以人工 diff 复核为准）；
+scope 真机冒烟（环境无 Tauri WebView，列入附录 A 用户验收步骤）。
+
+### 接口卡偏差声明（ENG-11）
+useSecretCopy 实际签名为 `copySecret(text, opts?: { onCopied?: () => void })`，替代冻结卡
+`{ placeholderHint }`：调用方自行拼装 toast（含「60 秒后自动清空」固定文案），功能等效、职责更清晰。
+§9.1 以本声明为准。另 §9.1 补充：EmptyState 内容必须置于具名插槽 #actions（无默认插槽出口）。
