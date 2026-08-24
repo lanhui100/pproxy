@@ -135,7 +135,7 @@ interface TabMeta {
 }
 
 const TABS: TabMeta[] = [
-  { key: 'general', label: '通用', segment: '{服务}', envVar: 'BASE_URL', envNote: '无标准环境变量约定，按所用 SDK 替换变量名' },
+  { key: 'general', label: '通用', segment: '<服务>', envVar: 'BASE_URL', envNote: '无标准环境变量约定，按所用 SDK 替换变量名' },
   { key: 'anthropic', label: 'Anthropic', segment: 'anthropic', envVar: 'ANTHROPIC_BASE_URL', envNote: '' },
   { key: 'openai', label: 'OpenAI', segment: 'openai', envVar: 'OPENAI_BASE_URL', envNote: '' },
 ]
@@ -401,7 +401,7 @@ async function doRevoke(): Promise<void> {
           </div>
           <div v-else class="space-y-3">
             <div class="space-y-1">
-              <Label>接入地址（把「{服务}」替换为实际路由名）</Label>
+              <Label>接入地址（把「&lt;服务&gt;」替换为实际路由名）</Label>
               <code class="block break-all rounded-md bg-muted p-3 font-mono text-sm">{{ currentUrl('general') }}</code>
             </div>
             <div class="flex items-center gap-2">
