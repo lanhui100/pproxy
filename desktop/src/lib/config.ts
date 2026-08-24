@@ -47,12 +47,20 @@ export async function saveAdminToken(token: string): Promise<void> {
   }
 }
 
-export async function clearAdminToken(): Promise<void> {
+/** admin token 清除：返回是否确认成功（keyring 删除失败返回 false，调用方如实反馈）。 */
+export async function clearAdminToken(): Promise<boolean> {
   if (isTauri()) {
-    await invoke('credential_delete').catch(() => {})
-  } else if (typeof localStorage !== 'undefined') {
+    try {
+      await invoke('credential_delete')
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (typeof localStorage !== 'undefined') {
     localStorage.removeItem(DEV_TOKEN_KEY)
   }
+  return true
 }
 
 /** 轮询间隔归一化：0 = 不自动轮询（合法档位）；负数/NaN 回落 5；其余下限 1。 */
