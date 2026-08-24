@@ -6,6 +6,7 @@ import { computed, onMounted, ref } from 'vue'
 import type { ChartOptions } from 'chart.js'
 import { BarElement, BarController, CategoryScale, Chart as ChartJS, Legend, LinearScale } from 'chart.js'
 import { Bar } from 'vue-chartjs'
+import { RouterLink } from 'vue-router'
 
 import { api, type QuotaResp, type TokenDto, type UsageResp } from '@/api/client'
 import EmptyState from '@/components/common/EmptyState.vue'
@@ -168,7 +169,13 @@ function metricLabel(metric: string): string {
           <div class="text-sm font-medium">各服务请求次数</div>
           <div class="mt-3">
             <Bar v-if="byService.length > 0" :data="chartData" :options="chartOptions" />
-            <EmptyState v-else title="区间内暂无请求" description="有设备开始访问后，这里会出现按服务的请求柱图。" />
+            <EmptyState v-else title="区间内暂无请求" description="有设备开始访问后，这里会出现按服务的请求柱图。">
+              <template #actions>
+                <Button as-child>
+                  <RouterLink to="/routes">去添加服务</RouterLink>
+                </Button>
+              </template>
+            </EmptyState>
           </div>
         </div>
 
@@ -204,7 +211,13 @@ function metricLabel(metric: string): string {
       <!-- 请求明细 -->
       <div class="mt-6">
         <h2 class="mb-2 text-sm font-semibold">请求明细</h2>
-        <EmptyState v-if="rows.length === 0" title="暂无请求明细" description="当前时间范围内还没有请求记录。" />
+        <EmptyState v-if="rows.length === 0" title="暂无请求明细" description="当前时间范围内还没有请求记录。">
+          <template #actions>
+            <Button as-child>
+              <RouterLink to="/routes">去添加服务</RouterLink>
+            </Button>
+          </template>
+        </EmptyState>
         <div v-else class="overflow-hidden rounded-lg border">
           <Table>
             <TableHeader>
