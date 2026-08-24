@@ -51,3 +51,13 @@
 ## 已完成
 
 （B 编号从 B004 起递增；M6 主实现不占 backlog——执行真源为 spec m6）
+
+### B002 — M6 实现收尾 🔄 进行中（执行真源=spec m6）
+- 隧道凭据接线内测（tunnel_token 下发 GUI）、v0.3.0 发布、Windows 实机验收
+
+### B003 — 未来拓展池（按需启动，暂不排期）
+- CF 托管域名白名单站点的 Vercel 侧透传探索（M6 已知限制缓解）
+- tunnel_token 双活轮换（消除分钟级停机窗口）
+- 自动更新国内镜像加速（tauri updater 走 CF 分发）
+- 80 端口明文透传显式开关（默认禁用维持）
+- 手机端（Tauri mobile）/ M7 打磨与模板库（ROADMAP 既有）
