@@ -377,7 +377,7 @@ async function doDelete(): Promise<void> {
                 <Input id="route-name" v-model="addName" placeholder="如 gemini" />
               </div>
               <div class="space-y-1">
-                <Label for="route-host">目标 host</Label>
+                <Label for="route-host">目标域名</Label>
                 <Input id="route-host" v-model="addHost" placeholder="generativelanguage.googleapis.com" />
                 <p class="text-xs text-muted-foreground">只填域名本身，不带 https:// 与路径</p>
               </div>
@@ -401,6 +401,8 @@ async function doDelete(): Promise<void> {
         </div>
 
         <DialogFooter>
+          <!-- UX-8：禁用不静默，灰字说明缺什么 -->
+          <span v-if="!addName.trim() || !addHost.trim()" class="mr-auto self-center text-xs text-muted-foreground">需填写名称与目标域名后可创建</span>
           <Button variant="outline" :disabled="adding" @click="showAdd = false">取消</Button>
           <Button :disabled="adding || !addName.trim() || !addHost.trim()" data-icon="inline-start" @click="addRoute">
             <LoaderCircle v-if="adding" class="animate-spin" />
