@@ -129,7 +129,7 @@ interface TabMeta {
   label: string
   /** URL 里的路由段；通用 Tab 用占位符 */
   segment: string
-  /** 环境变量示例的变量名（通用 Tab 无标准约定，措辞对齐 crates/cli export.rs 注释风格） */
+  /** 环境变量示例的变量名（general 无标准约定；SEC-6 起该 Tab 仅注释式示意、不消费此字段） */
   envVar: string
   envNote: string
 }
@@ -155,7 +155,11 @@ function bashSnippet(key: TabMeta['key']): string {
   const m = tabMeta(key)
   const url = currentUrl(key)
   const head = m.key === 'general' ? `# pony proxy — ${m.segment}（${m.envNote}）` : `# pony proxy — ${m.segment}`
-  return `${head}\nexport ${m.envVar}=${url}\nexport ${m.envVar.replace('BASE_URL', 'API_KEY')}=<your-upstream-key>\n`
+  if (m.key === 'general') {
+    // SEC-6：BASE_URL 属前端发明变量名，对齐 CLI CommentOnly 分支改注释式示例
+    return `${head}\n# base_url = ${url}（按所用 SDK 替换变量名）\n# api_key = <你的上游密钥>\n`
+  }
+  return `${head}\nexport ${m.envVar}=${url}\nexport ${m.envVar.replace('BASE_URL', 'API_KEY')}=<你的上游密钥>\n`
 }
 
 /** PowerShell 版环境变量示例（与 bash 版同信息量，$env: 赋值加引号）。 */
@@ -163,7 +167,11 @@ function psSnippet(key: TabMeta['key']): string {
   const m = tabMeta(key)
   const url = currentUrl(key)
   const head = m.key === 'general' ? `# pony proxy — ${m.segment}（${m.envNote}）` : `# pony proxy — ${m.segment}`
-  return `${head}\n$env:${m.envVar}="${url}"\n$env:${m.envVar.replace('BASE_URL', 'API_KEY')}="<your-upstream-key>"\n`
+  if (m.key === 'general') {
+    // SEC-6：同 bash 版，注释式示意 $env: 用法，不发明具体变量名
+    return `${head}\n# $env:你的变量名 = "${url}"\n# $env:你的密钥变量名 = "<你的上游密钥>"\n`
+  }
+  return `${head}\n$env:${m.envVar}="${url}"\n$env:${m.envVar.replace('BASE_URL', 'API_KEY')}="<你的上游密钥>"\n`
 }
 
 /** 秘密复制唯一入口包装：toast 文案固定，成功即记 copied=true（关闭防护放行）。 */
@@ -342,6 +350,8 @@ async function doRevoke(): Promise<void> {
           <p v-if="createError" class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{{ createError }}</p>
         </div>
         <DialogFooter>
+          <!-- UX-8：禁用不静默，灰字说明缺什么 -->
+          <span v-if="!createName.trim()" class="mr-auto self-center text-xs text-muted-foreground">需填写名称后可创建</span>
           <Button variant="outline" :disabled="creating" @click="showCreate = false">取消</Button>
           <Button :disabled="creating || !createName.trim()" data-icon="inline-start" @click="createToken">
             <LoaderCircle v-if="creating" class="animate-spin" />
@@ -360,6 +370,10 @@ async function doRevoke(): Promise<void> {
 
         <p class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
           明文仅此一次展示；片段含明文令牌，请勿截图外发
+        </p>
+        <!-- UX-4：自动复制了什么、去哪找，说清楚（成功复制后显示） -->
+        <p v-if="copied" class="text-xs font-medium text-emerald-700">
+          ✓ 密钥已自动复制到剪贴板（60 秒后自动清空）；下方地址请单独点『复制地址』
         </p>
 
         <!-- Tab 切换 chips -->
