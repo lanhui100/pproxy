@@ -176,7 +176,10 @@ async fn handle_conn(
             match super::engine_tunnel::connect_and_relay(stream, parsed, &head, cfg).await {
                 Ok(()) => Ok(()),
                 Err(e) => {
-                    // R4：绝不静默回落直连——错误已计数，连接由调用方关闭
+                    // R4：绝不静默回落直连——错误就地计数，连接关闭
+                    stats.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    *stats.last_error.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(e.to_string());
                     Err(e)
                 }
             }
@@ -293,6 +296,106 @@ mod tests {
         assert_eq!(
             rewrite_first_line_absolute("GET http://example.com/path?a=1 HTTP/1.1"),
             "GET /path?a=1 HTTP/1.1"
+        );
+    }
+}
+
+#[cfg(test)]
+mod integration {
+    //! 集成验证：直连路径端到端回声 + R4 无静默回落反证。
+    use super::*;
+    use std::sync::Arc;
+
+    async fn socket_pair() -> (TcpStream, TcpStream) {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let c = TcpStream::connect(addr).await.unwrap();
+        let s = l.accept().await.unwrap().0;
+        (c, s)
+    }
+
+    #[tokio::test]
+    async fn direct_relay_end_to_end_echo() {
+        // 目标 echo 服务器（充当"直连目标站"）
+        let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((s, _)) = echo.accept().await {
+                    tokio::spawn(async move {
+                        let (mut r, mut w) = s.into_split();
+                        tokio::io::copy(&mut r, &mut w).await.ok();
+                    });
+                }
+            }
+        });
+
+        let cfg = EngineConfig::default(); // 空白名单 → 全直连
+        let stats = Arc::new(EngineStats::default());
+        let (mut client, srv) = socket_pair().await;
+        let st2 = Arc::clone(&stats);
+        tokio::spawn(async move {
+            handle_conn(srv, &cfg, &st2).await.ok();
+        });
+
+        let mut buf = [0u8; 256];
+        client
+            .write_all(format!("CONNECT {echo_addr} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("200 Connection Established"));
+        client.write_all(b"PING").await.unwrap();
+        loop {
+            let n = client.read(&mut buf).await.unwrap();
+            if n == 0 {
+                panic!("echo 连接提前关闭");
+            }
+            if &buf[..n] == b"PING" {
+                break;
+            }
+        }
+        assert_eq!(
+            stats.direct.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "direct 计数应+1"
+        );
+    }
+
+    #[tokio::test]
+    async fn r4_tunnel_failure_never_silently_falls_back() {
+        // R4 反证：白名单命中但隧道不可达 → 连接必须关闭且无 200 Established
+        let cfg = EngineConfig {
+            whitelist: vec!["www.youtube.com".into()],
+            tunnel_url: Some("ws://127.0.0.1:9/unreachable".into()), // 不可达
+            ..Default::default()
+        };
+        let stats = Arc::new(EngineStats::default());
+        let (client, srv) = socket_pair().await;
+        let mut client = client;
+        let st2 = Arc::clone(&stats);
+        tokio::spawn(async move {
+            handle_conn(srv, &cfg, &st2).await.ok();
+        });
+        client
+            .write_all(b"CONNECT www.youtube.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 256];
+        let n = client.read(&mut buf).await.unwrap_or(0);
+        let body = String::from_utf8_lossy(&buf[..n]);
+        assert!(
+            !body.contains("200 Connection Established"),
+            "隧道失败不得回 200 Established"
+        );
+        assert!(
+            n == 0 || body.contains("denied") || body.contains("tunnel"),
+            "失败语义应为显式错误/关闭，实际: {body}"
+        );
+        assert_eq!(
+            stats.errors.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "错误计数应+1"
         );
     }
 }
