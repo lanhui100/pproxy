@@ -8,6 +8,17 @@
 
 ## 待办
 
+### B003 — vedge 改 CF 橙云代理回源 Vercel（中期方案）⏸ 待决策
+- **背景**：B002 判决——中国联通出口→Vercel anycast(66.33.60.x/76.76.21.x) 路由间歇性劣化；
+  当前稳态为 openai `override=worker` 止血 + `~/vedge-monitor.log` 每 5 分钟探针监控
+- **方案**：ponyjob.top 的 DNS 把 `vedge` CNAME `cname.vercel.com` 开 **CF 橙云代理**；
+  SSL 模式 Full(strict)；Vercel 侧域名绑定不动（已 verified 无需重验）
+- **收益**：中国方向经 CF 边缘可达，恢复「vercel 出口多样性」的设计意图；分钟级生效、关橙云即时回滚
+- **代价/风险**：客户端改看 CF 通用证书（与 edge 同款 GTS，已在用）；SSE/WebSocket 经 CF 代理需实测兼容；
+  代理态下 Vercel 域名校验行为需观察
+- **决策触发**：探针日志显示 vercel 线持续劣化 >48h 或一周内复发 ≥2 次 → 执行本方案；自行稳定则关闭本项
+- **关联**：B002「判决与处置」小节
+
 ### B002 — Vercel 出口（vedge.ponyjob.top）超时排查与恢复 ⏸ blocked-by-external
 - **触发**：2026-08-24 M7 前端 UX 实测发现——服务端测速 `POST /api/routes/openai/test`（vercel 线）10s timeout；
   直探 `https://vedge.ponyjob.top` 6s 无响应；`/api/quota` 监控同步报 `vercel: error`
@@ -26,7 +37,7 @@
     （用户级 crontab → `~/vedge-monitor.log`，HTTP 非 000 即线路回暖信号；
     布防当日手动首测已回 `404 connect≈0.46s total≈0.69s`）
   - **待决策（用户）**：中期方案「vedge 改 CF 橙云代理回源 cname.vercel.com（SSL Full strict）」
-    ——低-中风险、分钟级生效、可即时回滚；因涉生产 DNS 由用户拍板
+    ——低-中风险、分钟级生效、可即时回滚；因涉生产 DNS 由用户拍板；中期方案已立项 **B003**
   - **状态维持** ⏸ blocked-by-external（vercel 线本身恢复以探针日志为准）
 
 ### B001 — CF 故障恢复后重测 S1/S2 spike ⏸ blocked-by-external
@@ -39,4 +50,4 @@
 
 ## 已完成
 
-（B 编号从 B002 起递增；M6 主实现不占 backlog——执行真源为 spec m6）
+（B 编号从 B004 起递增；M6 主实现不占 backlog——执行真源为 spec m6）
