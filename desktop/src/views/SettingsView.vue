@@ -6,6 +6,7 @@
 // App 壳经 history.state.authInvalidHint 送来的落地提示在本页消费后立即清除。
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
+import { RouterLink } from 'vue-router'
 
 import { getVersion } from '@tauri-apps/api/app'
 
@@ -16,6 +17,7 @@ import {
   setTokenProvider,
   type MonitorConfigResp,
 } from '@/api/client'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -65,6 +67,11 @@ const tokenInputRef = ref<ComponentPublicInstance | null>(null)
 
 /** 是否已有可用存量凭据（仅探测布尔，不把明文带进组件状态）。 */
 const hasStoredToken = ref(false)
+
+// 「清除已存凭据」二次确认弹窗开关（UX-7②：危险操作先确认）
+const confirmForget = ref(false)
+// 本次会话内连接成功标记（UX-3：成功后展示唯一下一步行动链接）
+const connectedThisSession = ref(false)
 
 onMounted(async () => {
   if (isTauri()) {
@@ -333,16 +340,26 @@ const resultClass = computed(() => {
           </ul>
           <p class="text-xs text-muted-foreground">
             存储位置：{{ isTauri() ? 'Windows 凭据管理器' : '浏览器 localStorage（dev）' }}
-            · <button class="underline underline-offset-2 hover:text-foreground" @click="forgetToken">清除已存凭据</button>
+            · <button class="underline underline-offset-2 hover:text-foreground" @click="confirmForget = true">清除已存凭据</button>
           </p>
         </div>
 
         <!-- 单一原子按钮（无独立「保存」「测试」两钮） -->
         <div class="space-y-2 border-t pt-4">
-          <Button :disabled="testing || !url.trim()" @click="testAndSave">
-            {{ testing ? '正在测试…' : '测试并保存' }}
-          </Button>
+          <div class="flex flex-wrap items-center gap-3">
+            <Button :disabled="testing || !url.trim()" @click="testAndSave">
+              {{ testing ? '正在测试…' : '测试并保存' }}
+            </Button>
+            <!-- UX-8：置灰原因就地说明 -->
+            <span v-if="!url.trim()" class="text-xs text-muted-foreground">填写管理面地址后可测试</span>
+          </div>
           <p v-if="testResult" class="text-sm" :class="resultClass">{{ testResult }}</p>
+          <!-- UX-3：本次会话连接成功后的唯一下一步行动链接 -->
+          <p v-if="connectedThisSession" class="text-sm">
+            <RouterLink to="/routes" class="text-primary underline-offset-2 hover:underline">
+              下一步：去添加服务 ›
+            </RouterLink>
+          </p>
         </div>
       </CardContent>
     </Card>
@@ -402,5 +419,16 @@ const resultClass = computed(() => {
         <p v-if="updateError" class="text-xs text-muted-foreground">检查失败：{{ updateError }}</p>
       </CardContent>
     </Card>
+
+    <!-- 清除已存凭据二次确认（UX-7②：destructive，确认后才调 forgetToken） -->
+    <ConfirmDialog
+      :open="confirmForget"
+      title="清除已存凭据？"
+      description="清除后需要重新粘贴 admin token 才能管理网关"
+      confirm-text="清除"
+      destructive
+      @update:open="(v: boolean) => !v && (confirmForget = false)"
+      @confirm="forgetToken"
+    />
   </div>
 </template>
