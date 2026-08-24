@@ -174,3 +174,14 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 | S3 日请求基线 | 已有数据：edge worker 今日 invocations=3642（GraphQL Analytics 实测），gate 预估增量远低于免费额度 |
 
 **下一步阻塞点**：CF API Token（Workers Scripts:Edit + Zone Routes 权限）→ gate worker 远程部署 → 执行 S1/S2。
+
+### 追加诊断（2026-08-22 部署后，同日）
+
+| 发现 | 证据 |
+|------|------|
+| gate.ponyjob.top 已上线 | 账户级 Custom Domains API 绑定成功（绕开 dashboard 故障）；/debug 200 |
+| **CF 官方 Minor Service Outage 进行中** | 状态页：全球数十个 PoP partial_outage/under_maintenance；但 Workers/WebSockets/Dashboard 组件标记 operational（组件级与 PoP 级状态背离） |
+| **WS 数据帧黑洞（核心症状）** | 101 握手协议层正常完成（curl verbose 确认 Sec-WebSocket-Accept 正确），但握手后双向数据帧全部丢失；accept 前置/ctx 两模式、本地计数器均无法收到帧 |
+| 行为抖动 | 同一请求时而 101 时而 Empty Reply（不同 PoP/路径健康度不一） |
+
+**结论修正**：此前怀疑的代码问题（accept 模式/ctx 迁移）均非根因——当前窗口处于 CF 全球 PoP 部分中断期，spike 数据不可信。**S1/S2 顺延至官方状态页恢复全绿后重测**；重测时需一并裁决生产边缘的 accept 模式口径（旧式 accept() 与 ctx.acceptWebSocket 在恢复后的干净窗口各验一次）。期间产品代码开发不受阻（引擎/白名单/PAC 纯函数与 UI 可先行，WS 行为验证留待窗口恢复）。

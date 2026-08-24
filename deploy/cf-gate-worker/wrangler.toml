@@ -2,7 +2,7 @@
 # 独立于 edge 生产通道；部署后经 dashboard 绑定自定义域 gate.ponyjob.top
 name = "pony-gate"
 main = "worker.js"
-compatibility_date = "2026-08-01"
+compatibility_date = "2024-09-01"
 
 [observability]
 enabled = true

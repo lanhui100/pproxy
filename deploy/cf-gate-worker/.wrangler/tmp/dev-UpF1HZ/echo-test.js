@@ -1,102 +1,26 @@
 var __defProp = Object.defineProperty;
 var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
 
-// worker.js
-import { connect } from "cloudflare:sockets";
-var ALLOWED_PORTS = /* @__PURE__ */ new Set([443]);
-var MAX_NAME_LEN = 253;
-async function sha256Hex(s) {
-  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
-}
-__name(sha256Hex, "sha256Hex");
-function validHost(h) {
-  if (!h || typeof h !== "string" || h.length > MAX_NAME_LEN) return false;
-  const lower = h.toLowerCase().replace(/\.$/, "");
-  if (lower === "localhost" || lower.endsWith(".localhost")) return false;
-  if (/^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(lower)) return false;
-  if (/^0177\.|^0x7f\.|^\[?::1\]?$/.test(lower)) return false;
-  return true;
-}
-__name(validHost, "validHost");
-var worker_default = {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (url.pathname === "/debug") {
-      return new Response(
-        JSON.stringify({ set: typeof env.TUNNEL_TOKEN_HASH === "string" }),
-        { headers: { "content-type": "application/json" } }
-      );
-    }
-    if (url.pathname !== "/ws") return new Response("not found", { status: 404 });
+// echo-test.js
+var echo_test_default = {
+  async fetch(request, env, ctx) {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return new Response("websocket required", { status: 400 });
-    }
-    const auth = request.headers.get("Authorization") ?? "";
-    const presented = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-    const hash = await sha256Hex(presented);
-    if (!presented || hash !== env.TUNNEL_TOKEN_HASH) {
-      return new Response("unauthorized", { status: 401 });
+      return new Response("need ws", { status: 400 });
     }
     const pair = new WebSocketPair();
     const server = pair[1];
+    const keys = [];
+    let o = ctx;
+    while (o && o !== Object.prototype) {
+      keys.push(...Object.getOwnPropertyNames(o));
+      o = Object.getPrototypeOf(o);
+    }
     server.accept();
-    let established = false;
-    let writer = null;
-    server.addEventListener("message", async (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        writer?.write(new Uint8Array(event.data));
-        return;
-      }
-      if (established) return;
-      let req;
-      try {
-        req = JSON.parse(event.data);
-      } catch {
-        server.close(1008, "bad first frame");
-        return;
-      }
-      const port = Number(req.port);
-      if (!validHost(req.host) || !ALLOWED_PORTS.has(port)) {
-        server.send(JSON.stringify({ ok: false, reason: "acl denied" }));
-        server.close(1008, "acl denied");
-        return;
-      }
-      try {
-        console.log("[gate] connecting", req.host, port);
-        const sock = connect({ hostname: req.host, port });
-        const up = sock.writable.getWriter();
-        await sock.opened;
-        established = true;
-        server.send(JSON.stringify({ ok: true }));
-        sock.readable.pipeTo(
-          new WritableStream({
-            write(chunk) {
-              try {
-                server.send(chunk);
-              } catch {
-              }
-            }
-          })
-        ).catch(() => {
-          try {
-            server.close(1e3, "upstream closed");
-          } catch {
-          }
-        });
-        writer = up;
-      } catch (e) {
-        console.log("[gate] connect error", String(e));
-        server.send(JSON.stringify({ ok: false, reason: String(e) }));
-        try {
-          server.close(1011, "connect failed");
-        } catch {
-        }
-      }
-    });
-    server.addEventListener("close", () => {
-      writer?.close().catch(() => {
-      });
+    server.send("ctx-keys:" + JSON.stringify([...new Set(keys)]));
+    server.addEventListener("message", (e) => server.send("echo:" + String(e.data).slice(0, 40)));
+    server.addEventListener("message", (e) => {
+      console.log("[echo] got:", typeof e.data);
+      server.send("echo:" + String(e.data).slice(0, 50));
     });
     return new Response(null, { status: 101, webSocket: server });
   }
@@ -149,12 +73,12 @@ var jsonError = /* @__PURE__ */ __name(async (request, env, _ctx, middlewareCtx)
 }, "jsonError");
 var middleware_miniflare3_json_error_default = jsonError;
 
-// .wrangler/tmp/bundle-4fEijB/middleware-insertion-facade.js
+// .wrangler/tmp/bundle-FADRGs/middleware-insertion-facade.js
 var __INTERNAL_WRANGLER_MIDDLEWARE__ = [
   middleware_ensure_req_body_drained_default,
   middleware_miniflare3_json_error_default
 ];
-var middleware_insertion_facade_default = worker_default;
+var middleware_insertion_facade_default = echo_test_default;
 
 // node_modules/.pnpm/wrangler@4.125.0/node_modules/wrangler/templates/middleware/common.ts
 var __facade_middleware__ = [];
@@ -181,7 +105,7 @@ function __facade_invoke__(request, env, ctx, dispatch, finalMiddleware) {
 }
 __name(__facade_invoke__, "__facade_invoke__");
 
-// .wrangler/tmp/bundle-4fEijB/middleware-loader.entry.ts
+// .wrangler/tmp/bundle-FADRGs/middleware-loader.entry.ts
 var __Facade_ScheduledController__ = class ___Facade_ScheduledController__ {
   constructor(scheduledTime, cron, noRetry) {
     this.scheduledTime = scheduledTime;
@@ -283,4 +207,4 @@ export {
   __INTERNAL_WRANGLER_MIDDLEWARE__,
   middleware_loader_entry_default as default
 };
-//# sourceMappingURL=worker.js.map
+//# sourceMappingURL=echo-test.js.map

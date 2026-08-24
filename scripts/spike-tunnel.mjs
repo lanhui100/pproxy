@@ -40,43 +40,45 @@ function bridge(ws) {
   return { sock, pushCipher: (d) => { pushed += d.length; sock.push(Buffer.from(d)) }, pushed: () => pushed }
 }
 
-/** 单次下载：建隧道→TLS→GET→拉到连接关闭。st 为外部聚合容器。 */
+/** 单次下载：建隧道→TLS→GET→拉到连接关闭。直接变异外部 st（聚合无丢失）。 */
 function oneDownload(id, st, deadlineMs) {
   return new Promise((resolve) => {
-    if (Date.now() >= deadlineMs) return resolve({ ...st })
-    const result = { ...st, phase: 'connect', error: '' }
+    if (Date.now() >= deadlineMs || Date.now() - st.lastRoundEnd < 300 && st.rounds > 0) {
+      return resolve()
+    }
     const ws = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${token}` } })
     const remaining = deadlineMs - Date.now()
-    const kill = setTimeout(() => finish(new Error(`deadline hit (${remaining}ms left)`)), Math.max(remaining, 1000))
+    const kill = setTimeout(() => fail(new Error(`deadline hit (${Math.max(remaining, 0)}ms left)`)), Math.max(remaining, 1000))
     let bridgeRef = null
 
-    function finish(err) {
+    function fail(err) {
       clearTimeout(kill)
-      if (err) { result.error = String(err.message ?? err); result.ok = false }
+      st.error = String(err.message ?? err)
+      st.ok = false
       try { ws.close() } catch {}
-      resolve(result)
+      resolve()
     }
 
-    ws.on('error', (e) => finish(e))
+    ws.on('error', (e) => fail(e))
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
         bridgeRef?.pushCipher(data)
-        result.cipherIn = bridgeRef.pushed()
+        st.cipherIn = bridgeRef.pushed()
         return
       }
       const msg = JSON.parse(data.toString())
-      if (!msg.ok) return finish(new Error(`tunnel denied: ${msg.reason ?? ''}`))
+      if (!msg.ok) return fail(new Error(`tunnel denied: ${msg.reason ?? ''}`))
 
-      result.phase = 'tls'
+      st.phase = 'tls'
       const br = bridge(ws)
       bridgeRef = br
       const tlsSock = tls.connect({ socket: br.sock, servername: TARGET_HOST }, () => {
-        result.phase = 'http'
+        st.phase = 'http'
         tlsSock.write(
           `GET ${filePath} HTTP/1.1\r\nHost: ${TARGET_HOST}\r\nUser-Agent: spike/1.0\r\nConnection: close\r\n\r\n`,
         )
       })
-      tlsSock.on('error', (e) => finish(e))
+      tlsSock.on('error', (e) => fail(e))
       let headerDone = false
       tlsSock.on('data', (chunk) => {
         if (!headerDone) {
@@ -84,14 +86,19 @@ function oneDownload(id, st, deadlineMs) {
           if (idx > -1) {
             headerDone = true
             const status = Number(chunk.slice(9, 12))
-            if (status !== 200) return finish(new Error(`HTTP ${status} over tunnel`))
-            result.plainMB += (chunk.length - idx - 4) / 1048576
+            if (status !== 200) return fail(new Error(`HTTP ${status} over tunnel`))
+            st.plainMB += (chunk.length - idx - 4) / 1048576
           }
           return
         }
-        result.plainMB += chunk.length / 1048576
+        st.plainMB += chunk.length / 1048576
       })
-      tlsSock.on('close', () => finish(null)) // Connection: close → 服务端关=本轮完成
+      tlsSock.on('close', () => {
+        st.lastRoundEnd = Date.now()
+        st.rounds++
+        clearTimeout(kill)
+        resolve()
+      })
     })
 
     ws.on('open', () => {
@@ -109,11 +116,9 @@ async function worker(id) {
     return { ...st, ...r }
   }
   while (Date.now() < deadline && !st.error) {
-    const before = Date.now()
     await oneDownload(id, st, deadline)
-    st.rounds++
-    if (Date.now() - before < 500) break // 防空转死循环（文件缺失等）
   }
+  st.ms = Date.now() - (deadline - (loopSec > 0 ? loopSec : 60) * 1000)
   return st
 }
 
