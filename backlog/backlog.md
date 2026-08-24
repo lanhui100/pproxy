@@ -8,6 +8,15 @@
 
 ## 待办
 
+### B002 — Vercel 出口（vedge.ponyjob.top）超时排查与恢复 ⏸ blocked-by-external
+- **触发**：2026-08-24 M7 前端 UX 实测发现——服务端测速 `POST /api/routes/openai/test`（vercel 线）10s timeout；
+  直探 `https://vedge.ponyjob.top` 6s 无响应；`/api/quota` 监控同步报 `vercel: error`
+- **对照证据**：同期 CF Worker 线路正常——anthropic 经 worker 1025ms 穿透上游（404=根路径正常）、
+  edge 边缘可达 → 故障定位于 **Vercel 函数/出口侧，而非 CF**
+- **动作**：① 查 Vercel dashboard 部署状态与区域事件；② `curl -m6 https://vedge.ponyjob.top` 复测至恢复；
+  ③ 恢复后经桌面端「服务」页模板网格重加 openai（默认自动决策即走 vercel），并用「测速」验证
+- **关联**：docs/product/specs/m7-frontend-ux/DELIVERY.md §实测记录
+
 ### B001 — CF 故障恢复后重测 S1/S2 spike ⏸ blocked-by-external
 - **触发**：M6 P0 spike 期间遭遇 CF 全球 PoP 部分中断（Minor Service Outage），WS 数据帧黑洞，测试数据不可信
 - **动作**：监控 https://www.cloudflarestatus.com 恢复全绿后，重跑
