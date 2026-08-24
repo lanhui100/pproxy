@@ -57,14 +57,16 @@ export async function clearAdminToken(): Promise<void> {
 
 /** 轮询间隔归一化：0 = 不自动轮询（合法档位）；负数/NaN 回落 5；其余下限 1。 */
 export function normalizePollMin(v: number): number {
-  if (!Number.isFinite(v)) return 5
+  if (!Number.isFinite(v) || v < 0) return 5
   if (v === 0) return 0
   return Math.max(1, Math.floor(v))
 }
 
 function readPollMin(): number {
   if (typeof localStorage === 'undefined') return 5
-  return normalizePollMin(Number(localStorage.getItem(POLL_INTERVAL_KEY)))
+  const raw = localStorage.getItem(POLL_INTERVAL_KEY)
+  // 仅显式存储的值参与往返（"0"=手动档）；key 缺失/空串回落默认 5（R2-ENG-2）
+  return raw === null || raw.trim() === '' ? 5 : normalizePollMin(Number(raw))
 }
 
 /** 轮询间隔模块级单例（响应式）：设置页改动即时持久化并热生效。 */
