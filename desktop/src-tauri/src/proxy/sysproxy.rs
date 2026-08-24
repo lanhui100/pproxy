@@ -41,13 +41,13 @@ pub fn enable(mode: Mode) -> Result<Snapshot, String> {
 
     match mode {
         Mode::Pac => {
-            key.set_value("AutoConfigURL", &PAC_URL)?;
+            key.set_value("AutoConfigURL", &PAC_URL).map_err(|e| e.to_string())?;
             key.delete_value("ProxyEnable").ok();
         }
         Mode::Manual => {
-            key.set_value("ProxyEnable", &1u32)?;
-            key.set_value("ProxyServer", &"127.0.0.1:18900")?;
-            key.set_value("ProxyOverride", &"<local>")?;
+            key.set_value("ProxyEnable", &1u32).map_err(|e| e.to_string())?;
+            key.set_value("ProxyServer", &"127.0.0.1:18900").map_err(|e| e.to_string())?;
+            key.set_value("ProxyOverride", &"<local>").map_err(|e| e.to_string())?;
             key.delete_value("AutoConfigURL").ok();
         }
     }
@@ -69,12 +69,12 @@ pub fn disable(snapshot: &Snapshot) -> Result<(), String> {
         key.delete_value("ProxyEnable").ok();
     }
     match &snapshot.proxy_server {
-        Some(v) => key.set_value("ProxyServer", v)?,
-        None => key.delete_value("ProxyServer").ok(),
+        Some(v) => key.set_value("ProxyServer", v).map_err(|e| e.to_string())?,
+        None => { key.delete_value("ProxyServer").ok(); }
     }
     match &snapshot.autoconfig_url {
-        Some(v) => key.set_value("AutoConfigURL", v)?,
-        None => key.delete_value("AutoConfigURL").ok(),
+        Some(v) => key.set_value("AutoConfigURL", v).map_err(|e| e.to_string())?,
+        None => { key.delete_value("AutoConfigURL").ok(); }
     }
     broadcast_change();
     Ok(())
