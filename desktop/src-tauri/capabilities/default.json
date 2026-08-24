@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "pony-desktop \u6700\u5c0f\u6388\u6743\uff1a\u901a\u77e5 + http\uff08scope \u9501\u5b9a\u7ba1\u7406\u9762\u5730\u5740\uff09+ \u81ea\u5b9a\u4e49\u51ed\u636e\u547d\u4ee4",
+  "description": "pony-desktop 授权：通知 + http（scope 通配放行任意 http/https 主机与端口——个人工具威胁模型：无第三方内容渲染、目标地址仅来自用户设置项；CSP connect-src 'none' 未放宽。语法依据：URLPattern 构造串省略 port 仅匹配默认端口，须显式 :* 才通配含默认端口在内全部端口——tauri#12734 维护者确认、plugins-workspace#2131、tauri-plugin-http 2.5.9 scope.rs 仅对 pathname/search/hash 补 *）+ 自定义凭据命令",
   "windows": [
     "main"
   ],
@@ -12,13 +12,10 @@
       "identifier": "http:default",
       "allow": [
         {
-          "url": "http://<TAILNET_IP>:8900/*"
+          "url": "http://*:*"
         },
         {
-          "url": "http://127.0.0.1:8900/*"
-        },
-        {
-          "url": "http://<tailnet-host>:8900/*"
+          "url": "https://*:*"
         }
       ]
     },

@@ -1,9 +1,11 @@
 // 告警通知轮询（M5 §5）：unread alerts → OS 通知；id 去重集 cap 5000 FIFO；
 // 平台坑兜底：应用内未读横幅常驻 + 前台恢复立即刷新（F18）。
-import { onMounted, onUnmounted, ref } from 'vue'
+// M7：间隔响应式热生效；0 = 不自动轮询（仍保留前台恢复与手动刷新，不建 interval）。
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { api } from '@/api/client'
-import { isTauri } from '@/lib/config'
+import { alertLevelLabel } from '@/lib/format'
+import { isTauri, pollIntervalMin } from '@/lib/config'
 
 const DEDUP_KEY = 'pony-notified-alerts'
 const DEDUP_CAP = 5000
@@ -36,7 +38,7 @@ const unreadCount = ref(0)
 let timer: ReturnType<typeof setInterval> | null = null
 let visibilityHandler: (() => void) | null = null
 
-export function useAlertNotifications(pollIntervalMinRef: () => number) {
+export function useAlertNotifications() {
   const lastError = ref('')
 
   async function pollOnce(): Promise<void> {
@@ -48,7 +50,7 @@ export function useAlertNotifications(pollIntervalMinRef: () => number) {
       for (const a of r.alerts) {
         if (seen.has(a.id)) continue
         seen.add(a.id)
-        await notifyOs(`配额告警 [${a.level}]`, a.message)
+        await notifyOs('用量告警', `${alertLevelLabel(a.level)} · ${a.message}`)
       }
       if (seen.size > DEDUP_CAP) saveDedup([...seen].slice(-DEDUP_CAP))
       else saveDedup([...seen])
@@ -57,9 +59,18 @@ export function useAlertNotifications(pollIntervalMinRef: () => number) {
     }
   }
 
+  /** 建/重建 interval；0 档只清不建（前台恢复与手动刷新仍可用）。 */
+  function armTimer(): void {
+    if (timer) clearInterval(timer)
+    timer = null
+    if (pollIntervalMin.value > 0) {
+      timer = setInterval(() => void pollOnce(), pollIntervalMin.value * 60_000)
+    }
+  }
+
   function start(): void {
     void pollOnce()
-    timer = setInterval(() => void pollOnce(), pollIntervalMinRef() * 60_000)
+    armTimer()
     visibilityHandler = () => {
       if (document.visibilityState === 'visible') void pollOnce()
     }
@@ -71,6 +82,9 @@ export function useAlertNotifications(pollIntervalMinRef: () => number) {
     if (visibilityHandler) document.removeEventListener('visibilitychange', visibilityHandler)
     timer = null
   }
+
+  // 设置页改档位即时生效：仅重建 timer，不动监听器
+  watch(pollIntervalMin, () => armTimer())
 
   onMounted(start)
   onUnmounted(stop)
