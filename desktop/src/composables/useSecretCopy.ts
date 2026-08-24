@@ -21,6 +21,8 @@ export function _setClipboardDepsForTest(patch: Partial<ClipboardDeps>): void {
 
 let clearTimer: ReturnType<typeof setTimeout> | null = null
 let lastValue = ''
+// 代际号：releaseAll/新复制使在途 write 作废，杜绝「关闭后定时器复活」竞态（R2-SEC-2）
+let epoch = 0
 
 /** 尽力而为清剪贴板：仅当内容仍是我们的值时才写空（防误伤用户后复制的内容）。 */
 async function tryClear(value: string): Promise<void> {
@@ -33,7 +35,19 @@ async function tryClear(value: string): Promise<void> {
 
 export async function copySecret(text: string, opts?: { onCopied?: () => void }): Promise<void> {
   if (clearTimer) clearTimeout(clearTimer)
-  await deps.write(text)
+  const my = ++epoch
+  try {
+    await deps.write(text)
+  } catch (e) {
+    // 写失败：旧值若仍在剪贴板则重建其清理任务（场景 B：取消与重设间无原子性）
+    if (lastValue) void tryClear(lastValue)
+    throw e
+  }
+  if (my !== epoch) {
+    // 在途期间发生 releaseAll/新复制：作废本次结果，立即尽力擦除刚写入的值
+    void tryClear(text)
+    return
+  }
   lastValue = text
   opts?.onCopied?.()
   clearTimer = setTimeout(() => {
@@ -43,6 +57,7 @@ export async function copySecret(text: string, opts?: { onCopied?: () => void })
 }
 
 export function releaseAll(): void {
+  epoch++
   if (clearTimer) {
     clearTimeout(clearTimer)
     clearTimer = null

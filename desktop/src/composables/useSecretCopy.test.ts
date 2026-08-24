@@ -57,4 +57,43 @@ describe('useSecretCopy', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(writes).toEqual(['mine']) // 读回不一致 → 不写空
   })
+
+  it('在途写入期间 releaseAll：写入完成后不复活定时器并立即擦除', async () => {
+    let resolveWrite!: () => void
+    _setClipboardDepsForTest({
+      write: async (t) => {
+        writes.push(t)
+        readValue = t
+        await new Promise<void>((res) => {
+          resolveWrite = res
+        })
+      },
+      read: async () => readValue,
+    })
+    const pending = copySecret('in-flight') // 写入已发起但仍挂起
+    releaseAll() // 用户此刻关闭对话框
+    expect(writes).toContain('in-flight')
+    resolveWrite() // 挂起的写入完成
+    await pending.catch(() => {})
+    await vi.advanceTimersByTimeAsync(120_000)
+    // 唯一一次空写发生在写入完成后的即时擦除；无定时器复活产生第二次
+    expect(writes.filter((w) => w === '')).toHaveLength(1)
+  })
+
+  it('第二次复制失败：旧值立即获得清理，不再无限期滞留', async () => {
+    let failNext = false
+    _setClipboardDepsForTest({
+      write: async (t) => {
+        if (failNext && t === 'B') throw new Error('denied')
+        writes.push(t)
+        readValue = t
+      },
+      read: async () => readValue,
+    })
+    await copySecret('A')
+    failNext = true
+    await expect(copySecret('B')).rejects.toThrow('denied')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(writes.filter((w) => w === '')).toHaveLength(1) // A 被即时清理
+  })
 })
