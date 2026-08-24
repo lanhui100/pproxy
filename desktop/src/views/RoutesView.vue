@@ -36,7 +36,6 @@ const LINE_LABELS = {
 const routes = ref<RouteDto[]>([])
 const loading = ref(false)
 const loadError = ref('')
-const pageError = ref('') // 切换/删除等动作失败的页内横幅
 
 async function refresh(): Promise<void> {
   loading.value = true
@@ -110,13 +109,13 @@ const togglingName = ref('')
 
 async function toggle(r: RouteDto): Promise<void> {
   togglingName.value = r.name
-  pageError.value = ''
   try {
     // 三态语义：仅动 enabled，override_upstream 字段整体缺席=不改（F17 分支之一）
     const resp = await api.patchRoute(r.name, { enabled: !r.enabled })
     r.enabled = resp.enabled
   } catch (e) {
-    pageError.value = errText(e)
+    // 失败统一 toast（UX-5 / SPEC §2-5）；行内开关由 resp 未更新自然回弹
+    toast.error(errText(e))
   } finally {
     togglingName.value = ''
   }
@@ -149,7 +148,6 @@ function failMessage(name: string): string {
 
 async function runTest(r: RouteDto): Promise<void> {
   tests.value[r.name] = { phase: 'testing' }
-  pageError.value = ''
   try {
     const t = await api.testRoute(r.name, { skipAuthRedirect: true })
     tests.value[r.name] = t.ok
@@ -180,7 +178,8 @@ async function switchLine(r: RouteDto, upstream: string): Promise<void> {
     await runTest(fresh)
     toast.success(`已切换至${upstream === 'worker' ? LINE_LABELS.worker : LINE_LABELS.vercel}，正在重测`)
   } catch (e) {
-    pageError.value = errText(e)
+    // 失败统一 toast（UX-5）；连通性列同步落失败态，保留切换线路/重测入口
+    toast.error(errText(e))
     tests.value[r.name] = { phase: 'fail', message: errText(e) }
   } finally {
     switchingName.value = ''
@@ -199,7 +198,6 @@ const deleteTarget = ref<RouteDto | null>(null)
 const deleting = ref(false)
 
 function askDelete(r: RouteDto): void {
-  pageError.value = ''
   deleteTarget.value = r
 }
 
@@ -211,7 +209,8 @@ async function doDelete(): Promise<void> {
     deleteTarget.value = null
     await refresh()
   } catch (e) {
-    pageError.value = errText(e)
+    // 失败统一 toast（UX-5 / SPEC §2-5）；Dialog 已随 deleteTarget 置空关闭
+    toast.error(errText(e))
     deleteTarget.value = null
   } finally {
     deleting.value = false
