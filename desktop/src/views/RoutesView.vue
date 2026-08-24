@@ -240,12 +240,6 @@ async function doDelete(): Promise<void> {
       </template>
     </PageHeader>
 
-    <!-- 页内错误行内横幅 -->
-    <div v-if="pageError" class="mb-4 flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-      <span>{{ pageError }}</span>
-      <button class="underline" @click="pageError = ''">知道了</button>
-    </div>
-
     <!-- 加载骨架 -->
     <SkeletonTable v-if="loading && routes.length === 0" :rows="6" />
 
@@ -255,13 +249,15 @@ async function doDelete(): Promise<void> {
       <Button variant="outline" size="sm" class="ml-2" @click="refresh">重试</Button>
     </div>
 
-    <!-- 空态（CTA 下一步） -->
+    <!-- 空态（CTA 下一步）：EmptyState 仅渲染具名插槽 #actions -->
     <EmptyState
       v-else-if="routes.length === 0"
       title="还没有服务路由"
       description="从常用服务模板一键添加，或手动填入任意目标域名。"
     >
-      <Button @click="openAdd">添加服务</Button>
+      <template #actions>
+        <Button @click="openAdd">添加服务</Button>
+      </template>
     </EmptyState>
 
     <!-- 列表 -->
@@ -342,8 +338,8 @@ async function doDelete(): Promise<void> {
       </Table>
     </div>
 
-    <!-- 添加对话框（两段式）：错误在内部渲染，失败不关不清 -->
-    <Dialog :open="showAdd" @update:open="(v: boolean) => !v && (showAdd = false)">
+    <!-- 添加对话框（两段式）：错误在内部渲染，失败不关不清；busy 中 Esc/遮罩不可关（UX-7③） -->
+    <Dialog :open="showAdd" @update:open="onAddOpenChange">
       <DialogContent class="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>添加服务</DialogTitle>
