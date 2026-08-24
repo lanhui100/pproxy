@@ -259,13 +259,15 @@ async function doRevoke(): Promise<void> {
       <Button variant="outline" size="sm" class="ml-2" @click="refresh">重试</Button>
     </div>
 
-    <!-- 空态（CTA 下一步） -->
+    <!-- 空态（CTA 下一步）：EmptyState 仅渲染具名插槽 #actions -->
     <EmptyState
       v-else-if="tokens.length === 0"
       title="还没有设备密钥"
       description="为每台设备发一把独立钥匙，随时可单独撤销而不影响其他设备。"
     >
-      <Button @click="openCreate">创建第一个设备密钥</Button>
+      <template #actions>
+        <Button @click="openCreate">创建第一个设备密钥</Button>
+      </template>
     </EmptyState>
 
     <!-- 列表 -->
