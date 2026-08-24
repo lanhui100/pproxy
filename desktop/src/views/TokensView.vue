@@ -34,7 +34,6 @@ const toast = useToast()
 const tokens = ref<TokenDto[]>([])
 const loading = ref(false)
 const loadError = ref('')
-const pageError = ref('') // 行内动作失败的页内横幅
 
 async function refresh(): Promise<void> {
   loading.value = true
@@ -223,7 +222,6 @@ const revokeTarget = ref<TokenDto | null>(null)
 const revoking = ref(false)
 
 function askRevoke(t: TokenDto): void {
-  pageError.value = ''
   revokeTarget.value = t
 }
 
@@ -235,8 +233,8 @@ async function doRevoke(): Promise<void> {
     revokeTarget.value = null
     await refresh()
   } catch (e) {
-    // admin 行禁撤等错误经 errText 译中文，行内横幅展示
-    pageError.value = errText(e)
+    // admin 行禁撤等错误经 errText 译中文；失败统一 toast（UX-5 / SPEC §2-5 一切失败必 toast）
+    toast.error(errText(e))
     revokeTarget.value = null
   } finally {
     revoking.value = false
@@ -251,12 +249,6 @@ async function doRevoke(): Promise<void> {
         <Button @click="openCreate">创建</Button>
       </template>
     </PageHeader>
-
-    <!-- 页内错误行内横幅（撤销失败等），可手动收起 -->
-    <div v-if="pageError" class="mb-4 flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-      <span>{{ pageError }}</span>
-      <button class="underline" @click="pageError = ''">知道了</button>
-    </div>
 
     <!-- 加载骨架 -->
     <SkeletonTable v-if="loading && tokens.length === 0" :rows="6" />
