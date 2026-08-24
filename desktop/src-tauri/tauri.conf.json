@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Pony Proxy",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "identifier": "com.ponyjob.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -57,5 +57,6 @@
         "installMode": "passive"
       }
     }
-  }
+  },
+  "mainBinaryName": "pony-desktop"
 }
