@@ -16,6 +16,18 @@
 - **动作**：① 查 Vercel dashboard 部署状态与区域事件；② `curl -m6 https://vedge.ponyjob.top` 复测至恢复；
   ③ 恢复后经桌面端「服务」页模板网格重加 openai（默认自动决策即走 vercel），并用「测速」验证
 - **关联**：docs/product/specs/m7-frontend-ux/DELIVERY.md §实测记录
+- **判决与处置（2026-08-24）**：
+  - **根因**：中国联通出口 → Vercel anycast(66.33.60.x/76.76.21.x) 路由劣化（高置信；全球 10 节点正常、部署 READY、LE 证书有效）
+  - **已执行**：① openai 路由已按 `override_upstream=worker` 重加——创建 201，
+    测速 `POST /api/routes/openai/test` ok=true / status=403 / latency=623ms；
+    ② 数据面 E2E 探测通过——临时密钥（m7-b002-probe，用后即撤）穿透 `GET …/openai/v1/models`
+    返回上游响应码 **403**、耗时 **1.14s**（注：数据面仅绑定 `<TAILNET_IP>:8899`，
+    回环 127.0.0.1 拒连，故探测走该地址）；③ vedge 每 5 分钟只读探针已布防
+    （用户级 crontab → `~/vedge-monitor.log`，HTTP 非 000 即线路回暖信号；
+    布防当日手动首测已回 `404 connect≈0.46s total≈0.69s`）
+  - **待决策（用户）**：中期方案「vedge 改 CF 橙云代理回源 cname.vercel.com（SSL Full strict）」
+    ——低-中风险、分钟级生效、可即时回滚；因涉生产 DNS 由用户拍板
+  - **状态维持** ⏸ blocked-by-external（vercel 线本身恢复以探针日志为准）
 
 ### B001 — CF 故障恢复后重测 S1/S2 spike ⏸ blocked-by-external
 - **触发**：M6 P0 spike 期间遭遇 CF 全球 PoP 部分中断（Minor Service Outage），WS 数据帧黑洞，测试数据不可信
