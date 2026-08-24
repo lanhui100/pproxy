@@ -18,14 +18,12 @@ export function deriveDataPlane(adminUrl: string): string | null {
   // 去掉路径部分与尾斜杠
   const hostPort = rest.split('/')[0]
   if (!hostPort) return null
-  // 端口为纯数字则剥掉，host 留存；无端口或非数字段视作 host 本体
-  const host = hostPort.includes(':')
-    ? (() => {
-        const idx = hostPort.lastIndexOf(':')
-        const maybePort = hostPort.slice(idx + 1)
-        return maybePort.length > 0 && /^[0-9]+$/.test(maybePort) ? hostPort.slice(0, idx) : null
-      })()
-    : hostPort
+  // 端口解析对齐 Rust rsplit_once 语义：尾段为纯数字（含空串，与 Rust
+  // `.all(is_ascii_digit)` 对空串返回 true 一致）即剥除；否则整段保留（R2-ENG-6）
+  const lastColon = hostPort.lastIndexOf(':')
+  const maybePort = lastColon >= 0 ? hostPort.slice(lastColon + 1) : null
+  const stripped = maybePort !== null && /^[0-9]*$/.test(maybePort)
+  const host = stripped ? hostPort.slice(0, lastColon) : hostPort
   if (!host) return null
   return `${scheme}://${host}:${DATA_PLANE_PORT}`
 }

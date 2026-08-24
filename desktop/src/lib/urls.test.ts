@@ -33,4 +33,16 @@ describe('deriveDataPlane', () => {
   it('IPv6 字面量带端口时取最后冒号分段', () => {
     expect(deriveDataPlane('http://[::1]:8900')).toBe('http://[::1]:8899')
   })
+
+  it('IPv6 无端口字面量整段保留（对齐 Rust _ 臂）', () => {
+    expect(deriveDataPlane('http://[2001:db8::1]')).toBe('http://[2001:db8::1]:8899')
+  })
+
+  it('含冒号但尾段非数字：整段保留为 host（对齐 Rust）', () => {
+    expect(deriveDataPlane('http://host:foo')).toBe('http://host:foo:8899')
+  })
+
+  it('尾部空端口串按数字语义剥除（对齐 Rust 空串 all(digit)）', () => {
+    expect(deriveDataPlane('http://host:/x')).toBe('http://host:8899')
+  })
 })
