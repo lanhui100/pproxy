@@ -10,4 +10,5 @@
 pub mod engine;
 pub mod engine_tunnel;
 pub mod pac;
+pub mod sysproxy;
 pub mod whitelist;

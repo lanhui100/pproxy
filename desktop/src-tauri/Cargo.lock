@@ -2877,6 +2877,8 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "tokio-tungstenite",
+ "windows-sys 0.59.0",
+ "winreg",
 ]
 
 [[package]]

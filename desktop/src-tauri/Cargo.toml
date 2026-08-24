@@ -34,3 +34,7 @@ futures-util = "0.3"
 
 # 独立构建图：不吸收进 pproxy workspace（M5 spec §3 约束）
 [workspace]
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+winreg = "0.55"
