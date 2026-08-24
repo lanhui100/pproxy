@@ -106,3 +106,23 @@ mod tests {
         }
     }
 }
+
+/// 数据面公开分发（HTTPS 经 CF Tunnel；文件非机密+客户端验签，spec m6 §12）。
+pub(crate) async fn dsk_file_public(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    let Some(name) = sanitize_filename(&name) else {
+        return (StatusCode::BAD_REQUEST, "invalid filename").into_response()
+    };
+    let dir = std::env::var("PPROXY_DESKTOP_DIST_DIR")
+        .unwrap_or_else(|_| "/home/USER/pony-desktop-releases".into());
+    match tokio::fs::read(std::path::PathBuf::from(dir).join(&name)).await {
+        Ok(bytes) => {
+            let ct = if name.ends_with(".json") { "application/json" }
+                     else if name.ends_with(".sig") { "text/plain" }
+                     else { "application/octet-stream" };
+            (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, ct)], bytes).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}

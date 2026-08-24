@@ -52,6 +52,7 @@ pub struct GatewayState {
 pub fn data_router(state: GatewayState) -> Router {
     Router::new()
         .route("/", get(info_endpoint))
+        .route("/dsk/:filename", get(crate::dsk::dsk_file_public))
         .route(
             "/*rest",
             get(forward_handler)
@@ -85,7 +86,8 @@ pub async fn auth_middleware(
 ) -> Response {
     // 根路径 info 端点不鉴权（T3 §4.3）
     let path = req.uri().path().to_string();
-    if path == "/" {
+    if path == "/" || path.starts_with("/dsk/") {
+        // 根信息端点（T3 §4.3）与 M6 桌面分发（非机密产物+客户端验签）不鉴权
         return next.run(req).await;
     }
 
