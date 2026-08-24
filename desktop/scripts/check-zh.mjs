@@ -47,7 +47,7 @@ function templateTextNodes(source) {
 
 const violations = []
 
-for (const name of ['DashboardView.vue', 'RoutesView.vue', 'TokensView.vue', 'UsageView.vue', 'SettingsView.vue']) {
+for (const name of ['DashboardView.vue', 'RoutesView.vue', 'TokensView.vue', 'UsageView.vue', 'SettingsView.vue', 'ProxyView.vue']) {
   const file = join(ROOT, 'views', name)
   let source
   try {
