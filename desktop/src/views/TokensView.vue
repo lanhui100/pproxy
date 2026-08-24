@@ -23,6 +23,7 @@ import { copySecret, releaseAll } from '@/composables/useSecretCopy'
 import { useToast } from '@/composables/useToast'
 import { loadBackendUrl, loadDataPlaneUrl } from '@/lib/config'
 import { errText } from '@/lib/errors'
+import { resolveExpiresDays, type ExpiryMode } from '@/lib/expiry'
 import { fmtDate, fmtRelative } from '@/lib/format'
 import { tokenStatusLabel } from '@/lib/statusLabels'
 import { deriveDataPlane } from '@/lib/urls'
@@ -63,7 +64,6 @@ const showCreate = ref(false)
 const creating = ref(false)
 const createName = ref('')
 const createError = ref('')
-type ExpiryMode = 'never' | 'd30' | 'd90' | 'custom'
 const expiryMode = ref<ExpiryMode>('never')
 const customDays = ref('')
 
@@ -82,17 +82,22 @@ function openCreate(): void {
   showCreate.value = true
 }
 
+/** 创建中忽略 Esc/遮罩关闭（UX-7③）：busy 态下 @update:open 的 false 直接忽略。 */
+function onCreateOpenChange(v: boolean): void {
+  if (!v && creating.value) return
+  showCreate.value = v
+}
+
 async function createToken(): Promise<void> {
   createError.value = ''
-  // 自定义档位前端先行校验（避免 zod 裸抛）；expires_days 仅自定义且非空时携带
+  // 档位 → expires_days 走 lib/expiry 唯一出口（ENG-1）：
+  // 服务端缺 expires_days 键 = 永不过期，故除 never 外必须显式携带天数
   let expiresDays: number | undefined
-  if (expiryMode.value === 'custom') {
-    const n = Number(customDays.value)
-    if (!customDays.value.trim() || !Number.isInteger(n) || n <= 0) {
-      createError.value = '有效期需为正整数天数'
-      return
-    }
-    expiresDays = n
+  try {
+    expiresDays = resolveExpiresDays(expiryMode.value, Number(customDays.value))
+  } catch {
+    createError.value = '有效期不合法：需为正整数天数'
+    return
   }
   creating.value = true
   try {
@@ -300,8 +305,8 @@ async function doRevoke(): Promise<void> {
       </Table>
     </div>
 
-    <!-- 创建对话框：错误在内部渲染，失败不关不清 -->
-    <Dialog :open="showCreate" @update:open="(v: boolean) => !v && (showCreate = false)">
+    <!-- 创建对话框：错误在内部渲染，失败不关不清；busy 中 Esc/遮罩不可关（UX-7③） -->
+    <Dialog :open="showCreate" @update:open="onCreateOpenChange">
       <DialogContent class="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>创建设备密钥</DialogTitle>
