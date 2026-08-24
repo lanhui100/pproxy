@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Activity, Bell, Gauge, ListTree, Settings, Ticket } from '@lucide/vue'
+import { Activity, Bell, Gauge, Globe, ListTree, Settings, Ticket } from '@lucide/vue'
 
 import { onUnauthorized } from '@/api/client'
 import { loadPollIntervalMin } from '@/lib/config'
@@ -15,6 +15,7 @@ const nav = [
   { to: '/routes', label: 'Routes', icon: ListTree },
   { to: '/tokens', label: 'Tokens', icon: Ticket },
   { to: '/usage', label: 'Usage', icon: Activity },
+  { to: '/proxy', label: 'Proxy', icon: Globe },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 

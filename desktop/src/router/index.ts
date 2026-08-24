@@ -8,6 +8,7 @@ const router = createRouter({
     { path: '/routes', name: 'routes', component: () => import('@/views/RoutesView.vue') },
     { path: '/tokens', name: 'tokens', component: () => import('@/views/TokensView.vue') },
     { path: '/usage', name: 'usage', component: () => import('@/views/UsageView.vue') },
+    { path: '/proxy', name: 'proxy', component: () => import('@/views/ProxyView.vue') },
     { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
   ],
 })

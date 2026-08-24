@@ -78,3 +78,79 @@ fn credential_delete() -> Result<(), String> {
     Err(e) => Err(format!("credential delete failed: {e}")),
   }
 }
+
+// ---- M6 系统级白名单代理（spec m6 §4/§5）----
+use std::sync::atomic::{AtomicBool, Ordering as AOrd};
+
+const WL_KEY: &str = "pony-proxy-whitelist";
+
+#[tauri::command]
+fn proxy_whitelist_get() -> Vec<String> {
+    let dir = data_dir();
+    std::fs::read_to_string(dir.join("whitelist.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(seed)
+}
+
+fn seed() -> Vec<String> {
+    ["github.com", "google.com", "youtube.com", "googlevideo.com", "githubassets.com", "googleusercontent.com", "gstatic.com", "googleapis.com", "ytimg.com", "ggpht.com"]
+        .iter().map(|s| s.to_string()).collect()
+}
+
+fn data_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    { std::env::var("APPDATA").map(std::path::PathBuf::from).unwrap_or(std::env::temp_dir()).join("pony-desktop") }
+    #[cfg(not(windows))]
+    { std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".pony-desktop")).unwrap_or(std::env::temp_dir()) }
+}
+
+#[tauri::command]
+fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
+    for e in &entries {
+        if e.is_empty() || e.len() > 253 || !e.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')) {
+            return Err("invalid entry".into());
+        }
+    }
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("whitelist.json"), serde_json::to_string(&entries).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())
+}
+
+static ENGINE_ON: AtomicBool = AtomicBool::new(false);
+static mut ENGINE_TASK: Option<tauri::async_runtime::JoinHandle<()>> = None;
+static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync::Mutex::new(None);
+
+#[tauri::command]
+fn proxy_enable() -> Result<(), String> {
+    if ENGINE_ON.load(AOrd::SeqCst) { return Ok(()); }
+    let wl = proxy_whitelist_get();
+    let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url: None, tunnel_token: None }, stats).await {
+            log::warn!("proxy engine exited: {e}");
+        }
+    });
+    let snap = proxy::sysproxy::enable(proxy::sysproxy::Mode::Pac)?;
+    *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = Some(snap);
+    ENGINE_ON.store(true, AOrd::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn proxy_disable() -> Result<(), String> {
+    if !ENGINE_ON.load(AOrd::SeqCst) { return Ok(()); }
+    let snap_guard = SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(snap) = snap_guard.clone() {
+        proxy::sysproxy::disable(&snap)?;
+    }
+    ENGINE_ON.store(false, AOrd::SeqCst);
+    // 引擎进程内循环随应用生命周期运行（停用=仅还原系统代理）
+    Ok(())
+}
+
+#[tauri::command]
+fn proxy_pac() -> String {
+    proxy::pac::generate_pac(&proxy_whitelist_get())
+}
