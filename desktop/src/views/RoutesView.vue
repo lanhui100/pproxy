@@ -66,6 +66,12 @@ function openAdd(): void {
   showAdd.value = true
 }
 
+/** 添加中忽略 Esc/遮罩关闭（UX-7③）：busy 态下 @update:open 的 false 直接忽略。 */
+function onAddOpenChange(v: boolean): void {
+  if (!v && adding.value) return
+  showAdd.value = v
+}
+
 function resetAddForm(): void {
   addName.value = ''
   addHost.value = ''
@@ -73,10 +79,18 @@ function resetAddForm(): void {
   selectedTemplate.value = null
 }
 
-/** 点击模板：选中并填充下方表单（仍可再改）。 */
+/**
+ * 点击模板（UX-9）：仅当名称与 host 均为空时才自动填充；
+ * 已有手动输入时不得覆盖，只提示保留。
+ */
 function pickTemplate(name: string): void {
   const t = SERVICE_TEMPLATES.find((x) => x.name === name)
   if (!t) return
+  if (addName.value.trim() || addHost.value.trim()) {
+    // 不点亮选中态：模板并未生效，避免「看似已选、表单却是另一套」的误导
+    toast.info('已保留你的手动输入，模板未覆盖')
+    return
+  }
   selectedTemplate.value = t.name
   addName.value = t.name
   addHost.value = t.target_host
