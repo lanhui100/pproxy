@@ -333,11 +333,19 @@ UX-3 连接成功下一步指引；UX-4 自动复制对象标注；SEC-2/ENG-10 
 已修：ENG-8 负数→5；UX-5 失败反馈统一 toast；UX-7①②③；UX-8 禁用原因提示；UX-9 模板覆盖防护；
 UX-10 last_ok 上下文；UX-12 空态 CTA+占位符中文化+「目标域名」；SEC-6 general Tab 注释式示例对齐 CLI；
 SEC-3/ENG-9 keyring 失败回滚快照+独立文案；SEC-5 清除凭据文案如实化。
-**显式延后（交付报告披露）**：UX-6 占位符记法统一余量；UX-11 Chip 抽象/ui-card 统一（重构性收敛）；
-SEC-4 check-invariants 行级过滤可绕过（脚本降级为辅助信号，验收以人工 diff 复核为准）；
-scope 真机冒烟（环境无 Tauri WebView，列入附录 A 用户验收步骤）。
+**显式延后项已于清账批次全部处理**（见 §13）：UX-6 占位符记法统一（polish 提交）；
+UX-11 Chip 抽象/ui-card 统一/StatusDot size prop；SEC-4 check-invariants 换 jq 语义比对；
+SEC-5 残余（清除凭据结果如实反馈）。scope 真机冒烟保留为附录 A 用户验收步骤 T6。
 
 ### 接口卡偏差声明（ENG-11）
 useSecretCopy 实际签名为 `copySecret(text, opts?: { onCopied?: () => void })`，替代冻结卡
 `{ placeholderHint }`：调用方自行拼装 toast（含「60 秒后自动清空」固定文案），功能等效、职责更清晰。
 §9.1 以本声明为准。另 §9.1 补充：EmptyState 内容必须置于具名插槽 #actions（无默认插槽出口）。
+
+## 13. 技术债清账批次
+
+| 债项 | 处置 | 落点 |
+|------|------|------|
+| UX-11 视觉单一出口 | 新建 Chip.vue（选中态档位按钮唯一出口）；StatusDot 增加 size prop 替代 DOM 穿透 hack；Dashboard×4/Usage×2 手写卡统一 ui/card（Card py-4+Content px-4 等价原 p-4，未叠加避免双倍内边距） | components/common/{Chip,StatusDot}.vue + 四视图 |
+| SEC-4 门禁脚本可信度 | check-invariants.sh ②③改 jq -S 语义比对：tauri.conf del(.app.windows[0].title) 后全等；capabilities 纯 {url} 条目折叠 {} + unique（豁免 url 数组增删改排序）+ 走私键必现形；缺 jq exit 3 / 坏 ref exit 2 / JSON 解析失败即违规。自测矩阵证明旧两例绕过现均被指认、负例不误伤 | scripts/check-invariants.sh |
+| SEC-5 残余 | clearAdminToken 返回 boolean；forgetToken 成功才清 hasStoredToken（步骤③打勾不失真），失败 toast.error 给人工兜底路径 | lib/config.ts + SettingsView |
