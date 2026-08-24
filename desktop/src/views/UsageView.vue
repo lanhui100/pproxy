@@ -16,6 +16,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Button } from '@/components/ui/button'
 import { errText } from '@/lib/errors'
 import { fmtBytes, fmtCount } from '@/lib/format'
+import { upstreamLabel } from '@/lib/statusLabels'
 import { joinUsageTokenName } from '@/lib/usageJoin'
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, BarController, Legend)
@@ -177,7 +178,7 @@ function metricLabel(metric: string): string {
           <div v-if="(quota?.snapshots ?? []).length > 0" class="mt-3 space-y-4">
             <div v-for="s in quota?.snapshots ?? []" :key="`${s.upstream}/${s.metric}`">
               <div class="mb-1 flex items-center justify-between gap-2 text-sm">
-                <span class="min-w-0 truncate">{{ s.upstream }} · {{ metricLabel(s.metric) }}</span>
+                <span class="min-w-0 truncate">{{ upstreamLabel(s.upstream).label }} · {{ metricLabel(s.metric) }}</span>
                 <span v-if="s.pct >= 0" class="shrink-0 tabular-nums text-muted-foreground">已用 {{ fmtCount(s.used) }}</span>
               </div>
               <template v-if="s.pct >= 0">

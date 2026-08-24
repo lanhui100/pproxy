@@ -61,6 +61,13 @@ const dbView = computed(() =>
 // ---- 卡三：上游额度 ----
 const quotaSources = computed(() => quota.value?.sources ?? [])
 
+// 异常态（error/warn tone，即 error 与 unsupported_plan）附「上次正常」上下文（R2-UX-10）；
+// last_ok 为 unix 秒，展示前 ×1000（与 fmtRelative 的 ms 约定对齐）
+function isQuotaAbnormal(state: string): boolean {
+  const tone = quotaSourceLabel(state).tone
+  return tone === 'error' || tone === 'warn'
+}
+
 // ---- 我的接入 ----
 // 接入底座：显式数据面地址优先，否则按管理面地址推导（spec §3.4）；两者皆空提示先设置。
 // setup 时读取一次即可（与 useBackendGate 同策略：保存后跨页导航自然刷新）。
@@ -207,8 +214,14 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
         <div class="flex flex-col rounded-lg border p-4">
           <div class="text-xs text-muted-foreground">上游额度</div>
           <div v-if="quotaSources.length > 0" class="mt-3 space-y-1.5">
-            <div v-for="s in quotaSources" :key="s.name" class="flex items-center justify-between gap-2">
-              <span class="min-w-0 truncate text-sm">{{ s.name }}</span>
+            <div v-for="s in quotaSources" :key="s.name" class="flex items-start justify-between gap-2">
+              <!-- 上游名经 upstreamLabel 映射（R2-UX-2）；error/warn 态附上次正常时间（R2-UX-10） -->
+              <div class="min-w-0">
+                <span class="block truncate text-sm">{{ upstreamLabel(s.name).label }}</span>
+                <span v-if="isQuotaAbnormal(s.state)" class="mt-0.5 block text-xs tabular-nums text-muted-foreground">
+                  {{ s.last_ok === null ? '从未成功' : `上次正常：${fmtRelative(s.last_ok * 1000)}` }}
+                </span>
+              </div>
               <StatusDot v-bind="quotaSourceLabel(s.state)" class="shrink-0 text-xs" />
             </div>
           </div>
