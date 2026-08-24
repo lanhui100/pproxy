@@ -15,6 +15,7 @@ import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import SkeletonTable from '@/components/common/SkeletonTable.vue'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
 import { errText } from '@/lib/errors'
 import { fmtBytes, fmtCount } from '@/lib/format'
 import { upstreamLabel } from '@/lib/statusLabels'
@@ -165,47 +166,51 @@ function metricLabel(metric: string): string {
 
       <div class="grid gap-4 lg:grid-cols-5">
         <!-- 柱图 -->
-        <div class="rounded-lg border p-4 lg:col-span-3">
-          <div class="text-sm font-medium">各服务请求次数</div>
-          <div class="mt-3">
-            <Bar v-if="byService.length > 0" :data="chartData" :options="chartOptions" />
-            <EmptyState v-else title="区间内暂无请求" description="有设备开始访问后，这里会出现按服务的请求柱图。">
-              <template #actions>
-                <Button as-child>
-                  <RouterLink to="/routes">去添加服务</RouterLink>
-                </Button>
-              </template>
-            </EmptyState>
-          </div>
-        </div>
+        <Card class="lg:col-span-3">
+          <CardContent>
+            <div class="text-sm font-medium">各服务请求次数</div>
+            <div class="mt-3">
+              <Bar v-if="byService.length > 0" :data="chartData" :options="chartOptions" />
+              <EmptyState v-else title="区间内暂无请求" description="有设备开始访问后，这里会出现按服务的请求柱图。">
+                <template #actions>
+                  <Button as-child>
+                    <RouterLink to="/routes">去添加服务</RouterLink>
+                  </Button>
+                </template>
+              </EmptyState>
+            </div>
+          </CardContent>
+        </Card>
 
         <!-- 上游额度 -->
-        <div class="rounded-lg border p-4 lg:col-span-2">
-          <div class="text-sm font-medium">上游额度</div>
-          <div v-if="(quota?.snapshots ?? []).length > 0" class="mt-3 space-y-4">
-            <div v-for="s in quota?.snapshots ?? []" :key="`${s.upstream}/${s.metric}`">
-              <div class="mb-1 flex items-center justify-between gap-2 text-sm">
-                <span class="min-w-0 truncate">{{ upstreamLabel(s.upstream).label }} · {{ metricLabel(s.metric) }}</span>
-                <span v-if="s.pct >= 0" class="shrink-0 tabular-nums text-muted-foreground">已用 {{ fmtCount(s.used) }}</span>
+        <Card class="lg:col-span-2">
+          <CardContent>
+            <div class="text-sm font-medium">上游额度</div>
+            <div v-if="(quota?.snapshots ?? []).length > 0" class="mt-3 space-y-4">
+              <div v-for="s in quota?.snapshots ?? []" :key="`${s.upstream}/${s.metric}`">
+                <div class="mb-1 flex items-center justify-between gap-2 text-sm">
+                  <span class="min-w-0 truncate">{{ upstreamLabel(s.upstream).label }} · {{ metricLabel(s.metric) }}</span>
+                  <span v-if="s.pct >= 0" class="shrink-0 tabular-nums text-muted-foreground">已用 {{ fmtCount(s.used) }}</span>
+                </div>
+                <template v-if="s.pct >= 0">
+                  <!-- 三色阈值沿用既有逻辑：<80 绿 / ≥80 黄 / ≥95 红 -->
+                  <div class="h-2 overflow-hidden rounded-full bg-muted">
+                    <div
+                      class="h-full rounded-full transition-all duration-150"
+                      :class="s.pct >= 95 ? 'bg-red-500' : s.pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'"
+                      :style="{ width: `${Math.min(s.pct, 100)}%` }"
+                    />
+                  </div>
+                  <div class="mt-0.5 text-xs tabular-nums text-muted-foreground">
+                    上限 {{ fmtCount(s.quota) }} · 已达 {{ s.pct.toFixed(1) }}%
+                  </div>
+                </template>
+                <p v-else class="text-xs text-muted-foreground">无固定上限，已用 {{ fmtCount(s.used) }}</p>
               </div>
-              <template v-if="s.pct >= 0">
-                <!-- 三色阈值沿用既有逻辑：<80 绿 / ≥80 黄 / ≥95 红 -->
-                <div class="h-2 overflow-hidden rounded-full bg-muted">
-                  <div
-                    class="h-full rounded-full transition-all duration-150"
-                    :class="s.pct >= 95 ? 'bg-red-500' : s.pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'"
-                    :style="{ width: `${Math.min(s.pct, 100)}%` }"
-                  />
-                </div>
-                <div class="mt-0.5 text-xs tabular-nums text-muted-foreground">
-                  上限 {{ fmtCount(s.quota) }} · 已达 {{ s.pct.toFixed(1) }}%
-                </div>
-              </template>
-              <p v-else class="text-xs text-muted-foreground">无固定上限，已用 {{ fmtCount(s.used) }}</p>
             </div>
-          </div>
-          <p v-else class="mt-3 text-sm text-muted-foreground">暂无额度数据（未启用上游监控或暂不支持）</p>
-        </div>
+            <p v-else class="mt-3 text-sm text-muted-foreground">暂无额度数据（未启用上游监控或暂不支持）</p>
+          </CardContent>
+        </Card>
       </div>
 
       <!-- 请求明细 -->

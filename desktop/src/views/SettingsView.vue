@@ -17,6 +17,7 @@ import {
   setTokenProvider,
   type MonitorConfigResp,
 } from '@/api/client'
+import Chip from '@/components/common/Chip.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { Button } from '@/components/ui/button'
@@ -222,15 +223,19 @@ async function testAndSave(): Promise<void> {
 
 /**
  * 清除已存凭据（UX-7②：经 ConfirmDialog 确认后才执行）。
- * SEC-5：config.ts 的 clearAdminToken 吞错（冻结文件不可改），视图层如实化反馈——
- * 不再宣称「已清除」，改为提示清除请求已发出 + 权限不足时的人工兜底路径。
+ * SEC-5 收口：clearAdminToken 返回真实结果（config.ts boolean），成功才清 hasStoredToken
+ * （步骤③打勾不失真）；失败保留状态并给出人工兜底路径。
  */
 async function forgetToken(): Promise<void> {
-  await clearAdminToken()
-  tokenInput.value = ''
-  hasStoredToken.value = false
+  const cleared = await clearAdminToken()
   confirmForget.value = false
-  toast.info('清除请求已完成；若系统提示权限不足，请在系统凭据管理器中手动删除「pony-desktop」条目')
+  if (cleared) {
+    tokenInput.value = ''
+    hasStoredToken.value = false
+    toast.success('已清除本机保存的凭据')
+    return
+  }
+  toast.error('凭据清除失败：请在系统凭据管理器中手动删除「pony-desktop」条目后重试')
 }
 
 // ---- 告警档位（点击即持久化并热生效，无独立保存钮）----
@@ -398,21 +403,15 @@ const resultClass = computed(() => {
       </CardHeader>
       <CardContent class="space-y-3">
         <div class="flex flex-wrap gap-2">
-          <button
+          <!-- 档位即点即生效：选中态切换钮统一走 Chip（UX-11） -->
+          <Chip
             v-for="tier in POLL_TIERS"
             :key="tier.value"
-            type="button"
-            class="rounded-full border px-3 py-1 text-sm transition-colors duration-150"
-            :class="
-              pollIntervalMin === tier.value
-                ? 'border-primary bg-primary/10 font-medium text-primary'
-                : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground'
-            "
-            :aria-pressed="pollIntervalMin === tier.value"
+            :selected="pollIntervalMin === tier.value"
             @click="applyPollTier(tier.value)"
           >
             {{ tier.label }}
-          </button>
+          </Chip>
         </div>
         <p v-if="monitorConfig && pollHoursText" class="text-xs text-muted-foreground">
           服务端告警阈值 {{ monitorConfig.threshold_pct }}%，配额每 {{ pollHoursText }} 小时轮询一次

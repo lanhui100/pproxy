@@ -12,6 +12,7 @@ import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import SkeletonTable from '@/components/common/SkeletonTable.vue'
 import StatusDot from '@/components/common/StatusDot.vue'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
 import { useToast } from '@/composables/useToast'
 import { loadBackendUrl, loadDataPlaneUrl } from '@/lib/config'
 import { errText } from '@/lib/errors'
@@ -184,76 +185,81 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
 
       <!-- 三卡 -->
       <div class="grid gap-4 md:grid-cols-3">
-        <div class="rounded-lg border p-4">
-          <div class="text-xs text-muted-foreground">服务状态</div>
-          <div class="mt-3">
-            <!-- 大号状态点：放大 StatusDot 的点与文字（透传 class） -->
-            <StatusDot
-              :tone="dbView.tone"
-              :label="dbView.label"
-              class="gap-2 text-xl font-semibold [&>span:first-child]:size-3"
-            />
-          </div>
-          <div v-if="health?.status" class="mt-1.5">
-            <StatusDot tone="muted" :label="health.status" class="text-xs" />
-          </div>
-          <div class="mt-2 text-sm text-muted-foreground">活跃设备 {{ health?.tokens_active ?? '—' }}</div>
-        </div>
-
-        <div class="rounded-lg border p-4">
-          <div class="text-xs text-muted-foreground">近 24 小时流量</div>
-          <template v-if="usage">
-            <div class="mt-3 text-2xl font-semibold tabular-nums">{{ fmtCount(usage.total.requests) }}</div>
-            <div class="mt-1 text-xs tabular-nums text-muted-foreground">
-              ↑{{ fmtBytes(usage.total.bytes_in) }} ↓{{ fmtBytes(usage.total.bytes_out) }}
+        <Card>
+          <CardContent>
+            <div class="text-xs text-muted-foreground">服务状态</div>
+            <div class="mt-3">
+              <!-- 大号状态点：size="lg" 放大点与文字（UX-11，去掉 DOM 穿透 hack） -->
+              <StatusDot :tone="dbView.tone" :label="dbView.label" size="lg" />
             </div>
-          </template>
-          <p v-else class="mt-3 text-sm text-muted-foreground">暂无数据</p>
-        </div>
+            <div v-if="health?.status" class="mt-1.5">
+              <StatusDot tone="muted" :label="health.status" class="text-xs" />
+            </div>
+            <div class="mt-2 text-sm text-muted-foreground">活跃设备 {{ health?.tokens_active ?? '—' }}</div>
+          </CardContent>
+        </Card>
 
-        <div class="flex flex-col rounded-lg border p-4">
-          <div class="text-xs text-muted-foreground">上游额度</div>
-          <div v-if="quotaSources.length > 0" class="mt-3 space-y-1.5">
-            <div v-for="s in quotaSources" :key="s.name" class="flex items-start justify-between gap-2">
-              <!-- 上游名经 upstreamLabel 映射（R2-UX-2）；error/warn 态附上次正常时间（R2-UX-10） -->
-              <div class="min-w-0">
-                <span class="block truncate text-sm">{{ upstreamLabel(s.name).label }}</span>
-                <span v-if="isQuotaAbnormal(s.state)" class="mt-0.5 block text-xs tabular-nums text-muted-foreground">
-                  {{ s.last_ok === null ? '从未成功' : `上次正常：${fmtRelative(s.last_ok * 1000)}` }}
-                </span>
+        <Card>
+          <CardContent>
+            <div class="text-xs text-muted-foreground">近 24 小时流量</div>
+            <template v-if="usage">
+              <div class="mt-3 text-2xl font-semibold tabular-nums">{{ fmtCount(usage.total.requests) }}</div>
+              <div class="mt-1 text-xs tabular-nums text-muted-foreground">
+                ↑{{ fmtBytes(usage.total.bytes_in) }} ↓{{ fmtBytes(usage.total.bytes_out) }}
               </div>
-              <StatusDot v-bind="quotaSourceLabel(s.state)" class="shrink-0 text-xs" />
+            </template>
+            <p v-else class="mt-3 text-sm text-muted-foreground">暂无数据</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <!-- flex-1 + 内层 flex-col：让「查看详情」贴底（等价原 flex-col 卡的 mt-auto 行为） -->
+          <CardContent class="flex flex-1 flex-col">
+            <div class="text-xs text-muted-foreground">上游额度</div>
+            <div v-if="quotaSources.length > 0" class="mt-3 space-y-1.5">
+              <div v-for="s in quotaSources" :key="s.name" class="flex items-start justify-between gap-2">
+                <!-- 上游名经 upstreamLabel 映射（R2-UX-2）；error/warn 态附上次正常时间（R2-UX-10） -->
+                <div class="min-w-0">
+                  <span class="block truncate text-sm">{{ upstreamLabel(s.name).label }}</span>
+                  <span v-if="isQuotaAbnormal(s.state)" class="mt-0.5 block text-xs tabular-nums text-muted-foreground">
+                    {{ s.last_ok === null ? '从未成功' : `上次正常：${fmtRelative(s.last_ok * 1000)}` }}
+                  </span>
+                </div>
+                <StatusDot v-bind="quotaSourceLabel(s.state)" class="shrink-0 text-xs" />
+              </div>
             </div>
-          </div>
-          <p v-else class="mt-3 text-sm text-muted-foreground">暂无额度数据（未启用上游监控或暂不支持）</p>
-          <RouterLink to="/usage" class="mt-auto pt-3 text-sm text-primary hover:underline">查看详情 ›</RouterLink>
-        </div>
+            <p v-else class="mt-3 text-sm text-muted-foreground">暂无额度数据（未启用上游监控或暂不支持）</p>
+            <RouterLink to="/usage" class="mt-auto pt-3 text-sm text-primary hover:underline">查看详情 ›</RouterLink>
+          </CardContent>
+        </Card>
       </div>
 
       <!-- 我的接入 -->
-      <div class="mt-4 rounded-lg border p-4">
-        <div class="flex items-start justify-between gap-3">
-          <div>
-            <div class="text-xs text-muted-foreground">我的接入</div>
-            <p class="mt-1 text-sm">把下面的接入地址发给你的设备</p>
+      <Card class="mt-4">
+        <CardContent>
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-xs text-muted-foreground">我的接入</div>
+              <p class="mt-1 text-sm">把下面的接入地址发给你的设备</p>
+            </div>
+            <Button v-if="accessBase" variant="outline" size="sm" @click="copyAccessTemplate">复制模板</Button>
           </div>
-          <Button v-if="accessBase" variant="outline" size="sm" @click="copyAccessTemplate">复制模板</Button>
-        </div>
-        <template v-if="accessBase">
-          <p class="mt-3 break-all rounded-md bg-muted/60 px-3 py-2 font-mono text-sm">
-            {{ accessBase }}/<span class="rounded bg-amber-100 px-1 py-0.5 text-amber-800">&lt;令牌&gt;</span>/<span
-              class="rounded border border-dashed px-1 py-0.5"
-              >&lt;服务&gt;</span
-            >
+          <template v-if="accessBase">
+            <p class="mt-3 break-all rounded-md bg-muted/60 px-3 py-2 font-mono text-sm">
+              {{ accessBase }}/<span class="rounded bg-amber-100 px-1 py-0.5 text-amber-800">&lt;令牌&gt;</span>/<span
+                class="rounded border border-dashed px-1 py-0.5"
+                >&lt;服务&gt;</span
+              >
+            </p>
+            <p class="mt-2 text-xs text-muted-foreground">
+              &lt;令牌&gt; 请替换为设备密钥页创建的明文（仅创建时可见）；&lt;服务&gt; 填要访问的服务名。
+            </p>
+          </template>
+          <p v-else class="mt-3 text-sm text-muted-foreground">
+            先在<RouterLink to="/settings" class="text-primary hover:underline">设置</RouterLink>完成连接
           </p>
-          <p class="mt-2 text-xs text-muted-foreground">
-            &lt;令牌&gt; 请替换为设备密钥页创建的明文（仅创建时可见）；&lt;服务&gt; 填要访问的服务名。
-          </p>
-        </template>
-        <p v-else class="mt-3 text-sm text-muted-foreground">
-          先在<RouterLink to="/settings" class="text-primary hover:underline">设置</RouterLink>完成连接
-        </p>
-      </div>
+        </CardContent>
+      </Card>
 
       <!-- 告警 -->
       <div class="mt-6">

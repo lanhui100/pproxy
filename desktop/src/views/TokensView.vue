@@ -9,6 +9,7 @@ import { onMounted, ref } from 'vue'
 import { LoaderCircle } from '@lucide/vue'
 
 import { api, type TokenDto } from '@/api/client'
+import Chip from '@/components/common/Chip.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
@@ -322,21 +323,14 @@ async function doRevoke(): Promise<void> {
           <div class="space-y-1">
             <Label>有效期</Label>
             <div class="flex flex-wrap gap-2">
-              <button
+              <Chip
                 v-for="c in EXPIRY_CHOICES"
                 :key="c.key"
-                type="button"
-                class="rounded-full border px-3 py-1 text-sm transition-colors"
-                :class="
-                  expiryMode === c.key
-                    ? 'border-primary bg-primary/10 font-medium text-primary'
-                    : 'border-border text-muted-foreground hover:bg-muted'
-                "
-                :aria-pressed="expiryMode === c.key"
+                :selected="expiryMode === c.key"
                 @click="expiryMode = c.key"
               >
                 {{ c.label }}
-              </button>
+              </Chip>
             </div>
             <Input
               v-if="expiryMode === 'custom'"
@@ -378,21 +372,10 @@ async function doRevoke(): Promise<void> {
 
         <!-- Tab 切换 chips -->
         <div class="flex flex-wrap gap-2">
-          <button
-            v-for="t in TABS"
-            :key="t.key"
-            type="button"
-            class="rounded-full border px-3 py-1 text-sm transition-colors"
-            :class="
-              activeTab === t.key
-                ? 'border-primary bg-primary/10 font-medium text-primary'
-                : 'border-border text-muted-foreground hover:bg-muted'
-            "
-            :aria-pressed="activeTab === t.key"
-            @click="activeTab = t.key"
-          >
+          <!-- Tab 切换 chips：选中态切换钮统一走 Chip（UX-11） -->
+          <Chip v-for="t in TABS" :key="t.key" :selected="activeTab === t.key" @click="activeTab = t.key">
             {{ t.label }}
-          </button>
+          </Chip>
         </div>
 
         <template v-if="activeTab === 'general'">
