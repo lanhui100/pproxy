@@ -54,7 +54,8 @@
 **验收**：Windows 浏览器开启代理后 youtube/google 正常；非白名单站点确认直连（服务器日志零命中）；关闭开关完整还原
 （spec: docs/product/specs/m6/README.md）
 
-## M7 打磨与模板库 — 预计 1-2 天
+## M7 打磨与模板库 — 进行中（2026-08-24：桌面端 UX 打磨切片已交付 d412fac，见 specs/m7-frontend-ux/DELIVERY.md）
+- [x] 桌面端全页面 UX 打磨（傻瓜式操作+极简 UI；两轮三路对抗审核放行）
 - [ ] 服务模板库（Gemini/OpenRouter/Groq/Mistral/xAI 一键导入）
 - [ ] config export 全服务覆盖
 - [ ] README + 部署文档 + 截图

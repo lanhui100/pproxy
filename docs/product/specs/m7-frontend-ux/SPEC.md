@@ -1,6 +1,6 @@
 # M7 · 桌面前端 UX 打磨 — 诊断与改造方案（SPEC v2）
 
-> 状态: v2 —— 已吸收对抗审核 R1 三路报告（UX 16 条 / ENG 13 条 / SEC+GOV 12 条），裁决见 §11
+> 状态: **已交付并合入 master（d412fac，2026-08-24）**——历经 R1/R2 两轮三路对抗审核；交付报告见 [DELIVERY.md](./DELIVERY.md)
 > 范围: `desktop/src` + src-tauri 白名单例外（§4）| 分支: `feat/ux-polish`（worktree）
 > 定位声明: 本 spec 仅覆盖 ROADMAP M7 的**前端切片**；模板库后端化/config export 全覆盖/部署文档/全链路回归不在本 spec。
 
