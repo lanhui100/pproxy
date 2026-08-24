@@ -521,7 +521,7 @@ async function doRevoke(): Promise<void> {
     <ConfirmDialog
       :open="revokeTarget !== null"
       :title="`撤销设备密钥「${revokeTarget ? rowName(revokeTarget) : ''}」？`"
-      description="撤销即时生效，使用该密钥的客户端将立即收到 401。"
+      description="该设备的所有请求会立即失败，且无法恢复。"
       confirm-text="确认撤销"
       destructive
       :busy="revoking"
