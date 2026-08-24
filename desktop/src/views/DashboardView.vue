@@ -272,7 +272,7 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
               <span class="min-w-0 break-words">{{ a.message }}</span>
             </div>
             <div class="flex shrink-0 items-center gap-2">
-              <span class="text-xs tabular-nums text-muted-foreground">{{ fmtRelative(a.ts) }}</span>
+              <span class="text-xs tabular-nums text-muted-foreground">{{ fmtRelative(a.ts * 1000) }}</span>
               <Button variant="ghost" size="xs" :disabled="markingId === a.id || markAllBusy" @click="markRead(a)">
                 <Loader2 v-if="markingId === a.id" class="animate-spin" />
                 {{ markingId === a.id ? '标记中…' : '标为已读' }}
