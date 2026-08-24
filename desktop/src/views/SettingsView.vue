@@ -147,13 +147,18 @@ function dataPlaneToSave(): string {
 /**
  * 单一原子动作「测试并保存」（P0 契约，算法不得偏离）：
  * a) 规范化 url/token 并写回输入框；b) 记录 prevUrl=当前 baseUrlProvider 值
- * （mount 时已装配为读取本 ref）；c) 运行时 swap providers →
+ * （mount 时已装配为读取本 ref），同时快照 localStorage 旧 backendUrl/dataPlaneUrl
+ * 供持久化失败回滚（ENG-9/SEC-3）；c) 运行时 swap providers →
  * d) api.health({skipAuthRedirect:true})；
  * e) 成功：saveBackendUrl + saveDataPlaneUrl(步骤②结果) + token 非空才 saveAdminToken，
  *    再固化最终闭包，testResult 固定成功文案 + toast「已连接并保存」；
+ *    —— 三步落盘包独立 try/catch：keyring 写入失败不再误入网络失败分支
+ *    （否则 URL 两 key 已落盘而 providers 已回滚，磁盘/运行态分叉）；
  * f) 失败：finally 中恢复原 providers（对齐 visibilitychange 并发窗口）——
- *    恢复必须放 finally，任何失败退出路径都还原；成功路径已在 try 内固化，此处跳过；
- * g) 失败文案三分支沿用现状；localStorage 与 keyring 在失败路径零写入。
+ *    恢复必须放 finally，任何网络失败退出路径都还原；成功路径已在 try 内固化；
+ * g) 网络失败文案三分支沿用现状；localStorage 与 keyring 在该路径零写入；
+ * h) 持久化失败（ENG-9/SEC-3）：回滚 localStorage 快照（providers 保持新值，
+ *    已连通事实成立），独立文案「✓ 已连通，但本机凭据保存失败…」+ toast.error。
  */
 async function testAndSave(): Promise<void> {
   if (testing.value) return
@@ -164,7 +169,9 @@ async function testAndSave(): Promise<void> {
   url.value = normalizeBaseUrl(url.value) // a) 写回让用户看到规范化结果
   const token = normalizeToken(tokenInput.value)
   tokenInput.value = token
-  let succeeded = false
+  // b2) 持久化快照：落盘失败时按此恢复磁盘（ENG-9/SEC-3）
+  const persistSnapshot = { backend: loadBackendUrl(), dataPlane: loadDataPlaneUrl() }
+  let settled = false // providers 是否已固化到新值（true 则 finally 不再还原）
 
   // c) 运行时 swap
   setBaseUrlProvider(() => url.value)
@@ -172,19 +179,32 @@ async function testAndSave(): Promise<void> {
 
   try {
     await api.health({ skipAuthRedirect: true }) // d) 401 只回给本页展示，不触发全局跳转
-    // e) 成功：先落盘再固化为最终闭包
-    saveBackendUrl(url.value)
-    saveDataPlaneUrl(dataPlaneToSave())
-    if (token) await saveAdminToken(token)
-    setBaseUrlProvider(() => url.value)
-    setTokenProvider(async () => (await tokenFromStore()) ?? (tokenInput.value || null))
-    if (token) hasStoredToken.value = true
-    testResult.value = '✓ 连接成功（服务运行正常）'
-    toast.success('已连接并保存')
     authHint.value = false
     tokenFlash.value = false
-    void refreshMonitorConfig() // 连接成功即补拉监控配置，点亮告警卡只读小字
-    succeeded = true
+    void refreshMonitorConfig() // 已连通即补拉监控配置，点亮告警卡只读小字
+
+    // e) 成功：先落盘再固化为最终闭包。持久化段独立 try/catch（ENG-9/SEC-3）
+    try {
+      saveBackendUrl(url.value)
+      saveDataPlaneUrl(dataPlaneToSave())
+      if (token) await saveAdminToken(token)
+      setBaseUrlProvider(() => url.value)
+      setTokenProvider(async () => (await tokenFromStore()) ?? (tokenInput.value || null))
+      if (token) hasStoredToken.value = true
+      connectedThisSession.value = true
+      testResult.value = '✓ 连接成功（服务运行正常）'
+      toast.success('已连接并保存')
+    } catch {
+      // h) 持久化失败：磁盘回滚快照；providers 保持新值（已连通事实成立）
+      saveBackendUrl(persistSnapshot.backend)
+      saveDataPlaneUrl(persistSnapshot.dataPlane)
+      setBaseUrlProvider(() => url.value)
+      setTokenProvider(async () => (await tokenFromStore()) ?? (tokenInput.value || null))
+      const msg = '✓ 已连通，但本机凭据保存失败：请重试或检查系统凭据库'
+      testResult.value = msg
+      toast.error(msg)
+    }
+    settled = true // 成功与持久化半失败均不还原 providers
   } catch (e) {
     // g) 失败三分支文案（沿用现状）；零写入
     if (isUnauthorized(e)) testResult.value = '✗ 已连通但鉴权失败：请检查 admin token'
@@ -193,18 +213,24 @@ async function testAndSave(): Promise<void> {
   } finally {
     testing.value = false
     // f) 恢复必须在 finally：恢复到点击前的地址快照，而非当前输入框值
-    if (!succeeded) {
+    if (!settled) {
       setBaseUrlProvider(() => prevUrl)
       setTokenProvider(async () => (await tokenFromStore()) ?? (tokenInput.value || null))
     }
   }
 }
 
+/**
+ * 清除已存凭据（UX-7②：经 ConfirmDialog 确认后才执行）。
+ * SEC-5：config.ts 的 clearAdminToken 吞错（冻结文件不可改），视图层如实化反馈——
+ * 不再宣称「已清除」，改为提示清除请求已发出 + 权限不足时的人工兜底路径。
+ */
 async function forgetToken(): Promise<void> {
   await clearAdminToken()
   tokenInput.value = ''
   hasStoredToken.value = false
-  testResult.value = '已清除本地凭据'
+  confirmForget.value = false
+  toast.info('清除请求已完成；若系统提示权限不足，请在系统凭据管理器中手动删除「pony-desktop」条目')
 }
 
 // ---- 告警档位（点击即持久化并热生效，无独立保存钮）----
