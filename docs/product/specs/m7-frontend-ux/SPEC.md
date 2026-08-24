@@ -1,206 +1,298 @@
-# M7 · 桌面前端 UX 打磨 — 诊断与改造方案（SPEC v1）
+# M7 · 桌面前端 UX 打磨 — 诊断与改造方案（SPEC v2）
 
-> 状态: 待对抗审核 | 范围: `desktop/src`（纯表现层）| 分支: `feat/ux-polish`（worktree）
+> 状态: v2 —— 已吸收对抗审核 R1 三路报告（UX 16 条 / ENG 13 条 / SEC+GOV 12 条），裁决见 §11
+> 范围: `desktop/src` + src-tauri 白名单例外（§4）| 分支: `feat/ux-polish`（worktree）
+> 定位声明: 本 spec 仅覆盖 ROADMAP M7 的**前端切片**；模板库后端化/config export 全覆盖/部署文档/全链路回归不在本 spec。
 
 ## 0. 背景与目标
 
-Pony Proxy 桌面端的当前 UI 是按管理 API 形状直接铺出来的"工程面板"：导航英文、枚举直出、
-术语未翻译、无首启引导、错误反馈生硬。对 PRD 定义的目标用户（个人用户，非运维工程师）不友好。
+Pony Proxy 桌面端当前 UI 是按管理 API 形状直接铺出的"工程面板"。本次打磨为**面向用户的
+傻瓜式操作 + 极简视觉**。可证伪口径：
 
-**目标**：面向用户的 UX —— 傻瓜式操作 + 极简视觉。衡量口径：
+1. 五步主旅程（连后端 →建设备密钥 → 复制接入配置 → 加服务 → 看用量）每步有唯一显性下一步。
+2. 全界面中文；英文枚举/术语零直出（专有名词除外）；含 OS 通知与 toast 文案。
+3. 每页具备 加载 / 出错重试 / 空 / 未配置 / 401 五态（§8）。
+4. **生成的接入 base_url 必须指向数据面地址**（端口 ≠ 管理面端口，或经推导函数单测钉住）。
 
-1. 不读文档的用户能完成：连接后端 → 建令牌 → 复制接入配置 → 加路由 → 看用量。
-2. 全界面中文，零英文枚举/术语直出（专有名词除外，如 Anthropic/OpenAI）。
-3. 每个页面具备 加载中 / 出错可重试 / 空态可行动 三态。
-4. 极简风格：中性灰阶 + 单强调色 + 语义三色（绿/黄/红），扁平细边框，统一间距节奏。
+## 1. 诊断（v1 结论维持，摘要）
 
-## 1. 诊断（现状问题清单）
+全局：语言混杂(G1)/无首启引导(G2)/错误反馈生硬(G3)/无加载态(G4)/默认 zinc 高密度+Google Fonts 死代码(G5)/枚举数值直出(G6)。
+分页：总览术语化无行动入口(D1-D4)；密钥有效期裸数字、明文弹窗无接入示例(T1-T4)；路由手填三技术字段、test 按钮工程风(R1-R4)；用量 24h/168h/720h 与英文表头(U1-U3)；设置四卡混杂、测试连接隐式保存(S1-S5)。
+R1 补充确诊：Tauri http scope 只放行 3 个开发者地址（首启必死）；管理面(8900)/数据面(8899)双地址概念前端零感知；明文弹窗误触即永久丢失；服务端英文错误串原样上屏；轮询间隔改动不热生效。
 
-### 1.1 全局（App 壳 / 设计基线）
+## 2. 设计原则
 
-| # | 问题 | 证据 |
-|---|------|------|
-| G1 | 语言混杂：导航英文（Dashboard/Routes/Tokens/Usage/Settings），正文中文；窗口标题 `pony-desktop` 工程代号 | App.vue L13-19, tauri.conf.json |
-| G2 | 无首启引导：未配置后端地址/token 时各页只有 "—" 与裸报错；401 静默跳 Settings 无任何解释 | App.vue L22-24, 各视图 |
-| G3 | 错误反馈工程化：每页单一 error ref 覆盖式红条；成功操作基本无反馈；无 toast 体系 | 所有视图模板 |
-| G4 | 加载态简陋：仅按钮内 spinner，无骨架屏，首屏空白等待 | 各视图 |
-| G5 | 视觉为默认 shadcn zinc 单色，密度高、层级弱；`main.css` 从 Google Fonts `@import` Inter —— 桌面 CSP(`style-src 'self'`) 下必被拦截，属死代码 | main.css L2 |
-| G6 | 枚举与数值直出：`ok/error/active/expired`、`requests/bytes_in` 未本地化；字节/计数无人性化格式 | 各视图 |
-
-### 1.2 总览（Dashboard）
-
-| # | 问题 |
-|---|------|
-| D1 | 「采集来源」「路由健康」是监控术语；上游 hostname 直出；来源状态 `ok/error` 英文胶囊 |
-| D2 | 告警 `[critical] msg` 英文级别直出；只能逐条"标记已读"，无一键全部已读 |
-| D3 | PRD 核心故事「一眼看到健康状态」「复制接入配置即用」在总览完全没有入口；卡片无任何行动链接 |
-| D4 | 未配置/后端不可达时页面退化为三条 "—" + 报错，没有下一步指引 |
-
-### 1.3 访问令牌（Tokens）
-
-| # | 问题 |
-|---|------|
-| T1 | 有效期 = 裸数字"天数"输入，用户需自行换算；无常用档位 |
-| T2 | 明文一次性弹窗只给 token 串，未给可粘贴的 `base_url` 接入示例 —— PRD 关键指标"新设备接入复制一行即用"落空 |
-| T3 | 状态徽章英文；`__admin__` 系统行与普通行混排无解释，其"撤销"按钮靠名字硬编码隐藏 |
-| T4 | 空 token 列表无空态引导 |
-
-### 1.4 服务路由（Routes）
-
-| # | 问题 |
-|---|------|
-| R1 | 添加路由要手填 名称/目标host/override上游 三个技术字段；PRD 的"内置模板一键添加"未实现；override 概念对小白过重 |
-| R2 | 「连通性」列初始 "—"，语义不明；按钮小写 `test`；结果 `✓ 123ms` 工程风 |
-| R3 | 「上游决策 (override)」徽章术语化，用户无法理解 worker/vercel 含义 |
-| R4 | 启停 Switch 与删除无行级 busy 提示的一致样式；空态缺失 |
-
-### 1.5 用量统计（Usage）
-
-| # | 问题 |
-|---|------|
-| U1 | 时间档 `24h/168h/720h` 数字直出 |
-| U2 | 表头 `requests/bytes_in/bytes_out/token_id` 英文直出；token_id 无法对应到人可读的名字（客户端可用 listTokens join，无需改 API） |
-| U3 | quota「未知上限（仅记录用量，不评估告警）」文案冗长工程化 |
-
-### 1.6 设置（Settings）
-
-| # | 问题 |
-|---|------|
-| S1 | 四卡混杂：后端连接/告警轮询/**服务端监控配置(只读)**/更新；监控配置卡对终端用户是纯噪音 |
-| S2 | 「测试连接」带隐藏副作用（先保存再测），两个分散的"保存"；保存模型混乱 |
-| S3 | 轮询间隔 = 裸数字分钟输入 |
-| S4 | `.dark` 主题变量已定义但无开关入口 |
-| S5 | admin token 从哪里获得没有任何提示（服务端首启日志打印一次——桌面用户根本看不到日志） |
-
-## 2. 设计原则（审核与实施的共同标尺）
-
-1. **一屏一事**：每页一个主任务，主操作唯一显著按钮；次要操作降级为文字/图标。
-2. **说人话**：全中文；状态一律「彩点 + 中文词」；数字人性化（`1.2k 次`、`3.4 GB`、`3 小时前`）。
-3. **引导优先**：首启向导化（连接后端 → 粘贴 admin token → 完成）；空态必给下一步动作。
-4. **渐进披露**：专业参数收进「高级」折叠或预设档位（永久/30天/90天/自定义）。
-5. **反馈即时**：统一 toast（成功/失败）、骨架屏、行内 pending；危险操作保留二次确认。
-6. **极简视觉**：中性灰阶 + 单强调色；语义色仅绿/黄/红；扁平细边框卡片、无重阴影；
-   系统字体栈；8pt 间距节奏；动效仅用于状态反馈（150–200ms）。
+1. 一屏一事：每页一个主任务；主操作唯一显著按钮。
+2. 说人话：全中文；状态一律「彩点+中文词」（全枚举映射表见 §9.2，未知值灰点+"未知"）；
+   数字人性化（`fmtBytes/fmtCount/fmtRelative`）。
+3. 引导优先：未配置态是全局门槛（§3.1）；空态必给下一步动作；帮助文案必须真实可执行（R1 教训：假命令比没有文案更糟）。
+4. 渐进披露：专业参数收进折叠/预设档。
+5. 反馈分级（防 toast 噪音）：破坏性/不可逆结果与**一切失败** → toast；有行内状态变化的成功 → 仅行内反馈；
+   后台静默成功不打扰。危险操作保留二次确认。
+6. 极简视觉：中性灰阶 + 单强调色；语义色仅绿/黄/红；扁平细边框、无重阴影；系统字体栈；
+   8pt 节奏；动效仅限状态反馈 150–200ms。**不做暗色模式**（v2 裁决：砍掉，理由见 §11-A19）。
 
 ## 3. 改造方案
 
-### 3.1 信息架构与壳层
+### 3.1 壳层（地基组 F1）
 
-- 导航中文化：`总览 / 服务路由 / 访问令牌 / 用量统计 / 设置`；品牌区改「Pony Proxy」+
-  副标题「个人代理网关」。窗口标题改 `Pony Proxy`（仅 window.title，**不动 productName**，
-  避免 updater/NSIS 产物路径破坏）。
-- App 壳保留 401 全局拦截逻辑（client.ts 不改），但跳转设置页时携带一次性提示
-  「登录凭据无效，请在下方重新粘贴 admin token」（通过 query 或内存 flag，不走新路由守卫体系）。
-- 新增暗色开关（右上角，持久化 localStorage），默认亮色。
+- 导航：`总览 / 服务 / 设备密钥 / 用量统计 / 设置`（PRD 心智："给每台设备发钥匙""一键添加服务"；
+  页内标题副注保留 token 字样兼容旧文档）。品牌区「Pony Proxy · 个人代理网关」。
+  徽标条件改按 `item.to` 匹配并数据化（nav 项加 `badge?: 'alerts'|'update'`）——禁止按 label 文案匹配。
+- 窗口标题改 `Pony Proxy`（仅 tauri.conf.json `app.windows[0].title` 单字段，白名单见 §4）。
+- **全局未配置门槛**：baseUrl 为空 ⇒ 五个页面统一渲染共享组件 `NeedSetupGuide`
+  （说明 + CTA 进设置向导），**不发任何请求**；已配置但不可达才走各自错误态。
+- 401 全局拦截保持跳设置页；提示用 vue-router `state` 或内存 flag 承载（**禁用 query**），
+  固定文案「登录凭据无效，请在下方重新粘贴 admin token」，不含动态详情。
+- 不加暗色开关；`.dark` tokens 保留不动（无 UI 入口即死代码，无害）。
 
-### 3.2 新增共享基建（均为轻量自研，不引第三方）
+### 3.2 共享基建
 
-| 模块 | 说明 |
-|------|------|
-| `lib/format.ts` + 测试 | 字节/计数人性化、相对时间（x 分钟前）、日期本地化 |
-| `components/common/PageHeader.vue` | 标题 + 一句副标题 + 右侧 actions 槽 |
-| `components/common/StatusDot.vue` | 枚举 → 彩点 + 中文词映射（ok/运行正常 等） |
-| `components/common/EmptyState.vue` | 图标 + 说明 + 主 CTA 槽 |
-| `components/common/Skeleton*.vue` | 卡片/表格骨架 |
-| `composables/useToast.ts` | 轻量 toast（成功/失败/信息，自动消失，aria-live） |
-| `components/common/ConfirmDialog.vue` | 统一危险确认（替换两处手写 Dialog 组合，行为不变） |
-| main.css | 删 Google Fonts import；微调 radius/shadow/间距 token；补 toast/skeleton 动画 |
+**F1（表现层）**：`lib/format.ts`(+vitest)、`components/common/{PageHeader,StatusDot,EmptyState,
+ConfirmDialog,SkeletonCard,SkeletonTable,ToastHost}.vue`、`composables/useToast.ts`（模块级单例，
+success/info 3s、error 6s 自动消失，aria-live polite）、`components/common/NeedSetupGuide.vue`。
+接口签名冻结于 §9.1。
 
-### 3.3 首启向导（Settings 内嵌步骤卡，不新增路由）
+**F2（行为层）**：
+- `lib/config.ts`：新增数据面地址存取（key `pony-data-plane-url`）；轮询间隔改为模块级响应式 ref
+  （`loadPollIntervalMin` 允许 0 往返，去掉 `Math.max(1,…)` 钳制；0=不自动轮询）。
+- `lib/urls.ts`(+vitest)：`deriveDataPlane(adminUrl)` —— 同 scheme+host、端口换 8899，
+  语义对齐 crates/cli `derive_from_server`（含非法输入返回 null 的分支）。
+- `lib/errors.ts`(+vitest)：已知服务端错误串字典 → 中文（invalid token name / invalid expires_days /
+  cannot revoke admin / invalid target host / invalid route name / bad_request / unauthorized /
+  not_found 等，实施时对照 crates/server/src/api.rs 全量补齐），视图层经 `errText(e)` 消费，
+  未命中回退原文。client.ts 保持零改动。
+- `composables/useAlertNotifications.ts`：watch 轮询 ref 变更即时 stop/start（热生效）；0 ⇒ 执行一次
+  初始 pollOnce 但不建 interval；OS 通知标题改「用量告警」、级别前缀中文（严重/警告，复用 format 映射）。
+- `composables/useSecretCopy.ts`：一切承载秘密的复制唯一入口——新复制取消旧 60s 定时器再重设；
+  关闭对话框取消全部待清任务；toast 只报「已复制（60 秒后自动清空剪贴板）」不含复制内容。
+- `src-tauri/capabilities/default.json`：http scope 放开为通配（覆盖任意 http/https 主机与端口；
+  实施时按 Tauri v2 URL pattern 语法核实最宽合法写法并在注释记录依据）。CSP 不动。
+- `scripts/check-invariants.sh`、`scripts/check-zh.mjs`（门禁脚本，见 §6）。
 
-设置页顶部出现「连接向导」卡：① 填网关地址（帮助文案：形如 `http://100.x.x.x:8900`）→
-② 粘贴 admin token（帮助文案：在服务器上执行 `pony token create --admin` 或查看首启输出获取；
-实测命令以后端 CLI 为准，实施时核对 crates/cli）→ ③ 点「测试并保存」。
-三步合一屏，逐步打勾。「测试连接」改为显式两按钮语义：「测试」（不改配置）与「保存」；
-测试不再隐式保存。401 跳转落地此卡并高亮 token 输入框。
+### 3.3 设置 · 连接向导（页面组 C）
 
-### 3.4 总览（Dashboard）
+一屏三步卡（逐步打勾）：
+1. **管理面地址**：帮助文案「形如 `http://100.x.x.x:8900`，需为其他设备可达的 IP（127.0.0.1 仅限本机）」。
+2. **数据面地址（选填）**：留空按 `deriveDataPlane` 自动推导（同主机、端口 8899），展示推导结果预览；
+   走公网入口填 `https://access.ponyjob.top`。帮助注明：管理面无需公网可达。
+3. **admin token**：帮助文案（真实路径，已核实 CLI 无任何打印/生成命令）：
+   「在**服务器**上查看：① 部署时注入的环境变量 `PPROXY_ADMIN_TOKEN`；
+   ② 或执行 `journalctl -u pproxy | grep ADMIN_TOKEN`（首次启动仅打印一次）；
+   ③ 或服务器 `~/.pony/config.toml` 的 `admin_token` 字段。日志已丢失则设置变量后重启服务端。」
+4. 单一原子按钮 **「测试并保存」**：运行时 swap baseUrl/token provider → `api.health({skipAuthRedirect:true})`
+   → 成功：落盘 localStorage+凭据库，toast「已连接并保存」；失败：**finally 中恢复原 providers**
+   （并发窗口对齐 visibilitychange 轮询），行内错误三分支文案保留，localStorage 与 keyring 均不写。
+   无独立"仅测试"按钮。
+5. 「告警通知」档位 chips：标准（5 分钟）/ 安静（15 分钟）/ 手动（0，标注「不再自动通知告警」）——
+   点击即生效并持久化（无独立保存按钮），依赖 F2 热生效机制。
+6. 「软件更新」卡保留；原「服务端监控配置」卡删除，其信息并入告警通知卡一行只读小字：
+   「服务端告警阈值 {{threshold_pct}}%，配额每 X 小时轮询一次」。
 
-- 顶部 PageHeader + 手动刷新；三卡重构为：**服务状态**（大彩点 + 运行正常/异常 + 活跃设备数）、
-  **近 24 小时流量**（请求数 + ↑↓ 字节）、**上游额度**（进度条摘要，点击进用量页）。
-- 新增「快速开始 / 我的接入」卡：展示接入形态 `http://<网关地址>/<令牌>/<服务>`，
-  提供「去创建令牌」「查看路由」CTA；已配置则显示当前网关地址与常用服务快捷复制
-  （模板占位 `<令牌>`，明文不可得时如实提示到令牌页新建）。
-- 告警区：中文级别徽章（严重/警告）、相对时间、「全部标为已读」；critical 置顶。
-- 路由健康：改为简洁状态列表（名称 + 启用彩点 + 上游小字），禁用置灰，异常可点进路由页。
-- 未配置/不可达 → EmptyState 引导卡（按钮直达设置向导），替代裸报错。
+### 3.4 总览（页面组 A）
 
-### 3.5 访问令牌（Tokens）
+- PageHeader + 刷新；三卡重构：**服务状态**（大彩点+运行正常/异常+活跃设备数）、
+  **近 24 小时流量**（请求数人性化+↑↓字节）、**上游额度**（进度条摘要，点击进用量页；
+  空态文案「暂无额度数据（未启用上游监控或暂不支持）」）。
+- 「我的接入」卡：展示完整可复制 base_url 形态 `http://<主机>:8899/<令牌>/<服务>`
+  （一律使用**数据面地址**；令牌明文不可得时如实提示到设备密钥页新建，模板含 `<令牌>` 占位符时
+  占位符高亮 + 角标说明，复制时 toast 明示「内容含占位符，需替换后使用」）。
+- 告警区：中文级别徽章、相对时间、critical 置顶、「全部标为已读」——实现契约：以 limit=500 重拉
+  后循环 markAlertRead，按钮 busy，toast 报「已读 N/M」，M<N 提示部分失败可重试。
+- 路由健康列表化（名称+启用彩点+上游小字，禁用置灰）；未配置走全局门槛卡。
 
-- 创建对话框：有效期改档位 chip（永久 / 30 天 / 90 天 / 自定义天数）；名称必填校验 + 说明文案
-  （建议用设备名命名，如 `my-laptop`）。
-- 明文一次性弹窗升级为「接入配置」：token 明文 + Tab 切换 `通用 / Anthropic / OpenAI` 可复制片段
-  （如 `export ANTHROPIC_BASE_URL=http://<网关>/<令牌>/anthropic`），每个片段独立复制按钮 +
-  60s 剪贴板自清逻辑保留；警示文案保留。
-- 表格：状态中文徽章；`__admin__` 行改名「系统管理员（内置）」且操作列显示「—」；
-  过期列显示「永不过期」；最后使用列相对时间。
-- 空态 EmptyState：CTA「创建第一个令牌」。
+### 3.5 设备密钥（页面组 B）
 
-### 3.6 服务路由（Routes）
+- 创建对话框：有效期档位 chips（永久 / 30 天 / 90 天 / 自定义天数）；名称说明「建议用设备名，如 my-laptop」。
+- 明文一次性弹窗升级「接入配置」：打开即自动写剪贴板（入 useSecretCopy，60s 自清）；
+  Tab=`通用 / Anthropic / OpenAI`（**v-if 实现，DOM 同时只存在一个片段**）；
+  每 Tab 内容：大号 base_url（数据面地址拼接）一键复制 + 密钥单独复制 +
+  折叠段「环境变量示例」给 bash(`export`) 与 PowerShell(`$env:`) 双版本
+  （措辞与 crates/cli/src/export.rs 对齐）。警示：「明文仅此一次展示；片段含明文令牌，请勿截图外发」。
+  **关闭防护**：未复制过时拦截 Esc/遮罩关闭 → 二次确认「尚未复制，关闭后将无法再次查看，需要重新创建」；
+  关闭即清引用与待清定时器（纪律：不落盘、不进日志、60s 清剪贴板）。
+- 表格：状态中文徽章（active 启用/expired 已过期/revoked 已撤销）；`__admin__` 行显示
+  「系统管理员（内置）」操作列「—」；过期列「永不过期」；最后使用相对时间；空态 CTA「创建第一个设备密钥」。
 
-- 添加改两段式：上方为**内置模板网格**（OpenAI/Anthropic/Gemini/GitHub/x/Facebook/OpenRouter/
-  Groq/Mistral/zen —— 以服务端既有 7 路由 + PRD 模板清单为准；选中自动填 name/target_host，
-  上游自动决策）；下方折叠「手动添加（高级）」，override 上游下拉（自动/worker/vercel）收纳于此。
-- 列表：列改为 名称 / 目标 / 上游 / 状态(Switch+中文) / 连通性 / 操作；
-  「test」改「测速」，连通性列默认显示「未测」，结果 `正常 · 123ms` / `失败：<原因>` 彩点化；
-  行级 busy 遮罩；空态 CTA「添加路由」。
-- 删除确认保留（统一 ConfirmDialog），文案补一句影响说明。
+### 3.6 服务（页面组 B）
 
-### 3.7 用量统计（Usage)
+- 添加改两段式：上部**模板网格**（常量表 `lib/serviceTemplates.ts`，前端常量、与服务端解耦；
+  行 `{name, label, target_host}`），下部折叠「手动添加（高级）」（override 上游下拉收于此）。
+  模板表（name 必须满足服务端校验 `^[a-z][a-z0-9_-]{0,63}$` 且非 `pony_` 前缀；实施时逐条
+  web 核验 target_host 并在表内注释出处，核验不了的不上线并记录）：
 
-- 时间档改「近 24 小时 / 近 7 天 / 近 30 天」segmented 控件。
-- 表头中文化：请求次数 / 上行流量 / 下行流量 / 令牌；token_id 客户端 join 令牌名单显示名字
-  （listTokens 失败时回退 id）。
-- 图表：柱色用主题强调色，tooltip 中文化；额度进度条文案精简（「无固定上限，已用 N」）。
-- 空数据态给说明文案而非空白。
+  | name | label | target_host（待核验） |
+  |------|-------|----------------------|
+  | openai | OpenAI | api.openai.com |
+  | anthropic | Anthropic | api.anthropic.com |
+  | gemini | Gemini | generativelanguage.googleapis.com |
+  | github | GitHub | github.com |
+  | x | X (Twitter) | api.twitter.com |
+  | openrouter | OpenRouter | openrouter.ai |
+  | groq | Groq | api.groq.com |
+  | mistral | Mistral | api.mistral.ai |
+  | xai | xAI | api.x.ai |
+  | hf | Hugging Face | huggingface.co |
 
-### 3.8 设置（Settings）
+  （Facebook 不做模板——PRD 无此条；存量 facebook 路由仍作为普通行正常管理。
+  PRD 提到的 zen 服务无法给出可信 host，不上线，记录于交付报告。）
+  上游决策预期与 crates/core VERCEL_HOSTS 自动规则一致，模板不传 override。
+- 创建失败反馈必须在 Dialog 内部 error 区渲染，表单不清空、Dialog 不关。
+- 列表列：名称 / 目标 / 上游（CF Worker/Vercel 出口，中文徽标）/ 状态（Switch）/ 连通性 / 操作。
+  「测速」结果：`正常 · 123ms` / `失败：<原因>`；失败态附内联动作「切换线路 ▾（CF Worker/Vercel，
+  PATCH override_upstream）+ 重测」，切换成功自动重测一次。
+- 删除确认统一 ConfirmDialog，文案补影响说明；空态 CTA「添加服务」。
 
-- 移除「服务端监控配置」只读卡（降噪；该信息对个人用户无行动价值）。
-- 连接卡 = 3.3 向导；告警通知改预设档（标准 5 分钟 / 安静 15 分钟 / 仅手动刷新——0 表示关闭轮询，
-  需确认 useAlertNotifications 对 0 的处理并补齐）。
-- 更新卡保留，文案微调；版本号旁加「检查更新」次级按钮位置统一。
+### 3.7 用量统计（页面组 A）
 
-## 4. 非目标（明确不做）
+- 时间档 segmented：近 24 小时 / 近 7 天 / 近 30 天。
+- 表头中文：请求次数 / 上行流量 / 下行流量 / 设备密钥；join 纯函数（随 format.ts 测）：
+  `tokenMap.get(id)?.name ?? '#'+id`，revoked 显示「名字（已撤销）」；`Promise.all([usage,quota,listTokens])`
+  并行，每次刷新重取不缓存。
+- 图表：静态 hex 强调色常量（亮色定值即可，无暗色切换），tooltip 中文化；禁读 CSS 变量进 canvas。
+- 额度进度：pct≥0 正常渲染；pct=-1 文案「无固定上限，已用 N」。空数据给说明文案。
 
-- 不改 `api/client.ts` 端点方法签名与 zod schemas（契约钉死）；不改 401 拦截/凭据存取机制。
-- 不引入 i18n 框架、状态管理新库、图表库更换；不引第三方 toast/skeleton 依赖。
-- 不动 Rust/Tauri 命令、updater 链路、productName/bundle 配置。
-- 不做多语言、不做移动端适配（Tauri 桌面窗口固定布局即可）。
-- 后端 CLI 能力（如 admin token 生成命令的真实形态）只做文案核对，不实现新功能。
+### 3.8 设置页其余
+
+见 §3.3。401 跳转落地向导卡并高亮 token 输入框（state/内存 flag）。
+
+## 4. 非目标与白名单例外
+
+- 冻结：`api/client.ts`、`api/schemas.ts` 端点与契约；Rust 代码；updater 链路；productName/bundle。
+- **白名单例外（仅此两处可动 src-tauri）**：① `capabilities/default.json` 的 http scope 通配放开
+  （现状 3 条硬编码地址会拦死所有新用户的首启，属 P0 缺陷；CSP 不放宽，两者分开评审）；
+  ② `tauri.conf.json` 的 `app.windows[0].title` 单字段。两处 diff 均列入验收核对。
+- 不引入 i18n 框架/新状态库/图表库更换/第三方 toast·skeleton·test-utils 依赖；
+  vitest 保持 node 环境（可测逻辑全部抽纯函数，不做组件挂载测试）。
+- 不做多语言、移动端适配、暗色模式。
 
 ## 5. 风险与回归控制
 
 | 风险 | 控制 |
 |------|------|
-| 视图重构碰坏取数逻辑 | 各视图 `<script setup>` 数据获取函数保持等价迁移（api.* 调用序列不变），diff 审查逐页核对 |
-| 明文 token 安全承诺退化 | 60s 剪贴板自清、关闭即清引用、不落盘不进日志三条纪律写入验收清单并复审 |
-| 401 豁免链路被破坏 | client.ts 不改；Settings 页 skipAuthRedirect 用法保持；手工核对两处调用 |
-| chart.js 注册/选项回归 | 仅改颜色/tooltip 文案，不动 register 列表 |
-| 轮询间隔=0 语义 | 实施前先读 useAlertNotifications 确认可表达"关闭"，否则去掉该档位 |
-| Windows WebView 兼容 | 不用新 CSS 特性（容器查询/subgrid 等一律不用），沿用现有 Tailwind v4 能力 |
+| 视图重构碰坏取数逻辑 | api.* 调用序列等价迁移；R2 审核逐页核对 |
+| 明文密钥安全承诺退化 | useSecretCopy 唯一入口；关闭清引用；60s 自清；§6 安全纪律复核项 |
+| 401 豁免链路 | client.ts 零改动；Settings skipAuthRedirect 保留 |
+| 测试连接失败污染全局 providers | §3.3-4 finally 恢复算法（P0 契约，实施不得偏离）|
+| 轮询 0 值语义 | config 允许 0 往返 + composable 0 不建 interval + 热生效，三点均单测 |
+| chart.js 回归 | register 列表不动；颜色为静态常量 |
+| scope 放开的安全性 | 个人工具威胁模型（无第三方内容渲染，URL 仅来自用户设置项）；CSP 不变；R2 安复审 |
+| Windows WebView 兼容 | 不用容器查询/subgrid 等新特性 |
 
 ## 6. 测试与验收门禁
 
-1. `pnpm check`（vue-tsc）/ `pnpm lint`（oxlint）/ `pnpm test`（vitest）/ `pnpm build` 全绿。
-2. `lib/format.ts`、toast、以及新增纯逻辑均带 vitest 单测；现有测试不许删改断言。
-3. 页面三态（加载/错误/空）人工核查表逐页打勾（记录在本文档 §8）。
-4. 全 UI 中文扫描：grep 模板区无遗留英文枚举直出（专有名词白名单除外）。
-5. 安全纪律复核：明文 token 流不落盘、剪贴板 60s 自清保留、CSP 不放宽。
+1. `pnpm check && pnpm lint && pnpm test && pnpm build` 全绿；现有 26 测试不许删改断言。
+2. 新增单测（node 环境，全部纯函数）：format 四件套、deriveDataPlane（含非法输入）、errors 字典、
+   轮询归一化（0 往返/档位映射）、usage join、告警级别映射。
+3. **不变量门禁** `scripts/check-invariants.sh`：`git diff --exit-code <base> -- desktop/src/api/client.ts
+   desktop/src/api/schemas.ts` 零差异；tauri.conf.json 除 title 外零差异；capabilities 仅 scope 数组变化。
+4. **中文扫描门禁** `scripts/check-zh.mjs`：扫描范围 = 五视图模板文本节点与插值字面量 + composables/lib
+   内面向用户字符串（toast/通知/错误字典命中表）；内联专有名词白名单（Anthropic/OpenAI/PowerShell/
+   bash/token/base_url/admin token/CF Worker/Vercel 等）；输出违规清单，非零退出。
+5. 五态核查表（§8）逐格填**代码证据（file:line）**；第二双眼由 R2 对抗审核承担。
+6. 主旅程走查脚本（五步任务单）写入本文档附录供真人验收；自动化环境无法真实多设备联调，
+   该项如实标记「待用户验收」，不以自评代替。
+7. 安全纪律复核：密钥流不落盘不进日志；剪贴板 60s 自清覆盖所有承载秘密的复制点（枚举清单）；
+   向导文案与 CLI 实测一致；scope 变更仅限白名单。
 
 ## 7. 实施编排（agent team）
 
-1. **地基组**：§3.2 共享基建 + main.css + App 壳中文化/暗色开关 → 门禁。
-2. **页面组 A**：总览 + 用量统计；**页面组 B**：令牌 + 路由；**页面组 C**：设置向导 + 告警档位。
-   （依赖地基组产物，A/B/C 可并行）
-3. 全量门禁 → **对抗审核 R2**（新鲜视角：UX 终审 / 回归风险 / 安全纪律三路）→ 修复循环直至通过。
+1. **F1 地基·表现层** 与 **F2 地基·行为层** 并行（文件所有权不相交，§3.2）→ 各自跑门禁。
+2. **A（总览+用量）/ B（设备密钥+服务）/ C（设置向导）** 并行，冻结在 §9 接口卡版本上；
+   页面组禁改他人文件、禁 git 写操作；需要新共享件时上报主控裁决。
+3. 主控合流跑全量门禁 → **对抗审核 R2**（新鲜三视角：UX 终审 / 回归风险 / 安全纪律）
+   → 修复循环直至通过 → 交付报告。
 
-## 8. 三态核查表（交付前填写）
+### Commit 策略（支撑回滚，§10）
 
-| 页面 | 加载态 | 错误态(可重试) | 空态(有 CTA) |
-|------|--------|----------------|--------------|
-| 总览 | ☐ | ☐ | ☐ |
-| 服务路由 | ☐ | ☐ | ☐ |
-| 访问令牌 | ☐ | ☐ | ☐ |
-| 用量统计 | ☐ | ☐ | ☐ |
-| 设置 | ☐ | ☐ | ☐ |
+F1、F2、A、B、C 各自独立 commit 序列；主控在每组完成后立即提交，保证按组 revert 可行。
+
+## 8. 五态核查表（交付前填代码证据）
+
+| 页面 | 加载 | 错误(可重试) | 空(CTA) | 未配置(全局门槛) | 401 |
+|------|------|--------------|---------|------------------|-----|
+| 总览 | ☐ | ☐ | ☐ | ☐ | ☐ |
+| 服务 | ☐ | ☐ | ☐ | ☐ | ☐ |
+| 设备密钥 | ☐ | ☐ | ☐ | ☐ | ☐ |
+| 用量统计 | ☐ | ☐ | ☐ | ☐ | ☐ |
+| 设置(向导) | ☐ | ☐ | n/a | ☐ | ☐ |
+
+附加固定条目：创建密钥失败在 Dialog 内可见 ☐／添加服务失败在 Dialog 内可见 ☐／
+明文弹窗误触被拦截 ☐／测速失败出现切换线路+重测 ☐／全部已读 busy+计数 toast ☐
+
+## 9. 接口卡（冻结版，页面组据此开发）
+
+### 9.1 组件与组合式签名
+
+```ts
+// lib/format.ts
+fmtBytes(n: number): string          // B→KB→MB→GB；<10 保 2 位小数否则 1 位；非法 → '—'
+fmtCount(n: number): string          // ≥10000 → 'x.x 万'；其余千分位
+fmtRelative(ts: number, now?: number): string // 刚刚/N分钟前/N小时前/昨天/超2天回退 fmtDate
+fmtDate(ts: number): string
+fmtDateTime(ts: number): string
+alertLevelLabel(level: 'warning'|'critical'): '警告'|'严重'
+
+// lib/urls.ts
+deriveDataPlane(adminUrl: string): string | null
+
+// lib/errors.ts
+errText(e: unknown): string          // 包装 errorMessage(e)，api 类先查字典
+
+// composables/useToast.ts
+useToast(): { success(msg); error(msg); info(msg); dismiss(id) } // 模块级单例队列
+
+// composables/useSecretCopy.ts
+useSecretCopy(): { copySecret(text: string, opts?: { placeholderHint?: boolean }): Promise<void>;
+                   releaseAll(): void }   // 对话框关闭时调用
+
+// lib/config.ts （既有 + 新增）
+loadBackendUrl(): string; saveBackendUrl(url: string): void
+loadDataPlaneUrl(): string; saveDataPlaneUrl(url: string): void   // 新
+pollIntervalMin: Ref<number>       // 新：响应式，0 合法
+normalizePollMin(v: number): number // 新：0 保留，负/NaN→5，其余 clamp ≥1
+saveAdminToken/clearAdminToken/isTauri 不变
+
+// components/common props
+PageHeader { title: string; subtitle?: string } + slot actions
+StatusDot { tone: 'ok'|'warn'|'error'|'muted'|'accent'; label: string }
+EmptyState { title: string; description?: string } + slot actions
+ConfirmDialog { open: boolean; title: string; description?: string;
+                confirmText?: string; destructive?: boolean; busy?: boolean }
+               emits update:open / confirm
+NeedSetupGuide { }            // CTA 内部 RouterLink 到 /settings
+SkeletonTable { rows?: number }
+
+// App.vue nav 数据结构
+{ to, label, icon, badge?: 'alerts'|'update' }[]
+```
+
+### 9.2 枚举 → 中文映射（StatusDot/徽章唯一出口，纯函数 + 单测）
+
+```
+QuotaSourceState: ok→运行正常  disabled→已停用  error→异常  unsupported_plan→套餐不支持
+TokenStatus:      active→启用  expired→已过期  revoked→已撤销
+AlertLevel:       warning→警告  critical→严重
+上游:             worker→CF Worker  vercel→Vercel 出口
+自由字符串（health.status/db 等）: 灰点 + 原文小字（不猜语义）
+```
+
+## 10. 回滚
+
+- 按组 revert：F1/F2/A/B/C 独立 commit 序列（§7）；页级回滚互不牵连，地基组回滚需连带页面组。
+- 触发条件：连续两轮修复仍未过门禁；任一 P0 级安全回归（密钥泄漏路径/凭据库误写/scope 越权）。
+- 回滚后必须重跑全量门禁并在交付报告记录。
+
+## 11. R1 裁决记录（要点）
+
+- **采纳**：UX-01~14、ENG-1~12、SEC/GOV-1~6 中全部条文级修改；其中关键裁决：
+  scope 通配放开（UX-01，含安全性论证入 §5）；数据面双地址+推导函数（SEC-1/UX-02）；
+  「测试并保存」单一原子动作+finally 恢复（UX-04+ENG-2）；轮询 0 全链路契约（ENG-1/GOV-3/UX-05）；
+  接口卡冻结（ENG-11）；砍暗色模式（UX-11b，极简与非目标精神，消除半成品风险）；
+  监控配置降级为一行小字（GOV-2）；Facebook 除名/zen 暂缓（GOV-1/UX-10/ENG-5）；
+  明文弹窗防呆+自动复制（UX-08/SEC-4）；测速失败给切换线路动作（UX-09）；
+  PowerShell 双版本片段（UX-12）；OS 通知中文化（UX-13/ENG-12）；toast 分级（UX-14）。
+- **部分采纳/偏差声明**：GOV-4 的"真人计时走查"以走查脚本+待用户验收替代（环境限制，如实标注）；
+  UX-15 导航命名采纳「服务/设备密钥」但保留 token 副注；ENG-7 选方案 a（纯函数化，不加 test-utils）；
+  ENG-13 以专用脚本实现可判定扫描（§6.4）。
+- **拒绝**：无整条拒绝项；UX-15 的激进命名（去掉"统计"等）未采纳，保守处理。
