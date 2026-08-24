@@ -19,8 +19,13 @@ export function loadBackendUrl(): string {
   return localStorage.getItem(BACKEND_URL_KEY) ?? ''
 }
 
+/** 管理面地址响应式源：saveBackendUrl 写路径同步，驱动壳层未配置门槛热解锁（R2-UX-1/ENG-3）。 */
+export const backendUrlSaved = ref<string>(loadBackendUrl())
+
 export function saveBackendUrl(url: string): void {
-  localStorage.setItem(BACKEND_URL_KEY, url.replace(/\/$/, ''))
+  const v = url.replace(/\/$/, '')
+  localStorage.setItem(BACKEND_URL_KEY, v)
+  backendUrlSaved.value = v
 }
 
 /** 数据面地址（接入 base_url 的底座，默认 8899 或公网入口）；管理面无需公网可达。 */
