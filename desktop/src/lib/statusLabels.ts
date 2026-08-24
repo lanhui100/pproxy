@@ -32,10 +32,11 @@ const TOKEN_STATUS_VIEWS: Record<TokenStatus, StatusView> = {
   revoked: { label: '已撤销', tone: 'muted' },
 }
 
-// 上游出口（worker/vercel 为中性标识 → 主题强调色）
+// 上游出口（worker/vercel 为中性标识 → 主题强调色；cf 为 quota source 实际值，R2-UX-2）
 const UPSTREAM_VIEWS: Record<string, StatusView> = {
   worker: { label: 'CF Worker', tone: 'accent' },
   vercel: { label: 'Vercel 出口', tone: 'accent' },
+  cf: { label: 'CF Worker', tone: 'accent' },
 }
 
 // AlertLevel 两态（critical 置顶徽章用红）
