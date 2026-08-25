@@ -150,7 +150,7 @@ fn proxy_enable() -> Result<(), String> {
     let wl = proxy_whitelist_get();
     let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url: None, tunnel_token: None }, stats).await {
+        if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url: Some("wss://gate.ponyjob.top/ws".into()), tunnel_token: Some("<REDACTED_OLD_TOKEN>".into()) }, stats).await {
             log::warn!("proxy engine exited: {e}");
         }
     });
