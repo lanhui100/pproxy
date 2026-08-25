@@ -153,7 +153,9 @@ fn proxy_enable() -> Result<(), String> {
     let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
     let _ = PROXY_STATS.set(std::sync::Arc::clone(&stats));
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url: Some("wss://gate.ponyjob.top/ws".into()), tunnel_token: Some("<REDACTED_OLD_TOKEN>".into()) }, stats).await {
+        // 2026-08 审计整改：禁止硬编码隧道端点/令牌（旧值已随安装包分发并轮换作废）。
+        // 隧道为 opt-in：待设置页接入后由 keyring/配置注入，缺省直连不走 gate。
+        if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url: None, tunnel_token: None }, stats).await {
             log::warn!("proxy engine exited: {e}");
         }
     });
