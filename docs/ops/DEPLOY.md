@@ -34,6 +34,12 @@ wrangler deploy
 #   vercel.app 域名有登录墙，必须走 vedge.ponyjob.top（自定义域名无墙）
 ```
 
+> **2026-08 审计整改**：生产已迁移至项目 `pproxy-edge-v2`（vedge.ponyjob.top 已重绑至新项目，
+> `deploy/vercel/.vercel/` 已 link 过去）。原因：旧项目 `pproxy-edge` 被平台滥用检测标记，
+> API token 部署一律 BLOCKED（hello-world 对照实验可正常部署，确认为项目级拦截而非账号级）。
+> 旧项目暂保留作回滚，确认稳定后可在 dashboard 删除。再遇 BLOCKED 时：先用无关内容对照
+> 测试区分账号级/项目级；项目级则新建项目→迁域名即可恢复。
+
 ### 回滚 server
 ```bash
 cd /home/USER/pproxy && git log --oneline -5     # 找上一个可用 commit
