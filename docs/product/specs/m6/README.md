@@ -185,3 +185,13 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 | 行为抖动 | 同一请求时而 101 时而 Empty Reply（不同 PoP/路径健康度不一） |
 
 **结论修正**：此前怀疑的代码问题（accept 模式/ctx 迁移）均非根因——当前窗口处于 CF 全球 PoP 部分中断期，spike 数据不可信。**S1/S2 顺延至官方状态页恢复全绿后重测**；重测时需一并裁决生产边缘的 accept 模式口径（旧式 accept() 与 ctx.acceptWebSocket 在恢复后的干净窗口各验一次）。期间产品代码开发不受阻（引擎/白名单/PAC 纯函数与 UI 可先行，WS 行为验证留待窗口恢复）。
+
+### 追加记录（2026-08-25 恢复窗口：accept 口径裁决落定 + v0.3.5 发布）
+
+| 项 | 结论 |
+|----|------|
+| CF 状态页 | 恢复全绿（Workers/WebSockets/Dashboard operational，未解决事件=0）——重测窗口开启 |
+| **accept 口径裁决（B001 附带裁决完成）** | 生产边缘实证：`server.accept()` 后 Response 必须携带 **`pair[0]`（client 端）**→ 数据帧正常；`ctx.acceptWebSocket(server)`/返回 server → 升级阶段抛 500。两个会话独立实测交叉验证一致；与 §12 S4「本地 alpha 工具链两模式全坏」不矛盾——平台行为只能真机裁决（R7 证明力分层的再验证）。gate 已按可用口径部署带鉴权正版代码 |
+| 凭据轮换 | 审计整改轮换 tunnel_token：旧明文 <REDACTED_OLD_TOKEN> 作废，桌面端 GUI 重录新 token 方可走隧道（R2 轮换语义兑现）；源码去硬编码端点/令牌，引擎隧道改 opt-in 由配置注入（属下一版内容） |
+| v0.3.5 发布 | NSIS installerHooks（POSTINSTALL/PREUNINSTALL 定向清理历史 pony-desktop.lnk，仅匹配旧安装目标路径防误删）；sync-desktop-release.sh 资产 URL 改写口径迁 `https://access.ponyjob.top/dsk/`（与 updater 端点一致，公开可达验证 200）；本地分发目录旧版本产物已清理 |
+| S1/S2 吞吐并发 | CF 全绿但执行车道移交审计会话（其持有轮换后新凭据）；数据回填 **ADR-008** 后 M6 方可整体打 ✅ |
