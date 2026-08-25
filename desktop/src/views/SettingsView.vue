@@ -30,6 +30,7 @@ import {
   downloaded,
   downloadProgress,
   downloading,
+  checking,
   updateAvailable,
   updateError,
   updateNotes,
