@@ -1,0 +1,2 @@
+# 本地密钥模板：复制为 .dev.vars 并填入真实值（.dev.vars 已被 ignore，严禁提交）
+TUNNEL_TOKEN_HASH=<sha256-hex-of-tunnel-token>

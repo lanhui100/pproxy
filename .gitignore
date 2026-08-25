@@ -23,3 +23,15 @@ desktop/src-tauri/gen/
 
 # M6 gate worker 本地依赖
 deploy/cf-gate-worker/node_modules/
+
+# 2026-08 安全审计整改：本地密钥与运行时/构建产物禁止入库
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.wrangler/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db-journal
+.vercel/
+.env.local
