@@ -39,14 +39,18 @@ import {
 import { useToast } from '@/composables/useToast'
 import {
   clearAdminToken,
+  clearTunnelToken,
   isTauri,
+  isValidTunnelUrl,
   loadBackendUrl,
   loadDataPlaneUrl,
+  loadTunnelConfig,
   pollIntervalMin,
   saveAdminToken,
   saveBackendUrl,
   saveDataPlaneUrl,
   savePollIntervalMin,
+  saveTunnelConfig,
 } from '@/lib/config'
 import { errText } from '@/lib/errors'
 import { normalizeBaseUrl, normalizeToken } from '@/lib/normalize'
@@ -74,6 +78,52 @@ const hasStoredToken = ref(false)
 const confirmForget = ref(false)
 // 本次会话内连接成功标记（UX-3：成功后展示唯一下一步行动链接）
 const connectedThisSession = ref(false)
+
+// ---- 隧道中继（可选；2026-08 审计整改：不再内置默认端点/令牌，全部用户注入）----
+const tunnelUrlInput = ref('')
+const tunnelTokenInput = ref('')
+const tunnelHasToken = ref(false)
+const tunnelSaving = ref(false)
+const confirmForgetToken = ref(false)
+
+async function refreshTunnel(): Promise<void> {
+  try {
+    const c = await loadTunnelConfig()
+    tunnelUrlInput.value = c.url
+    tunnelHasToken.value = c.hasToken
+  } catch {
+    /* 首次启动无配置，保持空表单 */
+  }
+}
+void refreshTunnel()
+
+async function saveTunnel(): Promise<void> {
+  if (tunnelSaving.value) return
+  if (!isValidTunnelUrl(tunnelUrlInput.value)) {
+    toast.error('隧道端点必须以 wss:// 或 ws:// 开头且不含空白')
+    return
+  }
+  tunnelSaving.value = true
+  try {
+    await saveTunnelConfig(tunnelUrlInput.value, tunnelTokenInput.value)
+    tunnelTokenInput.value = ''
+    await refreshTunnel()
+    toast.success('隧道配置已保存，下次启用代理时生效')
+  } catch (e) {
+    toast.error(errText(e))
+  } finally {
+    tunnelSaving.value = false
+  }
+}
+
+async function forgetTunnelToken(): Promise<void> {
+  if (await clearTunnelToken()) {
+    tunnelHasToken.value = false
+    toast.success('已清除隧道令牌')
+  } else {
+    toast.error('隧道令牌清除失败：请在系统凭据管理器中删除「pony-desktop / tunnel_token」条目')
+  }
+}
 
 onMounted(async () => {
   if (isTauri()) {
@@ -396,6 +446,45 @@ const resultClass = computed(() => {
       </CardContent>
     </Card>
 
+    <!-- 卡一点五：隧道中继（可选；不配置则白名单流量不可用，引擎无直连回落） -->
+    <Card>
+      <CardHeader>
+        <CardTitle class="text-sm">隧道中继（可选）</CardTitle>
+        <CardDescription>白名单站点经中继出口访问。不配置时白名单流量将直接失败，不会静默回落直连。</CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-3">
+        <div class="space-y-1.5">
+          <Label for="tunnel-url">隧道端点</Label>
+          <Input
+            id="tunnel-url"
+            v-model="tunnelUrlInput"
+            placeholder="wss://your-gate.example/ws"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+        <div class="space-y-1.5">
+          <Label for="tunnel-token">隧道令牌</Label>
+          <Input
+            id="tunnel-token"
+            v-model="tunnelTokenInput"
+            type="password"
+            placeholder="留空沿用已保存令牌"
+            autocomplete="off"
+          />
+          <p class="text-xs text-muted-foreground">
+            {{ tunnelHasToken ? '· 已保存令牌（存于系统凭据库）' : '· 尚未保存令牌' }}
+            <template v-if="tunnelHasToken">
+              · <button class="underline underline-offset-2 hover:text-foreground" @click="confirmForgetToken = true">清除令牌</button>
+            </template>
+          </p>
+        </div>
+        <Button :disabled="tunnelSaving" @click="saveTunnel">
+          {{ tunnelSaving ? '保存中…' : '保存隧道配置' }}
+        </Button>
+      </CardContent>
+    </Card>
+
     <!-- 卡二：告警通知（档位即点即生效 + 服务端配置一行小字） -->
     <Card>
       <CardHeader>
@@ -448,6 +537,17 @@ const resultClass = computed(() => {
         <p v-if="updateError" class="text-xs text-muted-foreground">检查失败：{{ updateError }}</p>
       </CardContent>
     </Card>
+
+    <!-- 清除隧道令牌二次确认 -->
+    <ConfirmDialog
+      :open="confirmForgetToken"
+      title="清除隧道令牌？"
+      description="清除后需重新粘贴新令牌才能使用隧道中继"
+      confirm-text="清除"
+      destructive
+      @update:open="(v: boolean) => !v && (confirmForgetToken = false)"
+      @confirm="forgetTunnelToken"
+    />
 
     <!-- 清除已存凭据二次确认（UX-7②：destructive，确认后才调 forgetToken） -->
     <ConfirmDialog

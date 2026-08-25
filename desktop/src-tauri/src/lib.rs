@@ -45,6 +45,10 @@ pub fn run() {
       proxy_pac,
       proxy_status,
       proxy_test_sites,
+      proxy_tunnel_get,
+      proxy_tunnel_set_url,
+      tunnel_token_save,
+      tunnel_token_clear,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
@@ -55,52 +59,69 @@ pub fn run() {
 /// Credential Manager，dev fallback 文件模式仅在 debug 构建显式 env 触发。
 const CREDENTIAL_SERVICE: &str = "pony-desktop";
 const CREDENTIAL_USER: &str = "admin_token";
+/// 隧道令牌独立槽位（2026-08 审计整改：与 admin token 分开存取，互不影响轮换）
+const CREDENTIAL_USER_TUNNEL: &str = "tunnel_token";
 
-fn entry() -> Result<keyring::Entry, String> {
-  keyring::Entry::new(CREDENTIAL_SERVICE, CREDENTIAL_USER)
+fn cred_entry(user: &str) -> Result<keyring::Entry, String> {
+  keyring::Entry::new(CREDENTIAL_SERVICE, user)
     .map_err(|e| format!("keyring entry error: {e}"))
 }
 
-#[tauri::command]
-fn credential_set(secret: String) -> Result<(), String> {
+#[cfg(debug_assertions)]
+fn cred_dev_file(user: &str) -> Option<std::path::PathBuf> {
+  std::env::var("PONY_DESKTOP_DEV_FILE_KEYRING")
+    .ok()
+    .map(|_| std::env::temp_dir().join("pony-desktop-dev-keyring").join(user))
+}
+
+fn cred_set_impl(user: &str, secret: String) -> Result<(), String> {
   #[cfg(debug_assertions)]
-  if std::env::var("PONY_DESKTOP_DEV_FILE_KEYRING").is_ok() {
-    // dev fallback：仅 debug 构建且显式环境变量触发（spec §6.4 护栏）
-    let dir = std::env::temp_dir().join("pony-desktop-dev-keyring");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    return std::fs::write(dir.join("admin_token"), secret).map_err(|e| e.to_string());
+  if let Some(p) = cred_dev_file(user) {
+    std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
+    return std::fs::write(p, secret).map_err(|e| e.to_string());
   }
-  let ent = entry()?;
+  let ent = cred_entry(user)?;
   ent.set_password(&secret).map_err(|e| format!("credential set failed: {e}"))
 }
 
-#[tauri::command]
-fn credential_get() -> Result<Option<String>, String> {
+fn cred_get_impl(user: &str) -> Result<Option<String>, String> {
   #[cfg(debug_assertions)]
-  if std::env::var("PONY_DESKTOP_DEV_FILE_KEYRING").is_ok() {
-    let p = std::env::temp_dir().join("pony-desktop-dev-keyring/admin_token");
+  if let Some(p) = cred_dev_file(user) {
     return Ok(std::fs::read_to_string(p).ok());
   }
-  match entry()?.get_password() {
+  match cred_entry(user)?.get_password() {
     Ok(v) => Ok(Some(v)),
     Err(keyring::Error::NoEntry) => Ok(None),
     Err(e) => Err(format!("credential get failed: {e}")),
   }
 }
 
-#[tauri::command]
-fn credential_delete() -> Result<(), String> {
+fn cred_delete_impl(user: &str) -> Result<(), String> {
   #[cfg(debug_assertions)]
-  if std::env::var("PONY_DESKTOP_DEV_FILE_KEYRING").is_ok() {
-    let p = std::env::temp_dir().join("pony-desktop-dev-keyring/admin_token");
+  if let Some(p) = cred_dev_file(user) {
     let _ = std::fs::remove_file(p);
     return Ok(());
   }
-  match entry()?.delete_credential() {
+  match cred_entry(user)?.delete_credential() {
     Ok(()) => Ok(()),
     Err(keyring::Error::NoEntry) => Ok(()),
     Err(e) => Err(format!("credential delete failed: {e}")),
   }
+}
+
+#[tauri::command]
+fn credential_set(secret: String) -> Result<(), String> {
+  cred_set_impl(CREDENTIAL_USER, secret)
+}
+
+#[tauri::command]
+fn credential_get() -> Result<Option<String>, String> {
+  cred_get_impl(CREDENTIAL_USER)
+}
+
+#[tauri::command]
+fn credential_delete() -> Result<(), String> {
+  cred_delete_impl(CREDENTIAL_USER)
 }
 
 // ---- M6 系统级白名单代理（spec m6 §4/§5）----
@@ -142,6 +163,75 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+// ---- 隧道中继配置（2026-08 审计整改：端点/令牌全部 opt-in，禁止编译期硬编码）----
+const TUNNEL_FILE: &str = "tunnel.json";
+
+/// 校验隧道端点：仅接受 wss:// 或 ws:// 且无空白，长度上限 200。
+fn validate_tunnel_url(url: &str) -> Result<(), String> {
+  if url.is_empty() || url.len() > 200 || url.contains(char::is_whitespace) {
+    return Err("invalid tunnel url".into());
+  }
+  if !url.starts_with("wss://") && !url.starts_with("ws://") {
+    return Err("tunnel url must start with wss:// or ws://".into());
+  }
+  Ok(())
+}
+
+#[tauri::command]
+fn proxy_tunnel_get() -> serde_json::Value {
+  let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE))
+    .ok()
+    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from))
+    .unwrap_or_default();
+  let has_token = matches!(cred_get_impl(CREDENTIAL_USER_TUNNEL), Ok(Some(t)) if !t.is_empty());
+  serde_json::json!({ "url": url, "has_token": has_token })
+}
+
+#[tauri::command]
+fn proxy_tunnel_set_url(url: String) -> Result<(), String> {
+  let url = url.trim().to_string();
+  validate_tunnel_url(&url)?;
+  let dir = data_dir();
+  std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+  std::fs::write(
+    dir.join(TUNNEL_FILE),
+    serde_json::to_string(&serde_json::json!({ "url": url })).map_err(|e| e.to_string())?,
+  )
+  .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn tunnel_token_save(secret: String) -> Result<(), String> {
+  if secret.trim().is_empty() {
+    return Err("empty tunnel token".into());
+  }
+  cred_set_impl(CREDENTIAL_USER_TUNNEL, secret)
+}
+
+#[tauri::command]
+fn tunnel_token_clear() -> Result<(), String> {
+  cred_delete_impl(CREDENTIAL_USER_TUNNEL)
+}
+
+/// 引擎启动时装配隧道配置：端点与令牌**两者齐备**才启用隧道，
+/// 任一缺失则回退纯直连（None），绝不使用部分配置。
+fn tunnel_config_load() -> (Option<String>, Option<String>) {
+  let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE))
+    .ok()
+    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from))
+    .filter(|u| validate_tunnel_url(u).is_ok());
+  let token = cred_get_impl(CREDENTIAL_USER_TUNNEL)
+    .ok()
+    .flatten()
+    .filter(|t| !t.is_empty());
+  match (url, token) {
+    (Some(u), Some(t)) => (Some(u), Some(t)),
+    _ => (None, None),
+  }
+}
+
 static ENGINE_ON: AtomicBool = AtomicBool::new(false);
 static mut ENGINE_TASK: Option<tauri::async_runtime::JoinHandle<()>> = None;
 static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync::Mutex::new(None);
@@ -153,9 +243,10 @@ fn proxy_enable() -> Result<(), String> {
     let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
     let _ = PROXY_STATS.set(std::sync::Arc::clone(&stats));
     tauri::async_runtime::spawn(async move {
-        // 2026-08 审计整改：禁止硬编码隧道端点/令牌（旧值已随安装包分发并轮换作废）。
-        // 隧道为 opt-in：待设置页接入后由 keyring/配置注入，缺省直连不走 gate。
-        if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url: None, tunnel_token: None }, stats).await {
+        // 2026-08 审计整改：隧道端点/令牌由设置页经 keyring+本地文件注入（opt-in），
+        // 未配置时为 None → 白名单流量按引擎语义直接报错，绝不硬编码任何默认值。
+        let (tunnel_url, tunnel_token) = tunnel_config_load();
+        if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url, tunnel_token }, stats).await {
             log::warn!("proxy engine exited: {e}");
         }
     });

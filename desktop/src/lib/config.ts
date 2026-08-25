@@ -92,3 +92,57 @@ export function savePollIntervalMin(min: number): void {
   pollIntervalMin.value = v
   localStorage.setItem(POLL_INTERVAL_KEY, String(v))
 }
+
+// ---- 隧道中继配置（2026-08 审计整改：端点/令牌 opt-in，令牌仅进 OS 凭据库）----
+
+export interface TunnelConfig {
+  url: string
+  hasToken: boolean
+}
+
+/** 读取隧道配置（Rust 侧文件 + 凭据库探测，不回传令牌明文）。 */
+export async function loadTunnelConfig(): Promise<TunnelConfig> {
+  if (!isTauri()) {
+    const url = localStorage.getItem('pony-tunnel-url') ?? ''
+    const hasToken = Boolean(localStorage.getItem('pony-dev-tunnel-token'))
+    return { url, hasToken }
+  }
+  return invoke<TunnelConfig>('proxy_tunnel_get')
+}
+
+/** 校验：仅接受 wss:// 或 ws:// 且无空白。 */
+export function normalizeTunnelUrl(url: string): string {
+  return url.trim()
+}
+
+export function isValidTunnelUrl(url: string): boolean {
+  const v = normalizeTunnelUrl(url)
+  return v.length > 0 && v.length <= 200 && !/\s/.test(v) && (v.startsWith('wss://') || v.startsWith('ws://'))
+}
+
+/** 保存端点；token 非空时一并写入凭据库（留空沿用已保存令牌）。 */
+export async function saveTunnelConfig(url: string, token: string): Promise<void> {
+  const v = normalizeTunnelUrl(url)
+  if (!isValidTunnelUrl(v)) throw new Error('隧道端点必须以 wss:// 或 ws:// 开头且不含空白')
+  if (isTauri()) {
+    await invoke('proxy_tunnel_set_url', { url: v })
+    if (token.trim() !== '') await invoke('tunnel_token_save', { secret: token.trim() })
+  } else {
+    localStorage.setItem('pony-tunnel-url', v)
+    if (token.trim() !== '') localStorage.setItem('pony-dev-tunnel-token', token.trim())
+  }
+}
+
+/** 清除已保存的隧道令牌。 */
+export async function clearTunnelToken(): Promise<boolean> {
+  if (isTauri()) {
+    try {
+      await invoke('tunnel_token_clear')
+      return true
+    } catch {
+      return false
+    }
+  }
+  localStorage.removeItem('pony-dev-tunnel-token')
+  return true
+}
