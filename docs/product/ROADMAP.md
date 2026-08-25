@@ -46,11 +46,11 @@
 - [ ] NSIS 安装包
 **验收**：Windows 上安装 → 连接 dev 服务器 → 完成路由/token 管理 → 收到告警通知
 
-## M6 系统级白名单代理（桌面隧道）— 规划中（2026-08-22 立项）
-- [ ] CF Worker WS↔TCP 隧道桥（gate.ponyjob.top，独立于 edge 通道，token 鉴权）
-- [ ] pony-desktop 本地代理引擎：127.0.0.1:18900 + PAC/系统代理双模式 + 托盘开关
-- [ ] 白名单管理页 + 后缀匹配分流（命中走隧道，未命中本机直连）
-- [ ] 自更新链路交付 v0.3.0
+## M6 系统级白名单代理（桌面隧道）— 进行中（2026-08-22 立项；2026-08-25 v0.3.5 发布，收尾=Windows 实机验收 + B001 回填 ADR-008）
+- [x] CF Worker WS↔TCP 隧道桥（gate.ponyjob.top 上线；accept 口径已实证：`server.accept()`+Response 携带 `pair[0]`，ctx.acceptWebSocket 生产边缘抛 500；S1/S2 吞吐并发数据回填挂 backlog B001）
+- [x] pony-desktop 本地代理引擎：127.0.0.1:18900 + PAC/系统代理双模式 + 托盘开关（v0.3.4 起开关状态以后端 proxy_status 为准）
+- [x] 白名单管理页 + 后缀匹配分流（CRUD/总开关/条目一键可达性测试）
+- [x] 自更新链路交付（v0.3.5：HTTPS access.ponyjob.top/dsk/ 公开分发；NSIS installerHooks 清理历史 pony-desktop.lnk 残留快捷方式）
 **验收**：Windows 浏览器开启代理后 youtube/google 正常；非白名单站点确认直连（服务器日志零命中）；关闭开关完整还原
 （spec: docs/product/specs/m6/README.md）
 

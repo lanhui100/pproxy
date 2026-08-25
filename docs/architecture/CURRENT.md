@@ -1,6 +1,6 @@
 # 当前系统架构（现状）
 
-> 更新: 2026-08-22 | 状态: 生产运行中（dev 服务器）
+> 更新: 2026-08-25 | 状态: 生产运行中（dev 服务器）+ 桌面端 v0.3.5 已发布
 
 ## 拓扑
 
@@ -23,6 +23,12 @@ pproxy-server (Rust, systemd: pproxy.service)
                         └─ Vercel Function (Node, maxDuration 300s):
                             出口 AWS us-east 真实 IP
                             覆盖: openai / opencode（对 CF 数据中心 IP 敏感的服务）
+
+[Windows 桌面] pony-desktop v0.3.5（M6 白名单代理，独立隧道通道）
+   ├─ 本地引擎 127.0.0.1:18900：白名单命中 → wss 隧道；未命中 → 直连
+   ├─ 自更新: access.ponyjob.top/dsk/latest.json → 网关公开路由 /dsk/*（读本地分发目录）
+   ▼ CF Worker gate（deploy/cf-gate-worker/，gate.ponyjob.top）
+      Bearer tunnel_token 哈希校验 → ACL 443-only → cloudflare:sockets TLS 密文透传出站
 ```
 
 ## 数据面协议
@@ -42,6 +48,9 @@ pproxy-server (Rust, systemd: pproxy.service)
 | Pool | crates/core/src/pool.rs | 免费代理池（已停用：countries=[] 时跳过） |
 | CF Worker | deploy/cf-worker/worker.js | 公网出口 1（geo 头剥离防泄露真实 IP） |
 | Vercel 函数 | deploy/vercel/api/proxy.js | 公网出口 2（AWS IP，300s） |
+| gate Worker | deploy/cf-gate-worker/worker.js | 桌面隧道通道（M6）：token 哈希门 + ACL + WS↔TCP 透传，独立于 edge |
+| /dsk 分发 | crates/server/src/dsk.rs | updater 产物公开分发（豁免鉴权，minisign 验签防篡改） |
+| pony-desktop | desktop/（Tauri 2） | 托盘/Proxy 白名单页/本地引擎 18900/自更新（v0.3.5） |
 
 ## 配置
 

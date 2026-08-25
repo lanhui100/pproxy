@@ -72,7 +72,7 @@ pony usage [--days 7] [--route]  # 用量报表
 pony doctor                      # 全路由连通性一键体检
 pony config export <service> [--token <name>]   # 输出 env 片段
 ```
-连接配置 `~/.pony/config.toml`：`server = "http://192.168.101.161:8900"` + admin token。
+连接配置 `~/.pony/config.toml`：`server = "http://<LAN_IP>:8900"` + admin token。
 
 ### 2.3 pony-desktop（Tauri 2 + Vue 3 + TS + Tailwind + shadcn-vue；2026-08-22 用户裁决由 React 调整，ADR 见 M5 spec）
 | 页面 | 内容 |
@@ -91,6 +91,28 @@ pony config export <service> [--token <name>]   # 输出 env 片段
 - cloudflared tunnel（systemd），`access.ponyjob.top` → `http://127.0.0.1:8899`
 - 手机/外网 SDK base_url：`https://access.ponyjob.top/{token}/{route}/...`
 - TLS 由 CF 边缘提供；路径 token 鉴权；国内可达性已由 edge.ponyjob.top 验证
+- 桌面自更新分发（M6）：网关挂公开路由 `/dsk/:filename`（豁免鉴权，边界=产物非机密+minisign 验签防篡改），updater 端点 `https://access.ponyjob.top/dsk/latest.json`
+
+### 2.5 白名单代理引擎与隧道通道（M6）
+
+> 执行真源：docs/product/specs/m6/README.md；决策记录：ADR-008（B001 回填后生效）
+
+```
+[Windows] pony-desktop（引擎嵌进程）
+   ├─ 引擎 127.0.0.1:18900：CONNECT/absolute-form → host 后缀匹配白名单
+   ├─ 命中 → wss://gate.ponyjob.top/ws（Bearer tunnel_token）→ TLS 密文透传
+   ├─ 未命中 → 本机直连（绝不静默回落）
+   ├─ PAC /pac：命中单条 PROXY 127.0.0.1:18900，无 DIRECT 兜底
+   ▼
+[CF Worker] gate（deploy/cf-gate-worker/，独立于 edge 数据面）
+   └─ sha256(token)≡TUNNEL_TOKEN_HASH → ACL（443-only+host 归一化）→ cloudflare:sockets connect() 出站
+```
+
+- 分流语义：命中走隧道、未命中本机直连；隧道失败向浏览器报错，不做透明恢复
+- gate WS accept 口径（2026-08-25 生产实证裁决）：`server.accept()` 后 Response 必须携带 **`pair[0]`（client 端）**；`ctx.acceptWebSocket(server)`/返回 server 在生产边缘抛 500。本地 miniflare 工具链两种模式均不可复现平台行为（S4 已证伪），WS 行为以真机为准
+- 凭据：tunnel_token 明文仅 keyring/GUI 录入，哈希入 wrangler secret；轮换=服务端换 secret + GUI 重录（分钟级窗口）；源码禁止硬编码端点/令牌（2026-08 审计整改，隧道改 opt-in 由配置注入）
+- 引擎为纯 TCP 分流器：无解密无缓存；私网阻断主防线依赖 workerd 平台层（ADR-008 声明平台依赖）
+- 已知限制：CF 自家托管域名无法代理（sockets 策略）；吞吐/CPU 并发数据待 B001 重测回填
 
 ## 3. 安全
 
