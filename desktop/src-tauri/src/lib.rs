@@ -43,6 +43,8 @@ pub fn run() {
       proxy_enable,
       proxy_disable,
       proxy_pac,
+      proxy_status,
+      proxy_test_sites,
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
@@ -149,6 +151,7 @@ fn proxy_enable() -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { return Ok(()); }
     let wl = proxy_whitelist_get();
     let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
+    let _ = PROXY_STATS.set(std::sync::Arc::clone(&stats));
     tauri::async_runtime::spawn(async move {
         if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url: Some("wss://gate.ponyjob.top/ws".into()), tunnel_token: Some("<REDACTED_OLD_TOKEN>".into()) }, stats).await {
             log::warn!("proxy engine exited: {e}");
@@ -171,6 +174,44 @@ fn proxy_disable() -> Result<(), String> {
     // 引擎进程内循环随应用生命周期运行（停用=仅还原系统代理）
     Ok(())
 }
+
+#[tauri::command]
+fn proxy_status() -> serde_json::Value {
+    serde_json::json!({
+        "engine_running": ENGINE_ON.load(AOrd::SeqCst),
+    })
+}
+
+static PROXY_STATS: std::sync::OnceLock<proxy::engine::SharedStats> = std::sync::OnceLock::new();
+
+#[tauri::command]
+async fn proxy_test_sites() -> Result<Vec<serde_json::Value>, String> {
+    let sites = ["www.google.com", "www.youtube.com", "x.com", "github.com"];
+    let stats = PROXY_STATS.get().cloned();
+    let mut out = Vec::new();
+    for site in sites {
+        let started = std::time::Instant::now();
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            TcpDial::dial(site, 443),
+        ).await;
+        let ok = matches!(r, Ok(Ok(_)));
+        let ms = started.elapsed().as_millis() as u64;
+        out.push(serde_json::json!({
+            "site": site, "ok": ok, "ms": ms,
+            "error": if let Ok(Err(e)) = &r { e.to_string() } else { String::new() },
+        }));
+        if let Some(s) = &stats { s.direct.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+    }
+    Ok(out)
+}
+
+struct TcpDial;
+impl TcpDial { async fn dial(host: &str, port: u16) -> std::io::Result<tokio::net::TcpStream> {
+    tokio::net::TcpStream::connect((host, port)).await
+} }
+
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 #[tauri::command]
 fn proxy_pac() -> String {

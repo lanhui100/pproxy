@@ -22,6 +22,9 @@ const entries = ref<string[]>([])
 const newEntry = ref('')
 const enabled = ref(false)
 const error = ref('')
+interface SiteResult { site: string; ok: boolean; ms: number; error: string }
+const siteResults = ref<SiteResult[]>([])
+const testing = ref(false)
 
 async function refresh(): Promise<void> {
   try {
@@ -60,9 +63,22 @@ async function toggleProxy(on: boolean): Promise<void> {
   error.value = ''
   try {
     await tauri(on ? 'proxy_enable' : 'proxy_disable')
-    enabled.value = on
+    const st = await tauri<{ engine_running: boolean }>('proxy_status')
+    enabled.value = st.engine_running // 以后端真实状态为准
   } catch (e) {
     error.value = errorMessage(e)
+    enabled.value = false
+  }
+}
+
+async function testSites(): Promise<void> {
+  testing.value = true
+  try {
+    siteResults.value = await tauri<SiteResult[]>('proxy_test_sites')
+  } catch (e) {
+    error.value = errorMessage(e)
+  } finally {
+    testing.value = false
   }
 }
 
@@ -81,9 +97,22 @@ onMounted(refresh)
 
     <Card>
       <CardHeader><CardTitle class="text-sm">系统代理总开关（PAC 模式）</CardTitle></CardHeader>
-      <CardContent class="flex items-center gap-3">
-        <Switch :checked="enabled" @update:checked="toggleProxy" />
-        <span class="text-sm text-muted-foreground">{{ enabled ? '已启用：白名单流量经隧道，其余直连' : '未启用' }}</span>
+      <CardContent class="space-y-3">
+        <div class="flex items-center gap-3">
+          <Switch :checked="enabled" @update:checked="toggleProxy" />
+          <span class="text-sm text-muted-foreground">{{ enabled ? '已启用：白名单流量经隧道，其余直连' : '未启用' }}</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <Button variant="outline" size="sm" :disabled="!enabled || testing" @click="testSites">
+            {{ testing ? '测试中…' : '一键测试站点可达性' }}
+          </Button>
+          <span class="text-xs text-muted-foreground">google / youtube / x / github（443 握手）</span>
+        </div>
+        <ul v-if="siteResults.length" class="space-y-1 text-xs">
+          <li v-for="r in siteResults" :key="r.site">
+            {{ r.ok ? '✓' : '✗' }} {{ r.site }} — {{ r.ok ? r.ms + 'ms' : r.error }}
+          </li>
+        </ul>
       </CardContent>
     </Card>
 
