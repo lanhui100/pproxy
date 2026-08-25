@@ -16,7 +16,8 @@ echo "[sync] $TAG -> $DEST"
 gh release download "$TAG" --repo lanhui100/pproxy --dir "$DEST" --clobber
 
 # 改写 latest.json 内的资产地址：私仓 GitHub 直链对 updater 不可达（404），
-# 指回本机 /dsk/ 分发端点（MagicDNS 名，节点重新认证才变更）
+# 指向 HTTPS 公开分发端点 access.ponyjob.top/dsk/（网关公开路由，M6 迁移；
+# 旧 MagicDNS http 地址仅 tailnet 内可达且与 updater 端点域名不一致，已弃用）
 python3 - "$DEST/latest.json" <<'PY'
 import json, sys, os
 path = sys.argv[1]
@@ -26,7 +27,7 @@ for plat in d.get("platforms", {}).values():
     url = plat.get("url", "")
     if url.startswith("https://github.com/"):
         name = url.rsplit("/", 1)[-1]
-        plat["url"] = f"http://<tailnet-host>:8900/dsk/{name}"
+        plat["url"] = f"https://access.ponyjob.top/dsk/{name}"
 json.dump(d, open(path, "w"), indent=2)
 print("latest.json urls rewritten")
 PY
