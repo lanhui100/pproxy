@@ -439,7 +439,10 @@ const resultClass = computed(() => {
         </template>
         <template v-else>
           <p class="text-sm text-muted-foreground">已经是最新版本</p>
-          <Button variant="outline" size="sm" @click="checkForUpdate">检查更新</Button>
+          <Button variant="outline" size="sm" :disabled="checking" @click="checkForUpdate">
+            {{ checking ? '检查中…' : '检查更新' }}
+          </Button>
+          <p v-if="checking" class="text-xs text-muted-foreground">正在连接分发端点…</p>
         </template>
         <p v-if="updateError" class="text-xs text-muted-foreground">检查失败：{{ updateError }}</p>
       </CardContent>

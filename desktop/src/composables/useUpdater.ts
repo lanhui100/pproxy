@@ -5,6 +5,7 @@ import { ref } from 'vue'
 
 import { isTauri } from '@/lib/config'
 
+export const checking = ref(false)
 export const updateAvailable = ref(false)
 export const updateVersion = ref('')
 export const updateNotes = ref('')
@@ -15,7 +16,8 @@ export const downloaded = ref(false) // 下载完成待重启
 
 /** 检查更新：静默失败（badge 不亮即无更新/检查失败，错误仅记录）。 */
 export async function checkForUpdate(): Promise<void> {
-  if (!isTauri()) return
+  if (!isTauri() || checking.value) return
+  checking.value = true
   try {
     const { check } = await import('@tauri-apps/plugin-updater')
     const u = await check()
@@ -29,8 +31,13 @@ export async function checkForUpdate(): Promise<void> {
       updateVersion.value = ''
       updateNotes.value = ''
     }
+    if (!updateAvailable.value && !updateError.value) {
+      updateError.value = ''
+    }
   } catch (e) {
     updateError.value = String(e)
+  } finally {
+    checking.value = false
   }
 }
 
