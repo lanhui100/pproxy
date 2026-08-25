@@ -103,9 +103,10 @@ cloudflared tunnel delete pony-access                                   # 需先
 
 ## 管理面 tailnet 重绑（ADR-007，M5 落地）
 
-- `pproxy.service` 含 `Environment=PPROXY_LISTEN_ADMIN=<TAILNET_IP>:8900`
-  （tailnet IP；节点重新认证才会变更，变更时需同步 unit 与 Windows GUI Settings）
+- `pproxy.service` 不内嵌地址（tailnet 标识不入库）：实际值由部署机 drop-in 注入
+  `Environment=PPROXY_LISTEN_ADMIN=<TAILNET_IP>:8900`
+  （/etc/systemd/system/pproxy.service.d/override.conf；节点重新认证才会变更，变更时需同步 drop-in 与 Windows GUI Settings）
 - 防火墙放行：`sudo ufw allow in on tailscale0 to any port 8900 proto tcp`
-- 回滚 = 删 Environment 行 + `sudo ufw delete allow in on tailscale0 ...` + restart
+- 回滚 = 删除 drop-in 的 Environment 行（未注入时应用回落 127.0.0.1:8900）+ `sudo ufw delete allow in on tailscale0 ...` + restart
 - GUI 连接失败三分支：地址解析失败→检查 Tailscale 连接；拒绝→检查 ufw 规则；
   超时→检查对端入网状态

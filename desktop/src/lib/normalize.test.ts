@@ -5,15 +5,15 @@ import { normalizeBaseUrl, normalizeToken } from './normalize'
 
 describe('normalizeBaseUrl', () => {
   it('去首尾空格与结尾斜杠', () => {
-    expect(normalizeBaseUrl(' http://<TAILNET_IP>:8900 ')).toBe('http://<TAILNET_IP>:8900')
-    expect(normalizeBaseUrl('http://<TAILNET_IP>:8900/')).toBe('http://<TAILNET_IP>:8900')
-    expect(normalizeBaseUrl('http://<TAILNET_IP>:8900///')).toBe('http://<TAILNET_IP>:8900')
+    expect(normalizeBaseUrl(' http://100.100.100.10:8900 ')).toBe('http://100.100.100.10:8900')
+    expect(normalizeBaseUrl('http://100.100.100.10:8900/')).toBe('http://100.100.100.10:8900')
+    expect(normalizeBaseUrl('http://100.100.100.10:8900///')).toBe('http://100.100.100.10:8900')
   })
 
   it('自动补 http:// 前缀', () => {
-    expect(normalizeBaseUrl('<TAILNET_IP>:8900')).toBe('http://<TAILNET_IP>:8900')
-    expect(normalizeBaseUrl('<tailnet-host>:8900')).toBe(
-      'http://<tailnet-host>:8900',
+    expect(normalizeBaseUrl('100.100.100.10:8900')).toBe('http://100.100.100.10:8900')
+    expect(normalizeBaseUrl('devserver.tailnet-example.ts.net:8900')).toBe(
+      'http://devserver.tailnet-example.ts.net:8900',
     )
   })
 
@@ -22,7 +22,7 @@ describe('normalizeBaseUrl', () => {
   })
 
   it('清除零宽不可见字符（网页复制常见）', () => {
-    expect(normalizeBaseUrl('http://<TAILNET_IP>:8900\u200b')).toBe('http://<TAILNET_IP>:8900')
+    expect(normalizeBaseUrl('http://100.100.100.10:8900\u200b')).toBe('http://100.100.100.10:8900')
     expect(normalizeBaseUrl('\ufeffhttp://x:1')).toBe('http://x:1')
   })
 

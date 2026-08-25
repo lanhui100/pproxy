@@ -40,12 +40,15 @@
     ——低-中风险、分钟级生效、可即时回滚；因涉生产 DNS 由用户拍板；中期方案已立项 **B003**
   - **状态维持** ⏸ blocked-by-external（vercel 线本身恢复以探针日志为准）
 
-### B001 — CF 故障恢复后重测 S1/S2 spike ⏸ blocked-by-external
+### B001 — CF 故障恢复后重测 S1/S2 spike ⏸ blocked-by-external（执行车道：审计会话）
 - **触发**：M6 P0 spike 期间遭遇 CF 全球 PoP 部分中断（Minor Service Outage），WS 数据帧黑洞，测试数据不可信
 - **动作**：监控 https://www.cloudflarestatus.com 恢复全绿后，重跑
   `node scripts/spike-tunnel.mjs wss://gate.ponyjob.top/ws <token> /files/100Mb.dat --loop 600`（S1）
   与 `--concurrency 4`（S2），结论回填 spec m6 §12 与 ADR-008
-- **附带裁决**：恢复窗口内验证生产边缘 accept() 旧式与 ctx.acceptWebSocket 新式哪个可用（当前证据互相矛盾：本地 alpha 禁旧式、生产 ctx 缺失）
+- **附带裁决**：✅ 已完成（2026-08-25 恢复窗口实证）——生产边缘可用口径为 `server.accept()` + Response 携带 `pair[0]`；
+  `ctx.acceptWebSocket(server)`/返回 server 升级阶段抛 500（两会话独立实测交叉验证一致）。
+  注意重跑 S1/S2 需使用轮换后的新 tunnel_token（旧明文 <REDACTED_OLD_TOKEN> 已作废）
+- **进展**：CF 状态页已全绿（2026-08-25 复核）；剩余=S1/S2 执行 + ADR-008 回填（凭据在审计会话手中）
 - **关联**：docs/product/specs/m6/README.md §0.1/§12
 
 ## 已完成

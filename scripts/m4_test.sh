@@ -12,8 +12,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PUBLIC_URL="https://access.ponyjob.top"
 METRICS_URL="http://127.0.0.1:19099"
 DATA_ADDR="127.0.0.1:8899"
-# M5 ADR-007 重绑后：管理面监听 tailnet IP（可用 M4_ADMIN_BASE 覆盖）
-ADMIN_BASE="${M4_ADMIN_BASE:-http://<TAILNET_IP>:8900}"
+# M5 ADR-007 重绑后：管理面监听 tailnet 地址（经 TAILNET_ADMIN_BASE 注入，
+# 形如 http://<TAILNET_IP>:8900；兼容旧名 M4_ADMIN_BASE；未设置时跳过管理面闭环）
+ADMIN_BASE="${TAILNET_ADMIN_BASE:-${M4_ADMIN_BASE:-}}"
 
 PASS=0
 expect_eq() {
@@ -76,9 +77,11 @@ fi
 echo "[步骤 5] 监听面隔离"
 BIND_8899="$(ss -tlnp 2>/dev/null | awk '$4 ~ /:8899$/ {print $4}' | head -1)"
 BIND_8900="$(ss -tlnp 2>/dev/null | awk '$4 ~ /:8900$/ {print $4}' | head -1)"
+# 受控地址运行时动态获取（tailnet 标识不入库）
+TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
 expect_eq "$BIND_8899" "127.0.0.1:8899" "数据面仍仅绑 127.0.0.1（防公网直连绕过隧道）"
 case "$BIND_8900" in
-  "127.0.0.1:8900"|"<TAILNET_IP>:8900") PASS=$((PASS + 1)); echo "  PASS: 管理面仅绑受控地址（$BIND_8900，ADR-007 口径）" ;;
+  "127.0.0.1:8900"|"${TS_IP:-__unset__}:8900") PASS=$((PASS + 1)); echo "  PASS: 管理面仅绑受控地址（$BIND_8900，ADR-007 口径）" ;;
   *) echo "  FAIL: 管理面监听异常 = $BIND_8900"; exit 1 ;;
 esac
 
@@ -91,6 +94,17 @@ expect_eq "$CODE" "401" "无 token → 精确 401"
 expect_eq "$BODY" '{"error":"unauthorized"}' "401 响应体同体文案（JSON 精确匹配）"
 SRV="$(grep -i '^server:' /tmp/m4_hdr | tr -d '\r' | awk '{print $2}')"
 expect_contains "$SRV" "cloudflare" "响应经 CF 边缘（server 头三重断言之第三重）"
+
+# ---- 管理面闭环前置：步骤 7-11 需真实服务地址（tailnet 标识不入库，经环境注入）----
+if [ -z "$ADMIN_BASE" ]; then
+  echo ""
+  echo "SKIP: 未设置 TAILNET_ADMIN_BASE（形如 http://<TAILNET_IP>:8900），跳过步骤 7-11 管理面闭环"
+  echo ""
+  echo "=========================================="
+  echo "M4 集成测试（跳过模式）通过：$PASS 项断言 PASS（公网闭环已验，管理面闭环未执行）"
+  echo "=========================================="
+  exit 0
+fi
 
 # ---- 步骤 7：e2e token 全生命周期（R4：trap 兜底撤销 + 零回显）----
 echo "[步骤 7] e2e token 创建 → 404 unknown_route 判据 → 撤销复验"

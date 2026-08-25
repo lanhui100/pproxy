@@ -4,10 +4,11 @@
 //
 // 用法：node scripts/contract-smoke.mjs <admin-base-url> <admin-token>
 //   例：node scripts/contract-smoke.mjs http://<TAILNET_IP>:8900 pony_admin_xxx
+//       （<admin-base-url> 缺省时读环境变量 TAILNET_ADMIN_BASE；tailnet 标识不入库）
 // 凭据纪律：token 仅经 argv/环境变量传入，不落盘不进日志。
 import { z } from 'zod'
 
-const base = (process.argv[2] ?? '').replace(/\/$/, '')
+const base = (process.argv[2] ?? process.env.TAILNET_ADMIN_BASE ?? '').replace(/\/$/, '')
 const token = process.argv[3] ?? process.env.PONY_ADMIN_TOKEN ?? ''
 if (!base || !token) {
   console.error('usage: contract-smoke.mjs <base-url> <token>')

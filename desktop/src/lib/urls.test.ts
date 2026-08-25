@@ -4,7 +4,7 @@ import { deriveDataPlane } from './urls'
 
 describe('deriveDataPlane', () => {
   it('管理面端口替换为 8899', () => {
-    expect(deriveDataPlane('http://<TAILNET_IP>:8900')).toBe('http://<TAILNET_IP>:8899')
+    expect(deriveDataPlane('http://100.100.100.10:8900')).toBe('http://100.100.100.10:8899')
   })
 
   it('无端口的管理面地址追加 8899', () => {
