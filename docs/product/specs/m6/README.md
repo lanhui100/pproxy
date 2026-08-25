@@ -192,6 +192,6 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 |----|------|
 | CF 状态页 | 恢复全绿（Workers/WebSockets/Dashboard operational，未解决事件=0）——重测窗口开启 |
 | **accept 口径裁决（B001 附带裁决完成）** | 生产边缘实证：`server.accept()` 后 Response 必须携带 **`pair[0]`（client 端）**→ 数据帧正常；`ctx.acceptWebSocket(server)`/返回 server → 升级阶段抛 500。两个会话独立实测交叉验证一致；与 §12 S4「本地 alpha 工具链两模式全坏」不矛盾——平台行为只能真机裁决（R7 证明力分层的再验证）。gate 已按可用口径部署带鉴权正版代码 |
-| 凭据轮换 | 审计整改轮换 tunnel_token：旧明文 <REDACTED_OLD_TOKEN> 作废，桌面端 GUI 重录新 token 方可走隧道（R2 轮换语义兑现）；源码去硬编码端点/令牌，引擎隧道改 opt-in 由配置注入（属下一版内容） |
+| 凭据轮换 | 审计整改轮换 tunnel_token：旧明文 gate-spike-**** 作废，桌面端 GUI 重录新 token 方可走隧道（R2 轮换语义兑现）；源码去硬编码端点/令牌，引擎隧道改 opt-in 由配置注入（属下一版内容） |
 | v0.3.5 发布 | NSIS installerHooks（POSTINSTALL/PREUNINSTALL 定向清理历史 pony-desktop.lnk，仅匹配旧安装目标路径防误删）；sync-desktop-release.sh 资产 URL 改写口径迁 `https://access.ponyjob.top/dsk/`（与 updater 端点一致，公开可达验证 200）；本地分发目录旧版本产物已清理 |
 | S1/S2 吞吐并发 | CF 全绿但执行车道移交审计会话（其持有轮换后新凭据）；数据回填 **ADR-008** 后 M6 方可整体打 ✅ |

@@ -47,7 +47,7 @@
   与 `--concurrency 4`（S2），结论回填 spec m6 §12 与 ADR-008
 - **附带裁决**：✅ 已完成（2026-08-25 恢复窗口实证）——生产边缘可用口径为 `server.accept()` + Response 携带 `pair[0]`；
   `ctx.acceptWebSocket(server)`/返回 server 升级阶段抛 500（两会话独立实测交叉验证一致）。
-  注意重跑 S1/S2 需使用轮换后的新 tunnel_token（旧明文 <REDACTED_OLD_TOKEN> 已作废）
+  注意重跑 S1/S2 需使用轮换后的新 tunnel_token（旧明文令牌 gate-spike-**** 已作废）
 - **进展**：CF 状态页已全绿（2026-08-25 复核）；剩余=S1/S2 执行 + ADR-008 回填（凭据在审计会话手中）
 - **关联**：docs/product/specs/m6/README.md §0.1/§12
 

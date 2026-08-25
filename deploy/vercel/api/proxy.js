@@ -1,7 +1,7 @@
 export const maxDuration = 300;
 
 // 安全整改（2026-08 审计）：禁止任何硬编码/默认密钥——env 缺失时 fail-closed。
-// 历史教训：曾以 "<REDACTED_DEV_SECRET>" 作为兜底默认值，与生产 worker_secret 相同，
+// 历史教训：曾以一个低熵开发默认串作为兜底值，且与生产 worker_secret 相同
 // 构成鉴权失效开放，已轮换作废。部署前必须先在 Vercel 配置 PROXY_SECRET 环境变量。
 const SECRET = process.env.PROXY_SECRET;
 if (!SECRET) {

@@ -35,3 +35,7 @@ deploy/cf-gate-worker/node_modules/
 *.db-journal
 .vercel/
 .env.local
+
+# 根目录与 scripts 的依赖目录
+/node_modules/
+/scripts/node_modules/
