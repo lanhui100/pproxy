@@ -141,10 +141,12 @@ fn proxy_whitelist_get() -> Vec<String> {
 }
 
 fn seed() -> Vec<String> {
-    // 首次启动默认加速名单：常见不可直达站点（LLM 优先 + Google 系 + X）。
+    // 首次启动默认加速名单：常见不可直达站点（LLM 优先 + Google 系 + GitHub）。
     // 仅文件缺失时生效，用户后续编辑完全自由。
+    // 注意：不收录 x.com/twitter.com/twimg.com/x.ai——X 系屏蔽数据中心出口 IP，
+    // 经 gate（Cloudflare）无法建立 TCP，放进来只会让加速一直失败。
     ["github.com", "githubusercontent.com", "google.com", "youtube.com", "googlevideo.com", "githubassets.com", "googleusercontent.com", "gstatic.com", "googleapis.com", "ytimg.com", "ggpht.com",
-     "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "x.com", "twitter.com", "twimg.com", "x.ai"]
+     "openai.com", "chatgpt.com", "anthropic.com", "claude.ai"]
         .iter().map(|s| s.to_string()).collect()
 }
 
@@ -269,6 +271,20 @@ fn proxy_enable() -> Result<(), String> {
             log::warn!("proxy engine exited: {e}");
         }
     });
+    // 竞态修复（2026-08）：必须等引擎真正监听 18900 后再设置系统 PAC，
+    // 否则浏览器立刻拉取 PAC 会连接拒绝 → Windows 回退 DIRECT → 加速站全部直连被墙。
+    // 探测最长 ~2s，超时也继续设置 PAC（引擎几乎必已在更早时间内就绪）。
+    let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if std::net::TcpStream::connect("127.0.0.1:18900").is_ok() {
+            break;
+        }
+        if std::time::Instant::now() >= probe_deadline {
+            log::warn!("engine probe timeout, setting PAC anyway");
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let snap = proxy::sysproxy::enable(proxy::sysproxy::Mode::Pac)?;
     *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = Some(snap);
     ENGINE_ON.store(true, AOrd::SeqCst);
@@ -330,7 +346,8 @@ async fn proxy_test_sites() -> Result<Vec<serde_json::Value>, String> {
         return Err("代理未启用：请先打开系统代理总开关".into());
     }
     const PROXY_ADDR: &str = "127.0.0.1:18900";
-    let sites = ["www.google.com", "www.youtube.com", "x.com", "github.com"];
+    // 用确实能经隧道出网的站点；x.com 系屏蔽数据中心 IP，测了也必然失败
+    let sites = ["www.google.com", "www.youtube.com", "openai.com", "github.com"];
     let mut out = Vec::new();
     for site in sites {
         let started = std::time::Instant::now();
