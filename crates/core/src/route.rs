@@ -393,17 +393,18 @@ impl RouteTable {
 
     /// 连通性实测：经对应上游请求 https://{target_host}/ 首页（C-P1-5）。
     ///
-    /// S-P2-6 落地说明：spec 要求"独立 10s 总超时 client，与 EdgeClient 内部
-    /// client 隔离"。EdgeClient 将 worker_url/secret 封装为私有字段且不暴露
-    /// 注入口（本任务禁改 edge.rs），故"经上游请求"只能复用其内部 client；
-    /// 10s 总超时改由 tokio::time::timeout 在外层等效落实——管理面实测最坏
-    /// 10s 返回，不会被数据面 120s 长超时拖死（S-P2-6 的核心意图）。连接池
-    /// 共享在个人网关低 QPS 下无实际代价。
+    /// 成功判定（2026-08 修订）：两个 edge（cf-worker/vercel）在**透传源站响应**时
+    /// 都会附加 `x-proxy-edge` 标记头；edge 自身错误（鉴权 403/参数 400/上游
+    /// 502/未配置 500）不带该头。因此：
+    /// - 收到带标记头的响应 → 源站可达 → ok=true（**任意状态码**——
+    ///   api.anthropic.com 首页 404、api.x.ai 返回 421 都不代表链路不通）；
+    /// - 收到无标记头的响应 → edge 自身错误 → ok=false（error 附状态码）；
+    /// - 传输失败/超时 → ok=false（原语义不变）。
     ///
-    /// 网络失败/超时不是 Err：返回 Ok(TestResult { ok: false, .. })。
+    /// S-P2-6：独立 10s 总超时（tokio::time::timeout 外层等效），管理面实测
+    /// 最坏 10s 返回。网络失败/超时不是 Err：返回 Ok(TestResult { ok: false, .. })。
     /// 上游未配置（edges 中无该 upstream 对应客户端）→ Ok(ok=false,
-    /// error=Some("upstream not configured"))（C-P1-5，非 Err——路由存在性
-    /// 已由调用方校验/本方法前置校验）。
+    /// error=Some("upstream not configured"))（C-P1-5，非 Err）。
     pub fn test_route(&self, name: &str) -> Result<TestResult, RouteError> {
         let row = self.lock_read().get(name).cloned();
         let Some(row) = row else {
@@ -430,13 +431,22 @@ impl RouteTable {
         match resp {
             Ok(Ok(resp)) => {
                 let status = resp.status().as_u16();
-                let ok = matches!(status, 200..=399 | 401 | 403 | 405);
-                Ok(TestResult {
-                    ok,
-                    status: Some(status),
-                    latency_ms: Some(latency_ms),
-                    error: None,
-                })
+                // 标记头=edge 透传的源站响应（链路通）；缺失=edge 自身错误（链路断）
+                if resp.headers().contains_key("x-proxy-edge") {
+                    Ok(TestResult {
+                        ok: true,
+                        status: Some(status),
+                        latency_ms: Some(latency_ms),
+                        error: None,
+                    })
+                } else {
+                    Ok(TestResult {
+                        ok: false,
+                        status: Some(status),
+                        latency_ms: Some(latency_ms),
+                        error: Some(format!("edge 自身错误（status {status}），未到达源站")),
+                    })
+                }
             }
             Ok(Err(e)) => Ok(TestResult {
                 ok: false,
@@ -741,8 +751,10 @@ mod tests {
         rt.create_route(&new_route("openai", "api.openai.com", Some("worker")))
             .unwrap();
         let res = rt.test_route("openai").unwrap();
-        assert_eq!(res.status, Some(401), "OpenAI 无凭据首页应 401");
-        assert!(res.ok);
+        // 2026-08 修订：带 x-proxy-edge 头即判通（任意源站状态码，OpenAI 无凭据
+        // 首页可能 401/403），不再断言具体状态
+        assert!(res.ok, "源站可达即应 ok，实际: {:?}", res.error);
+        assert!(res.status.is_some());
         assert!(res.error.is_none());
     }
 

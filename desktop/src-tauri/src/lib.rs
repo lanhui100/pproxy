@@ -141,7 +141,10 @@ fn proxy_whitelist_get() -> Vec<String> {
 }
 
 fn seed() -> Vec<String> {
-    ["github.com", "google.com", "youtube.com", "googlevideo.com", "githubassets.com", "googleusercontent.com", "gstatic.com", "googleapis.com", "ytimg.com", "ggpht.com"]
+    // 首次启动默认加速名单：常见不可直达站点（LLM 优先 + Google 系 + X）。
+    // 仅文件缺失时生效，用户后续编辑完全自由。
+    ["github.com", "google.com", "youtube.com", "googlevideo.com", "githubassets.com", "googleusercontent.com", "gstatic.com", "googleapis.com", "ytimg.com", "ggpht.com",
+     "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "x.com", "twitter.com", "twimg.com", "x.ai"]
         .iter().map(|s| s.to_string()).collect()
 }
 

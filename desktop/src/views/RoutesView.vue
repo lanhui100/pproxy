@@ -4,7 +4,7 @@
 // 模板常量取 lib/serviceTemplates.ts（target_host 已逐条 web 核验，见该文件注释）。
 import { onMounted, ref } from 'vue'
 
-import { LoaderCircle } from '@lucide/vue'
+import { Copy, LoaderCircle } from '@lucide/vue'
 
 import { api, type RouteDto } from '@/api/client'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
@@ -179,6 +179,17 @@ function onTestClick(r: RouteDto): void {
   void runTest(r)
 }
 
+/** 复制测速失败原因（粘贴给 AI 排障）。 */
+async function copyFailReason(name: string): Promise<void> {
+  const text = `服务「${name}」测速失败：${failMessage(name)}`
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.info('失败原因已复制')
+  } catch {
+    toast.error('复制失败，请手动选择文本复制')
+  }
+}
+
 /**
  * 失败态切换线路：PATCH override_upstream → 刷新行 → 自动重测一次。
  * 自动决策语义下 override 即 effective，行内直接同步展示值。
@@ -309,9 +320,20 @@ async function doDelete(): Promise<void> {
                 tone="ok"
                 :label="`正常 · ${okLatency(r.name) ?? '?'}ms`"
               />
-              <!-- 失败：红点 + 内联动作（切换线路 ▾ / 重测） -->
+              <!-- 失败：红点 + 内联动作（复制原因 / 切换线路 ▾ / 重测） -->
               <div v-else class="space-y-1">
-                <StatusDot tone="error" :label="`失败：${failMessage(r.name)}`" />
+                <div class="flex items-center gap-1">
+                  <StatusDot tone="error" :label="`失败：${failMessage(r.name)}`" class="min-w-0" />
+                  <button
+                    type="button"
+                    class="shrink-0 rounded p-0.5 text-muted-foreground/60 transition-colors hover:text-foreground"
+                    :aria-label="`复制 ${r.name} 的失败原因`"
+                    title="复制失败原因"
+                    @click="copyFailReason(r.name)"
+                  >
+                    <Copy class="size-3" />
+                  </button>
+                </div>
                 <div class="flex items-center gap-1.5">
                   <select
                     class="h-6 rounded-md bg-muted px-1.5 text-xs outline-none transition-colors hover:bg-accent"

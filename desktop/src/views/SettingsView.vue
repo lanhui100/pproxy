@@ -9,6 +9,7 @@ import type { ComponentPublicInstance } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { getVersion } from '@tauri-apps/api/app'
+import { LoaderCircle } from '@lucide/vue'
 
 import {
   api,
@@ -37,6 +38,8 @@ import {
   updateNotes,
   updateVersion,
 } from '@/composables/useUpdater'
+import { provisionTunnel } from '@/composables/useTunnelProvision'
+import StatusDot from '@/components/common/StatusDot.vue'
 import { useToast } from '@/composables/useToast'
 import {
   clearAdminToken,
@@ -80,23 +83,39 @@ const confirmForget = ref(false)
 // 本次会话内连接成功标记（UX-3：成功后展示唯一下一步行动链接）
 const connectedThisSession = ref(false)
 
-// ---- 隧道中继（可选；2026-08 审计整改：不再内置默认端点/令牌，全部用户注入）----
+// ---- 隧道中继（默认自动：网关下发即装；高级折叠保留手动覆盖）----
 const tunnelUrlInput = ref('')
 const tunnelTokenInput = ref('')
 const tunnelHasToken = ref(false)
 const tunnelSaving = ref(false)
 const confirmForgetToken = ref(false)
+// 自动配置状态：idle=进行中 / ok=已就绪 / none=网关未下发 / manual=需手动
+const tunnelAuto = ref<'idle' | 'ok' | 'none' | 'manual'>('idle')
+const tunnelAutoUrl = ref('')
 
 async function refreshTunnel(): Promise<void> {
   try {
     const c = await loadTunnelConfig()
     tunnelUrlInput.value = c.url
     tunnelHasToken.value = c.hasToken
+    tunnelAutoUrl.value = c.url
   } catch {
     /* 首次启动无配置，保持空表单 */
   }
 }
-void refreshTunnel()
+
+/** 自动配置：本地缺失时向网关拉取下发值并静默装配（失败不打扰）。 */
+async function autoProvisionTunnel(): Promise<void> {
+  try {
+    const r = await provisionTunnel()
+    if (r === 'ready') tunnelAuto.value = 'ok'
+    else if (r === 'unavailable') tunnelAuto.value = 'none'
+    else tunnelAuto.value = 'manual'
+  } catch {
+    tunnelAuto.value = 'manual' // 网络失败等：静默降级为可手动
+  }
+  await refreshTunnel()
+}
 
 async function saveTunnel(): Promise<void> {
   if (tunnelSaving.value) return
@@ -108,6 +127,7 @@ async function saveTunnel(): Promise<void> {
   try {
     await saveTunnelConfig(tunnelUrlInput.value, tunnelTokenInput.value)
     tunnelTokenInput.value = ''
+    tunnelAuto.value = 'ok'
     await refreshTunnel()
     toast.success('隧道配置已保存，下次启用代理时生效')
   } catch (e) {
@@ -120,7 +140,8 @@ async function saveTunnel(): Promise<void> {
 async function forgetTunnelToken(): Promise<void> {
   if (await clearTunnelToken()) {
     tunnelHasToken.value = false
-    toast.success('已清除隧道令牌')
+    tunnelAuto.value = 'manual'
+    toast.success('已清除隧道密钥')
   } else {
     toast.error('隧道密钥清除失败：请在系统凭据管理器中删除「pony-desktop / tunnel_token」条目')
   }
@@ -152,6 +173,8 @@ onMounted(async () => {
   }
 
   void tokenFromStore().then((t) => (hasStoredToken.value = Boolean(t)))
+  // 隧道自动配置：进设置页即尝试（网关已连时静默装配）
+  void refreshTunnel().then(autoProvisionTunnel)
 })
 
 // 用户开始输入新 token 即解除红色高亮（程序化写回同样触发，无副作用）
@@ -235,6 +258,7 @@ async function testAndSave(): Promise<void> {
     authHint.value = false
     tokenFlash.value = false
     void refreshMonitorConfig() // 已连通即补拉监控配置，点亮告警卡只读小字
+    void autoProvisionTunnel() // 已连通即自动装配隧道（本地缺失时）
 
     // e) 成功：先落盘再固化为最终闭包。持久化段独立 try/catch（ENG-9/SEC-3）
     try {
@@ -443,45 +467,69 @@ const resultClass = computed(() => {
       </CardContent>
     </Card>
 
-    <!-- 卡一点五：隧道中继（白名单非空时的必配项；未配置则总开关拒绝开启） -->
+    <!-- 卡一点五：隧道中继（默认自动配置；高级折叠保留手动覆盖） -->
     <Card>
       <CardHeader>
         <CardTitle class="flex items-center gap-1 text-sm">
           隧道中继
-          <InfoTip text="给「代理加速」页的流量提供出口。添加了直连名单后必须配置，否则代理总开关无法开启" />
+          <InfoTip text="「代理加速」里名单网站的流量出口，由网关自动下发配置，一般无需手动填写" />
         </CardTitle>
-        <CardDescription>加速流量的出口通道。用了「代理加速」页的名单后必须配置。</CardDescription>
+        <CardDescription>连接网关后自动配置好，开箱即用。</CardDescription>
       </CardHeader>
       <CardContent class="space-y-3">
-        <div class="space-y-1.5">
-          <Label for="tunnel-url">隧道端点</Label>
-          <Input
-            id="tunnel-url"
-            v-model="tunnelUrlInput"
-            placeholder="wss://your-gate.example/ws"
-            autocomplete="off"
-            spellcheck="false"
-          />
+        <!-- 自动配置状态行 -->
+        <div class="flex items-center gap-2 text-sm">
+          <template v-if="tunnelAuto === 'ok'">
+            <StatusDot tone="ok" label="已自动配置" />
+            <span class="min-w-0 truncate font-mono text-xs text-muted-foreground">{{ tunnelAutoUrl }}</span>
+          </template>
+          <template v-else-if="tunnelAuto === 'idle'">
+            <span class="inline-flex items-center gap-1.5 text-muted-foreground">
+              <LoaderCircle class="size-3.5 animate-spin" />
+              正在从网关获取配置…
+            </span>
+          </template>
+          <template v-else>
+            <StatusDot tone="muted" label="未自动配置" />
+            <span class="text-xs text-muted-foreground">网关未提供下发配置，可在下方手动填写</span>
+          </template>
         </div>
-        <div class="space-y-1.5">
-          <Label for="tunnel-token">隧道密钥</Label>
-          <Input
-            id="tunnel-token"
-            v-model="tunnelTokenInput"
-            type="password"
-            placeholder="留空沿用已保存的密钥"
-            autocomplete="off"
-          />
-          <p class="text-xs leading-5 text-muted-foreground">
-            {{ tunnelHasToken ? '已保存密钥（存于本机系统凭据库）' : '尚未保存密钥' }}
-            <template v-if="tunnelHasToken">
-              · <button class="underline underline-offset-2 hover:text-foreground" @click="confirmForgetToken = true">清除密钥</button>
-            </template>
-          </p>
-        </div>
-        <Button :disabled="tunnelSaving" @click="saveTunnel">
-          {{ tunnelSaving ? '保存中…' : '保存隧道配置' }}
-        </Button>
+
+        <!-- 高级：手动覆盖 -->
+        <details class="rounded-lg bg-muted/50 px-3 py-2">
+          <summary class="cursor-pointer text-sm font-medium">高级：手动配置</summary>
+          <div class="mt-3 space-y-3">
+            <div class="space-y-1.5">
+              <Label for="tunnel-url">隧道端点</Label>
+              <Input
+                id="tunnel-url"
+                v-model="tunnelUrlInput"
+                placeholder="wss://your-gate.example/ws"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <div class="space-y-1.5">
+              <Label for="tunnel-token">隧道密钥</Label>
+              <Input
+                id="tunnel-token"
+                v-model="tunnelTokenInput"
+                type="password"
+                placeholder="留空沿用已保存的密钥"
+                autocomplete="off"
+              />
+              <p class="text-xs leading-5 text-muted-foreground">
+                {{ tunnelHasToken ? '已保存密钥（存于本机系统凭据库）' : '尚未保存密钥' }}
+                <template v-if="tunnelHasToken">
+                  · <button class="underline underline-offset-2 hover:text-foreground" @click="confirmForgetToken = true">清除密钥</button>
+                </template>
+              </p>
+            </div>
+            <Button :disabled="tunnelSaving" size="sm" variant="outline" @click="saveTunnel">
+              {{ tunnelSaving ? '保存中…' : '保存手动配置' }}
+            </Button>
+          </div>
+        </details>
       </CardContent>
     </Card>
 

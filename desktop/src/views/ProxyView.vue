@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// Proxy 页（M6 spec §4）：白名单 CRUD + 系统代理总开关。
+// Proxy 页（M6 spec §4）：加速名单 CRUD + 系统代理总开关。
 // 纯 Tauri invoke；browser dev 下功能禁用（按钮仍可见但不发请求）。
+// 傻瓜化：开启前自动装配隧道（网关下发 → 本机），失败才提示去设置页手动。
 import { computed, onMounted, ref } from 'vue'
 
 import { Loader2 } from '@lucide/vue'
@@ -14,6 +15,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 
 import { Switch } from '@/components/ui/switch'
+import { useToast } from '@/composables/useToast'
+import { provisionTunnel } from '@/composables/useTunnelProvision'
+
+const toast = useToast()
 
 function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -70,12 +75,27 @@ async function toggleProxy(on: boolean): Promise<void> {
   error.value = ''
   toggling.value = true
   try {
+    if (on) {
+      // 傻瓜化：本地缺隧道配置时先向网关自动拉取装配，成功才开开关
+      const r = await provisionTunnel()
+      if (r === 'unavailable') {
+        error.value = '网关没有提供隧道配置，请到「设置 → 隧道中继」手动填写后再开启'
+        return
+      }
+      if (r === 'unsupported') {
+        error.value = '浏览器预览模式下不可用，请在桌面应用内使用'
+        return
+      }
+    }
     await tauri(on ? 'proxy_enable' : 'proxy_disable')
     const st = await tauri<{ engine_running: boolean }>('proxy_status')
     enabled.value = st.engine_running // 以后端真实状态为准
+    if (on && enabled.value) toast.success('代理加速已开启')
   } catch (e) {
-    error.value = errorMessage(e)
+    const msg = errorMessage(e)
+    error.value = msg
     enabled.value = false
+    toast.error(msg.includes('隧道') ? '代理开启失败：隧道还没配置好' : '代理开启失败，请稍后重试', msg)
   } finally {
     toggling.value = false
   }
@@ -85,8 +105,17 @@ async function testSites(): Promise<void> {
   testing.value = true
   try {
     siteResults.value = await tauri<SiteResult[]>('proxy_test_sites')
+    const fails = siteResults.value.filter((r) => !r.ok)
+    if (fails.length > 0) {
+      const detail = fails.map((r) => `${r.site}: ${r.error}`).join('\n')
+      toast.error(`${fails.length} 个站点不通，点「复制」可导出详情`, detail)
+    } else if (siteResults.value.length > 0) {
+      toast.success('所有站点都能正常访问')
+    }
   } catch (e) {
-    error.value = errorMessage(e)
+    const msg = errorMessage(e)
+    error.value = msg
+    toast.error('测试失败，点「复制」可导出详情', msg)
   } finally {
     testing.value = false
   }
@@ -103,7 +132,7 @@ onMounted(refresh)
 
 <template>
   <div class="max-w-2xl">
-    <PageHeader title="代理加速" subtitle="让常用网站走加速通道，其余流量保持原样">
+    <PageHeader title="代理加速" subtitle="打开开关，名单里的网站自动走加速通道">
       <template #actions>
         <div class="flex items-center gap-2">
           <Switch :model-value="enabled" :disabled="toggling" @update:model-value="toggleProxy" />
@@ -132,21 +161,24 @@ onMounted(refresh)
         <p v-if="!enabled" class="text-xs leading-5 text-muted-foreground">先打开上面的开关再测</p>
         <ul v-if="siteResults.length" class="space-y-1.5 pt-1">
           <li v-for="r in siteResults" :key="r.site" class="flex items-center gap-2 text-sm">
-            <StatusDot tone="ok" :label="`${r.site} · ${r.ms}ms`" />
-            <span v-if="!r.ok" class="min-w-0 flex-1 truncate text-xs text-muted-foreground">{{ r.error }}</span>
+            <StatusDot v-if="r.ok" tone="ok" :label="`${r.site} · ${r.ms}ms`" />
+            <template v-else>
+              <StatusDot tone="error" :label="r.site" />
+              <span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">{{ r.error }}</span>
+            </template>
           </li>
         </ul>
       </CardContent>
     </Card>
 
-    <!-- 直连名单 -->
+    <!-- 加速名单 -->
     <Card class="mt-4">
       <CardHeader>
         <CardTitle class="flex items-center gap-1 text-sm">
-          直连名单
-          <InfoTip text="名单里的网站不走加速通道，直接连接。填 example.com 会连同它的所有子域一起匹配" />
+          加速名单
+          <InfoTip text="名单里的网站经加速通道访问，其余网站保持直连不受影响。填 example.com 会连同它的所有子域一起匹配" />
         </CardTitle>
-        <CardDescription>这些网站的流量不经加速，适合国内本来就能访问的站点。</CardDescription>
+        <CardDescription>已预置常用网站，可随意增删；适合加访问慢或打不开的站点。</CardDescription>
       </CardHeader>
       <CardContent class="space-y-4">
         <div class="flex gap-2">
@@ -161,7 +193,7 @@ onMounted(refresh)
         <EmptyState
           v-if="entries.length === 0"
           title="名单是空的"
-          description="不需要加速的网站可以加到这里，例如公司内网或国内站点。"
+          description="把需要加速的网站加进来，例如 google.com。"
         />
         <template v-else>
           <!-- 标签流：条目多时比表格更易扫读，点 × 即移除 -->

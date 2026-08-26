@@ -151,4 +151,7 @@ export const handlers = [
   http.get('*/api/health', withAuth(() => HttpResponse.json(fixtures.health))),
   http.get('*/api/monitor/config', withAuth(() =>
     HttpResponse.json({ threshold_pct: 80.0, poll_interval_sec: 3600 }))),
+  // 隧道下发：默认 fixtures 未配置（null/null），走「网关未提供」分支
+  http.get('*/api/tunnel/config', withAuth(() =>
+    HttpResponse.json({ url: null, token: null }))),
 ]

@@ -30,6 +30,9 @@ pub struct AdminState {
     pub store: Arc<pproxy_core::Store>,
     /// M3：采集来源健康状态（monitor 任务写，此处只读）。
     pub monitor: Arc<MonitorHandle>,
+    /// 隧道中继下发配置（gate 端点 + 令牌，env 注入；None=未配置）。
+    /// 桌面端「自动配置」据此一键装配，用户无需理解隧道细节。
+    pub tunnel: Option<crate::tunnel::TunnelProvision>,
 }
 
 // ---- 固定文案常量（C-P1-7：单一出处，handler 禁止各自拼写） ----
@@ -137,6 +140,7 @@ pub fn admin_router(state: AdminState) -> Router {
         .route("/api/alerts/:id/read", post(mark_alert_read_handler))
         .route("/api/quota", get(quota_handler))
         .route("/api/monitor/config", get(monitor_config_handler))
+        .route("/api/tunnel/config", get(tunnel_config_handler))
         .route("/dsk/:filename", get(crate::dsk::dsk_file_handler))
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
         .with_state(state)
@@ -693,4 +697,14 @@ async fn monitor_config_handler(State(st): State<AdminState>) -> Response {
         Json(serde_json::to_value(st.monitor.config()).unwrap_or_else(|_| serde_json::json!({}))),
     )
         .into_response()
+}
+
+/// GET /api/tunnel/config：隧道中继下发（桌面端自动配置的唯一来源）。
+/// 未配置时返回 null 字段（前端据此引导手动配置），绝不编造默认值。
+async fn tunnel_config_handler(State(st): State<AdminState>) -> Response {
+    let body = match &st.tunnel {
+        Some(t) => serde_json::json!({ "url": t.url, "token": t.token }),
+        None => serde_json::json!({ "url": null, "token": null }),
+    };
+    (StatusCode::OK, Json(body)).into_response()
 }

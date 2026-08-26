@@ -16,6 +16,7 @@ import {
   RoutesRespSchema,
   TestRouteRespSchema,
   TokensRespSchema,
+  TunnelConfigRespSchema,
   UsageRespSchema,
 } from './schemas'
 import { z } from 'zod'
@@ -249,4 +250,8 @@ export const api = {
   // monitor config（M5 §6.1 白名单端点）
   monitorConfig: (opts?: RequestOptions) =>
     request(MonitorConfigRespSchema, 'GET', '/api/monitor/config', undefined, opts),
+
+  // 隧道中继下发（桌面端自动配置）
+  tunnelConfig: (opts?: RequestOptions) =>
+    request(TunnelConfigRespSchema, 'GET', '/api/tunnel/config', undefined, opts),
 }

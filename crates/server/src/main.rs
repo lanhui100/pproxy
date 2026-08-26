@@ -7,6 +7,7 @@ mod api;
 mod dsk;
 mod gateway;
 mod monitor;
+mod tunnel;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -107,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         usage: Arc::clone(&usage),
         store: Arc::clone(&store),
         monitor,
+        tunnel: tunnel::TunnelProvision::from_env(),
     };
     let admin_router = api::admin_router(admin_state);
     let admin_listener = TcpListener::bind(&listen_admin).await?;

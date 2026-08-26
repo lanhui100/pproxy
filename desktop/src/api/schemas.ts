@@ -142,6 +142,14 @@ export const MonitorConfigRespSchema = z.object({
 })
 export type MonitorConfigResp = z.infer<typeof MonitorConfigRespSchema>
 
+// ---- 隧道中继下发（桌面端「自动配置」数据源；未配置时两字段均为 null）----
+
+export const TunnelConfigRespSchema = z.object({
+  url: z.string().nullable(),
+  token: z.string().nullable(),
+})
+export type TunnelConfigResp = z.infer<typeof TunnelConfigRespSchema>
+
 // ---- 错误体 ----
 
 export const ApiErrorBodySchema = z.object({ error: z.string() })
