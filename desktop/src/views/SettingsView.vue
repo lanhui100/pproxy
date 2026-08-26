@@ -9,7 +9,7 @@ import type { ComponentPublicInstance } from 'vue'
 import { RouterLink } from 'vue-router'
 
 import { getVersion } from '@tauri-apps/api/app'
-import { LoaderCircle } from '@lucide/vue'
+import { Download, LoaderCircle, RefreshCw } from '@lucide/vue'
 
 import {
   api,
@@ -23,7 +23,7 @@ import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import InfoTip from '@/components/common/InfoTip.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -327,6 +327,23 @@ function applyPollTier(value: number): void {
   savePollIntervalMin(value)
 }
 
+// ---- 软件更新（纯图标按钮；错误走 toast 且带一键复制，版本信息保持）----
+
+async function onCheckUpdate(): Promise<void> {
+  await checkForUpdate()
+  if (updateError.value) {
+    toast.error('检查更新失败，点「复制」可导出详情', updateError.value)
+  }
+}
+
+async function onDownloadUpdate(): Promise<void> {
+  await downloadAndInstall()
+  if (updateError.value) {
+    // updateAvailable 保持 true，下方版本信息不丢；toast 给可复制的错误详情
+    toast.error('下载更新失败，点「复制」可导出详情', updateError.value)
+  }
+}
+
 // ---- 服务端监控配置：降级为一行只读小字，加载失败静默省略整行 ----
 
 async function refreshMonitorConfig(): Promise<void> {
@@ -557,32 +574,85 @@ const resultClass = computed(() => {
       </CardContent>
     </Card>
 
-    <!-- 卡三：软件更新（结构保留，文案口语化微调） -->
+    <!-- 卡三：软件更新（纯图标按钮 + 环形进度；错误 toast，版本信息保持） -->
     <Card>
-      <CardHeader><CardTitle class="text-sm">软件更新</CardTitle></CardHeader>
+      <CardHeader>
+        <CardTitle class="text-sm">软件更新</CardTitle>
+        <!-- 动作区：检查/更新纯图标按钮；下载中变为环形进度条 -->
+        <CardAction>
+          <template v-if="downloading || downloaded">
+            <!-- 环形进度：中心百分比 -->
+            <div
+              class="relative size-8 shrink-0"
+              role="progressbar"
+              :aria-valuenow="downloadProgress"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-label="下载进度"
+            >
+              <svg viewBox="0 0 36 36" class="size-8 -rotate-90">
+                <circle cx="18" cy="18" r="15.5" fill="none" stroke-width="3.5" class="stroke-muted" />
+                <circle
+                  cx="18"
+                  cy="18"
+                  r="15.5"
+                  fill="none"
+                  stroke-width="3.5"
+                  stroke-linecap="round"
+                  class="stroke-primary transition-[stroke-dashoffset] duration-150"
+                  :stroke-dasharray="97.4"
+                  :stroke-dashoffset="97.4 * (1 - downloadProgress / 100)"
+                />
+              </svg>
+              <span class="absolute inset-0 flex items-center justify-center text-[10px] font-medium tabular-nums">
+                {{ downloadProgress }}%
+              </span>
+            </div>
+          </template>
+          <Button
+            v-else-if="updateAvailable"
+            variant="outline"
+            size="icon-sm"
+            title="下载并安装更新"
+            aria-label="下载并安装更新"
+            @click="onDownloadUpdate"
+          >
+            <Download />
+          </Button>
+          <Button
+            v-else
+            variant="outline"
+            size="icon-sm"
+            :disabled="checking"
+            title="刷新获取更新"
+            aria-label="刷新获取更新"
+            @click="onCheckUpdate"
+          >
+            <RefreshCw :class="{ 'animate-spin': checking }" />
+          </Button>
+        </CardAction>
+      </CardHeader>
       <CardContent class="space-y-3">
         <div class="flex items-center justify-between text-sm">
           <span>当前版本</span>
           <span class="font-medium">{{ appVersion || '—' }}</span>
         </div>
         <template v-if="updateAvailable">
+          <!-- 版本信息常驻：下载中/出错都不消失 -->
           <div class="rounded-lg bg-ok-soft px-3 py-2 text-sm text-ok">
             有新版本 <span class="font-semibold">{{ updateVersion }}</span> 可以升级了
             <pre v-if="updateNotes" class="mt-1 whitespace-pre-wrap text-xs opacity-80">{{ updateNotes }}</pre>
           </div>
-          <div v-if="downloading" class="text-sm">正在下载… {{ downloadProgress }}%（下载完会自动弹出安装器）</div>
-          <Button :disabled="downloading" @click="downloadAndInstall">
-            {{ downloaded ? '重启完成更新' : downloading ? `下载中 ${downloadProgress}%` : '下载并安装' }}
-          </Button>
+          <p v-if="downloading && !downloaded" class="text-xs leading-5 text-muted-foreground">
+            正在下载，完成后自动安装，请稍候…
+          </p>
+          <p v-else-if="downloaded" class="text-xs leading-5 text-muted-foreground">
+            下载完成，正在重启应用…
+          </p>
         </template>
-        <template v-else>
-          <p class="text-sm text-muted-foreground">已经是最新版本</p>
-          <Button variant="outline" size="sm" :disabled="checking" @click="checkForUpdate">
-            {{ checking ? '检查中…' : '检查更新' }}
-          </Button>
-          <p v-if="checking" class="text-xs text-muted-foreground">正在连接分发端点…</p>
-        </template>
-        <p v-if="updateError" class="text-xs text-muted-foreground">检查失败：{{ updateError }}</p>
+        <p v-else class="text-sm text-muted-foreground">
+          {{ checking ? '正在检查更新…' : '已经是最新版本' }}
+        </p>
       </CardContent>
     </Card>
 

@@ -143,10 +143,14 @@ fn proxy_whitelist_get() -> Vec<String> {
 fn seed() -> Vec<String> {
     // 首次启动默认加速名单：常见不可直达站点（LLM 优先 + Google 系 + X）。
     // 仅文件缺失时生效，用户后续编辑完全自由。
-    ["github.com", "google.com", "youtube.com", "googlevideo.com", "githubassets.com", "googleusercontent.com", "gstatic.com", "googleapis.com", "ytimg.com", "ggpht.com",
+    ["github.com", "githubusercontent.com", "google.com", "youtube.com", "googlevideo.com", "githubassets.com", "googleusercontent.com", "gstatic.com", "googleapis.com", "ytimg.com", "ggpht.com",
      "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "x.com", "twitter.com", "twimg.com", "x.ai"]
         .iter().map(|s| s.to_string()).collect()
 }
+
+/// 引擎启动时强制并入的下载域：应用自更新从 GitHub Release 拉包，
+/// 必须走隧道稳定出网（用户可删名单，但更新通道不许断）。
+const ALWAYS_TUNNEL: &[&str] = &["github.com", "githubusercontent.com"];
 
 fn data_dir() -> std::path::PathBuf {
     #[cfg(windows)]
@@ -244,7 +248,13 @@ static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync
 #[tauri::command]
 fn proxy_enable() -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { return Ok(()); }
-    let wl = proxy_whitelist_get();
+    let mut wl = proxy_whitelist_get();
+    // 更新通道兜底：GitHub 下载域强制走隧道（见 ALWAYS_TUNNEL）
+    for h in ALWAYS_TUNNEL {
+        if !wl.iter().any(|w| w == h) {
+            wl.push(h.to_string());
+        }
+    }
     let (tunnel_url, tunnel_token) = tunnel_config_load();
     // 前置校验：白名单非空但隧道缺失 → 开了也翻不了墙（R4 无直连回落），
     // 与其静默半配置不如显式拒绝，把用户引到设置页补齐配置。
