@@ -3,7 +3,7 @@
 </script>
 
 <template>
-  <div class="animate-skeleton space-y-3 rounded-lg border p-4" aria-hidden="true">
+  <div class="animate-skeleton space-y-3 rounded-xl bg-card p-4" aria-hidden="true">
     <div class="h-4 w-24 rounded bg-muted" />
     <div class="h-3 w-full rounded bg-muted" />
     <div class="h-3 w-2/3 rounded bg-muted" />

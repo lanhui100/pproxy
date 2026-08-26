@@ -4,8 +4,15 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * ─── 设计语言：「暖白纸面」────────────────────────────────────────
+ * 层级靠背景明度差表达（页面底=暖纸灰 / 卡面=纯白），一律不用边框。
+ * 圆角克制（10px 基准）；色彩留白，仅语义处出现低饱和 pastel。
+ * 排版亲密性：区块标题小节化 + 区块间大间距，组内行距紧凑。
+ * ────────────────────────────────────────────────────────────────
+ */
 @theme inline {
-    --font-sans: ui-sans-serif, system-ui, 'Segoe UI', 'Microsoft YaHei', Roboto, 'Helvetica Neue', Arial, 'PingFang SC', sans-serif;
+    --font-sans: ui-sans-serif, system-ui, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Roboto, 'Helvetica Neue', Arial, sans-serif;
     --font-heading: var(--font-sans);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
@@ -36,8 +43,17 @@
     --color-popover: var(--popover);
     --color-card-foreground: var(--card-foreground);
     --color-card: var(--card);
-    --color-foreground: var(--foreground);
     --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    /* 语义 pastel：底色柔和、文字深色，配对使用（bg-*-soft + text-*） */
+    --color-ok: var(--ok);
+    --color-ok-soft: var(--ok-soft);
+    --color-warn: var(--warn);
+    --color-warn-soft: var(--warn-soft);
+    --color-bad: var(--bad);
+    --color-bad-soft: var(--bad-soft);
+    --color-info: var(--info);
+    --color-info-soft: var(--info-soft);
     --radius-sm: calc(var(--radius) - 4px);
     --radius-md: calc(var(--radius) - 2px);
     --radius-lg: var(--radius);
@@ -47,56 +63,66 @@
 }
 
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.145 0 0);
+    /* 暖纸色画布 + 炭墨文字；卡片纯白浮于纸上 */
+    --background: oklch(0.983 0.003 84);
+    --foreground: oklch(0.24 0.006 84);
     --card: oklch(1 0 0);
-    --card-foreground: oklch(0.145 0 0);
+    --card-foreground: oklch(0.24 0.006 84);
     --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.145 0 0);
-    --primary: oklch(0.205 0 0);
-    --primary-foreground: oklch(0.985 0 0);
-    --secondary: oklch(0.97 0 0);
-    --secondary-foreground: oklch(0.205 0 0);
-    --muted: oklch(0.97 0 0);
-    --muted-foreground: oklch(0.556 0 0);
-    --accent: oklch(0.97 0 0);
-    --accent-foreground: oklch(0.205 0 0);
-    --destructive: oklch(0.577 0.245 27.325);
-    --border: oklch(0.922 0 0);
-    --input: oklch(0.922 0 0);
-    --ring: oklch(0.708 0 0);
+    --popover-foreground: oklch(0.24 0.006 84);
+    --primary: oklch(0.26 0.006 84);
+    --primary-foreground: oklch(0.985 0.002 84);
+    --secondary: oklch(0.958 0.004 84);
+    --secondary-foreground: oklch(0.32 0.006 84);
+    --muted: oklch(0.955 0.004 84);
+    --muted-foreground: oklch(0.53 0.008 84);
+    --accent: oklch(0.945 0.005 84);
+    --accent-foreground: oklch(0.26 0.006 84);
+    --destructive: oklch(0.52 0.17 27);
+    --border: oklch(0.918 0.004 84);
+    --input: oklch(0.918 0.004 84);
+    --ring: oklch(0.62 0.01 84);
     --chart-1: oklch(0.87 0 0);
     --chart-2: oklch(0.556 0 0);
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
-    /* 极简统一圆角：8px，对齐 8pt 节奏 */
-    --radius: 0.5rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.145 0 0);
-    --sidebar-primary: oklch(0.205 0 0);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.97 0 0);
-    --sidebar-accent-foreground: oklch(0.205 0 0);
-    --sidebar-border: oklch(0.922 0 0);
-    --sidebar-ring: oklch(0.708 0 0);
+    /* 微圆角基准：10px，按钮/输入/卡面统一克制弧度 */
+    --radius: 0.625rem;
+    /* 语义 pastel 对（soft 底 + 深字），饱和度压低保持素净 */
+    --ok: oklch(0.47 0.1 152);
+    --ok-soft: oklch(0.958 0.026 148);
+    --warn: oklch(0.5 0.11 76);
+    --warn-soft: oklch(0.965 0.038 88);
+    --bad: oklch(0.5 0.15 27);
+    --bad-soft: oklch(0.957 0.021 22);
+    --info: oklch(0.46 0.07 245);
+    --info-soft: oklch(0.957 0.017 240);
+    --sidebar: oklch(0.995 0.002 84);
+    --sidebar-foreground: oklch(0.24 0.006 84);
+    --sidebar-primary: oklch(0.26 0.006 84);
+    --sidebar-primary-foreground: oklch(0.985 0.002 84);
+    --sidebar-accent: oklch(0.945 0.005 84);
+    --sidebar-accent-foreground: oklch(0.26 0.006 84);
+    --sidebar-border: transparent;
+    --sidebar-ring: oklch(0.62 0.01 84);
 }
 
 .dark {
-    --background: oklch(0.145 0 0);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.205 0 0);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.205 0 0);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.922 0 0);
-    --primary-foreground: oklch(0.205 0 0);
-    --secondary: oklch(0.269 0 0);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.269 0 0);
-    --muted-foreground: oklch(0.708 0 0);
-    --accent: oklch(0.269 0 0);
-    --accent-foreground: oklch(0.985 0 0);
+    --background: oklch(0.16 0.004 260);
+    --foreground: oklch(0.97 0.002 84);
+    --card: oklch(0.205 0.005 260);
+    --card-foreground: oklch(0.97 0.002 84);
+    --popover: oklch(0.225 0.005 260);
+    --popover-foreground: oklch(0.97 0.002 84);
+    --primary: oklch(0.93 0.002 84);
+    --primary-foreground: oklch(0.21 0.005 260);
+    --secondary: oklch(0.27 0.005 260);
+    --secondary-foreground: oklch(0.97 0.002 84);
+    --muted: oklch(0.27 0.005 260);
+    --muted-foreground: oklch(0.71 0.006 84);
+    --accent: oklch(0.29 0.005 260);
+    --accent-foreground: oklch(0.97 0.002 84);
     --destructive: oklch(0.704 0.191 22.216);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
@@ -106,13 +132,21 @@
     --chart-3: oklch(0.439 0 0);
     --chart-4: oklch(0.371 0 0);
     --chart-5: oklch(0.269 0 0);
-    --sidebar: oklch(0.205 0 0);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.488 0.243 264.376);
-    --sidebar-primary-foreground: oklch(0.985 0 0);
-    --sidebar-accent: oklch(0.269 0 0);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
+    --ok: oklch(0.72 0.13 152);
+    --ok-soft: oklch(0.31 0.05 152);
+    --warn: oklch(0.78 0.12 80);
+    --warn-soft: oklch(0.33 0.05 85);
+    --bad: oklch(0.72 0.14 25);
+    --bad-soft: oklch(0.32 0.06 25);
+    --info: oklch(0.72 0.08 240);
+    --info-soft: oklch(0.3 0.04 245);
+    --sidebar: oklch(0.185 0.005 260);
+    --sidebar-foreground: oklch(0.97 0.002 84);
+    --sidebar-primary: oklch(0.93 0.002 84);
+    --sidebar-primary-foreground: oklch(0.21 0.005 260);
+    --sidebar-accent: oklch(0.27 0.005 260);
+    --sidebar-accent-foreground: oklch(0.97 0.002 84);
+    --sidebar-border: transparent;
     --sidebar-ring: oklch(0.556 0 0);
 }
 
@@ -132,28 +166,30 @@
 @keyframes skeleton-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
-}
+ }
 
+/* toast 居中展示：从上方轻轻落入 */
 @keyframes toast-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translate(-50%, -10px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
 }
 
 @keyframes toast-out {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(4px); }
+  from { opacity: 1; transform: translate(-50%, 0); }
+  to { opacity: 0; transform: translate(-50%, -6px); }
 }
 
 /* ToastHost 的 TransitionGroup（name="toast"）进出场；
-   leave 期绝对定位 + move 过渡，让剩余条目平滑上移 */
+   leave 期绝对定位 + move 过渡，让剩余条目平滑上移。
+   容器本身以 left-1/2 定位，动画内自带 -50% 水平居中。 */
 .toast-enter-active {
-  animation: toast-in 180ms ease-out;
+  animation: toast-in 180ms ease-out both;
 }
 .toast-leave-active {
   position: absolute;
-  right: 0;
-  left: 0;
-  width: 100%;
+  left: 50%;
+  width: calc(100vw - 2rem - 40px);
+  max-width: 30rem;
   animation: toast-out 150ms ease-in forwards;
 }
 .toast-move {
