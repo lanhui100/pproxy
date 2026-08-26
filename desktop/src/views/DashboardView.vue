@@ -7,6 +7,7 @@ import { Loader2, RefreshCw } from '@lucide/vue'
 
 import { api, type AlertDto, type HealthResp, type QuotaResp, type UsageResp } from '@/api/client'
 import EmptyState from '@/components/common/EmptyState.vue'
+import InfoTip from '@/components/common/InfoTip.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import SkeletonTable from '@/components/common/SkeletonTable.vue'
@@ -131,13 +132,13 @@ async function markAllRead(): Promise<void> {
   }
 }
 
-// 徽章底色按语义 tone 映射（极简色板：绿/黄/红 + 灰）
+// 徽章底色按语义 tone 映射（pastel 底 + 深字，无边框）
 const TONE_BADGE: Record<Tone, string> = {
-  ok: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  warn: 'border-amber-200 bg-amber-50 text-amber-700',
-  error: 'border-red-200 bg-red-50 text-red-700',
-  muted: 'border-zinc-200 bg-zinc-100 text-zinc-600',
-  accent: 'border-primary/20 bg-primary/5 text-foreground',
+  ok: 'bg-ok-soft text-ok',
+  warn: 'bg-warn-soft text-warn',
+  error: 'bg-bad-soft text-bad',
+  muted: 'bg-muted text-muted-foreground',
+  accent: 'bg-accent text-foreground',
 }
 
 // ---- 服务健康 ----
@@ -162,14 +163,14 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
         <SkeletonCard />
         <SkeletonCard />
       </div>
-      <div class="mt-6">
+      <div class="mt-8">
         <SkeletonTable :rows="3" />
       </div>
     </template>
 
     <!-- 首拉失败且无数据：整页错误态 -->
-    <div v-else-if="showFatal" class="rounded-lg border border-red-200 bg-red-50 px-4 py-10 text-center">
-      <p class="mx-auto max-w-lg break-all text-sm text-red-800">{{ error }}</p>
+    <div v-else-if="showFatal" class="rounded-xl bg-bad-soft px-4 py-10 text-center">
+      <p class="mx-auto max-w-lg break-all text-sm text-bad">{{ error }}</p>
       <Button class="mt-4" variant="outline" size="sm" :disabled="loading" @click="refresh">重试</Button>
     </div>
 
@@ -177,7 +178,7 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
       <!-- 刷新/重试失败的横幅（已有旧数据时叠加展示） -->
       <div
         v-if="error"
-        class="mb-4 flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+        class="mb-6 flex items-center gap-3 rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad"
       >
         <span class="min-w-0 flex-1 break-all">{{ error }}</span>
         <Button variant="outline" size="sm" :disabled="loading" @click="refresh">重试</Button>
@@ -187,7 +188,7 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
       <div class="grid gap-4 md:grid-cols-3">
         <Card>
           <CardContent>
-            <div class="text-xs text-muted-foreground">服务状态</div>
+            <div class="text-xs font-medium tracking-wide text-muted-foreground">服务状态</div>
             <div class="mt-3">
               <!-- 大号状态点：size="lg" 放大点与文字（UX-11，去掉 DOM 穿透 hack） -->
               <StatusDot :tone="dbView.tone" :label="dbView.label" size="lg" />
@@ -201,7 +202,7 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
 
         <Card>
           <CardContent>
-            <div class="text-xs text-muted-foreground">近 24 小时流量</div>
+            <div class="text-xs font-medium tracking-wide text-muted-foreground">近 24 小时流量</div>
             <template v-if="usage">
               <div class="mt-3 text-2xl font-semibold tabular-nums">{{ fmtCount(usage.total.requests) }}</div>
               <div class="mt-1 text-xs tabular-nums text-muted-foreground">
@@ -215,7 +216,10 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
         <Card>
           <!-- flex-1 + 内层 flex-col：让「查看详情」贴底（等价原 flex-col 卡的 mt-auto 行为） -->
           <CardContent class="flex flex-1 flex-col">
-            <div class="text-xs text-muted-foreground">上游额度</div>
+            <div class="flex items-center gap-1 text-xs font-medium tracking-wide text-muted-foreground">
+              上游额度
+              <InfoTip text="中转线路的免费用量额度，触顶后会临时限流，次日恢复" />
+            </div>
             <div v-if="quotaSources.length > 0" class="mt-3 space-y-1.5">
               <div v-for="s in quotaSources" :key="s.name" class="flex items-start justify-between gap-2">
                 <!-- 上游名经 upstreamLabel 映射（R2-UX-2）；error/warn 态附上次正常时间（R2-UX-10） -->
@@ -235,39 +239,39 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
       </div>
 
       <!-- 我的接入 -->
-      <Card class="mt-4">
-        <CardContent>
-          <div class="flex items-start justify-between gap-3">
-            <div>
-              <div class="text-xs text-muted-foreground">我的接入</div>
-              <p class="mt-1 text-sm">把下面的接入地址发给你的设备</p>
+      <section class="mt-8">
+        <h2 class="text-sm font-semibold tracking-tight">我的接入</h2>
+        <Card class="mt-3">
+          <CardContent>
+            <div class="flex items-start justify-between gap-3">
+              <p class="text-sm">把下面的接入地址发给你的设备</p>
+              <Button v-if="accessBase" variant="outline" size="sm" @click="copyAccessTemplate">复制模板</Button>
             </div>
-            <Button v-if="accessBase" variant="outline" size="sm" @click="copyAccessTemplate">复制模板</Button>
-          </div>
-          <template v-if="accessBase">
-            <p class="mt-3 break-all rounded-md bg-muted/60 px-3 py-2 font-mono text-sm">
-              {{ accessBase }}/<span class="rounded bg-amber-100 px-1 py-0.5 text-amber-800">&lt;令牌&gt;</span>/<span
-                class="rounded border border-dashed px-1 py-0.5"
-                >&lt;服务&gt;</span
-              >
+            <template v-if="accessBase">
+              <p class="mt-3 break-all rounded-lg bg-muted px-3 py-2 font-mono text-sm">
+                {{ accessBase }}/<span class="rounded bg-warn-soft px-1 py-0.5 text-warn">&lt;令牌&gt;</span>/<span
+                  class="rounded bg-accent px-1 py-0.5"
+                  >&lt;服务&gt;</span
+                >
+              </p>
+              <p class="mt-2 text-xs leading-5 text-muted-foreground">
+                &lt;令牌&gt; 请替换为设备密钥页创建的明文（仅创建时可见）；&lt;服务&gt; 填要访问的服务名。
+              </p>
+            </template>
+            <p v-else class="mt-3 text-sm text-muted-foreground">
+              先在<RouterLink to="/settings" class="text-primary hover:underline">设置</RouterLink>完成连接
             </p>
-            <p class="mt-2 text-xs text-muted-foreground">
-              &lt;令牌&gt; 请替换为设备密钥页创建的明文（仅创建时可见）；&lt;服务&gt; 填要访问的服务名。
-            </p>
-          </template>
-          <p v-else class="mt-3 text-sm text-muted-foreground">
-            先在<RouterLink to="/settings" class="text-primary hover:underline">设置</RouterLink>完成连接
-          </p>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      </section>
 
       <!-- 告警 -->
-      <div class="mt-6">
-        <div class="mb-2 flex items-center justify-between gap-3">
-          <h2 class="text-sm font-semibold">
+      <section class="mt-8">
+        <div class="mb-3 flex items-center justify-between gap-3">
+          <h2 class="text-sm font-semibold tracking-tight">
             告警<span class="ml-1.5 text-xs font-normal text-muted-foreground">未读 {{ sortedAlerts.length }}</span>
           </h2>
-          <Button v-if="sortedAlerts.length > 0" variant="outline" size="xs" :disabled="markAllBusy" @click="markAllRead">
+          <Button v-if="sortedAlerts.length > 0" variant="ghost" size="xs" :disabled="markAllBusy" @click="markAllRead">
             <Loader2 v-if="markAllBusy" class="animate-spin" />
             全部标为已读
           </Button>
@@ -278,12 +282,12 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
           <li
             v-for="a in sortedAlerts"
             :key="a.id"
-            class="flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm"
-            :class="a.level === 'critical' ? 'border-red-200 bg-red-50/60' : ''"
+            class="flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm"
+            :class="a.level === 'critical' ? 'bg-bad-soft' : 'bg-card'"
           >
             <div class="flex min-w-0 items-center gap-2">
               <span
-                class="shrink-0 rounded-full border px-2 py-0.5 text-xs"
+                class="shrink-0 rounded-full px-2 py-0.5 text-xs"
                 :class="TONE_BADGE[alertLevelView(a.level).tone]"
               >
                 {{ alertLevelView(a.level).label }}
@@ -299,11 +303,11 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
             </div>
           </li>
         </ul>
-      </div>
+      </section>
 
       <!-- 服务健康 -->
-      <div class="mt-6">
-        <h2 class="mb-2 text-sm font-semibold">服务健康（{{ routeEntries.length }}）</h2>
+      <section class="mt-8">
+        <h2 class="mb-3 text-sm font-semibold tracking-tight">服务健康（{{ routeEntries.length }}）</h2>
         <EmptyState
           v-if="routeEntries.length === 0"
           title="还没有服务"
@@ -315,19 +319,21 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
             </Button>
           </template>
         </EmptyState>
-        <ul v-else class="divide-y overflow-hidden rounded-lg border">
-          <li
-            v-for="[name, cfg] in routeEntries"
-            :key="name"
-            class="flex items-center gap-3 px-3 py-2.5 text-sm"
-            :class="{ 'opacity-60': !cfg.enabled }"
-          >
-            <span class="font-medium">{{ name }}</span>
-            <StatusDot :tone="cfg.enabled ? 'ok' : 'muted'" :label="cfg.enabled ? '启用中' : '已停用'" class="text-xs" />
-            <span class="ml-auto shrink-0 text-xs text-muted-foreground">{{ upstreamLabel(cfg.upstream).label }}</span>
-          </li>
-        </ul>
-      </div>
+        <Card v-else class="py-1">
+          <ul class="divide-y divide-border/60">
+            <li
+              v-for="[name, cfg] in routeEntries"
+              :key="name"
+              class="mx-4 flex items-center gap-3 py-2.5 text-sm first:pt-3 last:pb-3"
+              :class="{ 'opacity-60': !cfg.enabled }"
+            >
+              <span class="font-medium">{{ name }}</span>
+              <StatusDot :tone="cfg.enabled ? 'ok' : 'muted'" :label="cfg.enabled ? '启用中' : '已停用'" class="text-xs" />
+              <span class="ml-auto shrink-0 text-xs text-muted-foreground">{{ upstreamLabel(cfg.upstream).label }}</span>
+            </li>
+          </ul>
+        </Card>
+      </section>
     </template>
   </div>
 </template>

@@ -54,7 +54,7 @@ void checkForUpdate()
 
 <template>
   <div class="flex h-screen">
-    <nav class="w-52 shrink-0 border-r bg-sidebar p-3">
+    <nav class="w-52 shrink-0 bg-card p-3">
       <div class="mb-5 px-2.5">
         <p class="text-sm font-semibold tracking-tight">Pony Proxy</p>
         <p class="mt-0.5 text-xs text-muted-foreground">个人代理网关</p>
@@ -63,18 +63,18 @@ void checkForUpdate()
         v-for="item in nav"
         :key="item.to"
         :to="item.to"
-        class="mb-0.5 flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm transition-colors duration-150"
+        class="mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors duration-150"
         :class="
           isActive(item.to)
-            ? 'bg-muted font-medium text-foreground'
-            : 'text-muted-foreground hover:bg-accent/70 hover:text-foreground'
+            ? 'bg-accent font-medium text-foreground'
+            : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
         "
       >
         <component :is="item.icon" class="size-4 shrink-0" />
         <span class="truncate">{{ item.label }}</span>
         <span
           v-if="item.badge === 'alerts' && unreadCount > 0"
-          class="ml-auto rounded-full bg-destructive px-1.5 text-xs leading-5 text-white"
+          class="ml-auto rounded-full bg-bad px-1.5 text-xs leading-5 text-white"
         >
           {{ unreadCount > 99 ? '99+' : unreadCount }}
         </span>
@@ -85,27 +85,29 @@ void checkForUpdate()
         />
       </RouterLink>
     </nav>
-    <main class="flex-1 overflow-auto p-6">
-      <NeedSetupGuide v-if="!configured && route.path !== '/settings'" />
-      <template v-else>
-        <div
-          v-if="unreadCount > 0 && !bannerDismissed"
-          class="mb-4 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
-        >
-          <Bell class="size-4 shrink-0 text-amber-600" aria-hidden="true" />
-          有 {{ unreadCount }} 条未读告警
-          <RouterLink to="/" class="underline underline-offset-2">前往处理</RouterLink>
-          <button
-            type="button"
-            class="ml-auto rounded p-0.5 text-amber-700 transition-colors hover:text-amber-900"
-            aria-label="关闭横幅"
-            @click="bannerDismissed = true"
+    <main class="flex-1 overflow-auto p-6 lg:p-8">
+      <div class="mx-auto max-w-3xl">
+        <NeedSetupGuide v-if="!configured && route.path !== '/settings'" />
+        <template v-else>
+          <div
+            v-if="unreadCount > 0 && !bannerDismissed"
+            class="mb-6 flex items-center gap-2 rounded-lg bg-warn-soft px-3 py-2 text-sm text-warn"
           >
-            ×
-          </button>
-        </div>
-        <RouterView />
-      </template>
+            <Bell class="size-4 shrink-0" aria-hidden="true" />
+            有 {{ unreadCount }} 条未读告警
+            <RouterLink to="/" class="font-medium underline underline-offset-2">前往处理</RouterLink>
+            <button
+              type="button"
+              class="ml-auto rounded p-0.5 transition-colors hover:text-foreground"
+              aria-label="关闭横幅"
+              @click="bannerDismissed = true"
+            >
+              ×
+            </button>
+          </div>
+          <RouterView />
+        </template>
+      </div>
     </main>
   </div>
   <!-- 全局 toast 层：仅挂载一次 -->

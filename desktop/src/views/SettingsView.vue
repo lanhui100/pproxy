@@ -19,6 +19,7 @@ import {
 } from '@/api/client'
 import Chip from '@/components/common/Chip.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
+import InfoTip from '@/components/common/InfoTip.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -121,7 +122,7 @@ async function forgetTunnelToken(): Promise<void> {
     tunnelHasToken.value = false
     toast.success('已清除隧道令牌')
   } else {
-    toast.error('隧道令牌清除失败：请在系统凭据管理器中删除「pony-desktop / tunnel_token」条目')
+    toast.error('隧道密钥清除失败：请在系统凭据管理器中删除「pony-desktop / tunnel_token」条目')
   }
 }
 
@@ -252,15 +253,15 @@ async function testAndSave(): Promise<void> {
       saveDataPlaneUrl(persistSnapshot.dataPlane)
       setBaseUrlProvider(() => url.value)
       setTokenProvider(async () => (await tokenFromStore()) ?? (tokenInput.value || null))
-      const msg = '✓ 已连通，但本机凭据保存失败：请重试或检查系统凭据库'
+      const msg = '✓ 已连通，但保存到本机时失败：请重试或检查系统凭据库'
       testResult.value = msg
       toast.error(msg)
     }
     settled = true // 成功与持久化半失败均不还原 providers
   } catch (e) {
     // g) 失败三分支文案（沿用现状）；零写入
-    if (isUnauthorized(e)) testResult.value = '✗ 已连通但鉴权失败：请检查 admin token'
-    else if ((e as { kind?: string }).kind === 'network') testResult.value = '✗ 无法连接：地址不可达或服务未运行'
+    if (isUnauthorized(e)) testResult.value = '✗ 网关已连上但密钥不对：请核对管理员密钥'
+    else if ((e as { kind?: string }).kind === 'network') testResult.value = '✗ 连不上：地址可能写错了，或服务没有在运行'
     else testResult.value = `✗ ${errText(e)}`
   } finally {
     testing.value = false
@@ -283,10 +284,10 @@ async function forgetToken(): Promise<void> {
   if (cleared) {
     tokenInput.value = ''
     hasStoredToken.value = false
-    toast.success('已清除本机保存的凭据')
+    toast.success('已清除本机保存的管理员密钥')
     return
   }
-  toast.error('凭据清除失败：请在系统凭据管理器中手动删除「pony-desktop」条目后重试')
+  toast.error('密钥清除失败：请在系统凭据管理器中手动删除「pony-desktop」条目后重试')
 }
 
 // ---- 告警档位（点击即持久化并热生效，无独立保存钮）----
@@ -323,8 +324,8 @@ const pollHoursText = computed(() => {
 // ---- 结果行配色：✓ 绿 / ✗ 红 / 中性提示灰 ----
 
 const resultClass = computed(() => {
-  if (testResult.value.startsWith('✓')) return 'text-emerald-700'
-  if (testResult.value.startsWith('✗')) return 'text-red-700'
+  if (testResult.value.startsWith('✓')) return 'text-ok'
+  if (testResult.value.startsWith('✗')) return 'text-bad'
   return 'text-muted-foreground'
 })
 </script>
@@ -336,10 +337,10 @@ const resultClass = computed(() => {
     <!-- 401 落地警示条（F1 送入，固定文案，不含动态详情） -->
     <div
       v-if="authHint"
-      class="flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+      class="flex items-start gap-2 rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad"
       role="alert"
     >
-      登录凭据无效，请在下方重新粘贴 admin token
+      登录凭据已失效，请在下方重新粘贴管理员密钥
     </div>
 
     <!-- 卡一：连接向导（三步打勾 + 单一原子按钮） -->
@@ -349,35 +350,37 @@ const resultClass = computed(() => {
         <CardDescription>按顺序填好三步，最后一键测试并保存。</CardDescription>
       </CardHeader>
       <CardContent class="space-y-5">
-        <!-- 步骤① 管理面地址 -->
+        <!-- 步骤① 网关地址 -->
         <div class="space-y-1.5">
           <div class="flex items-center gap-2">
             <span
               class="flex size-5 shrink-0 items-center justify-center rounded-full text-xs font-medium"
-              :class="stepDotDone(1) ? 'bg-emerald-100 text-emerald-700' : 'bg-muted text-muted-foreground'"
+              :class="stepDotDone(1) ? 'bg-ok-soft text-ok' : 'bg-muted text-muted-foreground'"
               aria-hidden="true"
             >
               {{ stepDotDone(1) ? '✓' : '1' }}
             </span>
-            <Label for="cfg-url">管理面地址</Label>
+            <Label for="cfg-url">网关地址</Label>
+            <InfoTip text="服务器上网关的管理入口，形如 http://192.168.x.x:8900。手机、电脑等设备要能访问到这个 IP" />
           </div>
           <Input id="cfg-url" v-model="url" placeholder="http://100.x.x.x:8900" class="font-mono text-sm" />
           <p class="text-xs leading-5 text-muted-foreground">
-            形如 http://100.x.x.x:8900，需为其他设备可达的 IP（127.0.0.1 仅限本机）
+            形如 http://100.x.x.x:8900；其他设备要能访问到这个地址（127.0.0.1 仅限本机使用）
           </p>
         </div>
 
-        <!-- 步骤② 数据面地址（选填） -->
+        <!-- 步骤② 接入地址（选填） -->
         <div class="space-y-1.5">
           <div class="flex items-center gap-2">
             <span
               class="flex size-5 shrink-0 items-center justify-center rounded-full text-xs font-medium"
-              :class="stepDotDone(2) ? 'bg-emerald-100 text-emerald-700' : 'bg-muted text-muted-foreground'"
+              :class="stepDotDone(2) ? 'bg-ok-soft text-ok' : 'bg-muted text-muted-foreground'"
               aria-hidden="true"
             >
               {{ stepDotDone(2) ? '✓' : '2' }}
             </span>
-            <Label for="cfg-dataplane">数据面地址（选填）</Label>
+            <Label for="cfg-dataplane">接入地址（选填）</Label>
+            <InfoTip text="设备的请求入口。留空会按网关地址自动推导；需要走公网时填 https://access.ponyjob.top" />
           </div>
           <Input
             id="cfg-dataplane"
@@ -385,55 +388,49 @@ const resultClass = computed(() => {
             placeholder="留空自动推导"
             class="font-mono text-sm"
           />
-          <p v-if="derivedPreviewText" class="text-xs text-emerald-700">
-            留空将使用推导地址：{{ derivedPreviewText }}
-          </p>
-          <p class="text-xs leading-5 text-muted-foreground">
-            接入设备的 base_url 底座；走公网入口填 https://access.ponyjob.top。管理面无需公网可达
+          <p v-if="derivedPreviewText" class="text-xs leading-5 text-ok">
+            留空将自动使用：{{ derivedPreviewText }}
           </p>
         </div>
 
-        <!-- 步骤③ admin token -->
+        <!-- 步骤③ 管理员密钥 -->
         <div class="space-y-1.5">
           <div class="flex items-center gap-2">
             <span
               class="flex size-5 shrink-0 items-center justify-center rounded-full text-xs font-medium"
-              :class="stepDotDone(3) ? 'bg-emerald-100 text-emerald-700' : 'bg-muted text-muted-foreground'"
+              :class="stepDotDone(3) ? 'bg-ok-soft text-ok' : 'bg-muted text-muted-foreground'"
               aria-hidden="true"
             >
               {{ stepDotDone(3) ? '✓' : '3' }}
             </span>
-            <Label for="cfg-token">admin token</Label>
+            <Label for="cfg-token">管理员密钥</Label>
+            <InfoTip
+              text="部署网关时生成的一串密码，丢了可以在服务器上找回：执行 journalctl -u pproxy | grep ADMIN_TOKEN 查看首次启动日志；或看 ~/.pony/config.toml 里的 admin_token 字段；日志已丢失则设置环境变量后重启服务端"
+            />
           </div>
           <Input
             id="cfg-token"
             ref="tokenInputRef"
             v-model="tokenInput"
             type="password"
-            placeholder="粘贴服务器上的 admin token（留空沿用已保存凭据）"
+            placeholder="粘贴服务器上的管理员密钥（留空沿用已保存的）"
             :aria-invalid="tokenFlash ? 'true' : undefined"
             autocomplete="off"
           />
-          <ul class="space-y-0.5 text-xs leading-5 text-muted-foreground">
-            <li>· 在服务器上查看：部署时注入的环境变量 PPROXY_ADMIN_TOKEN</li>
-            <li>· 或执行 journalctl -u pproxy | grep ADMIN_TOKEN，首次启动仅打印一次</li>
-            <li>· 或查看服务器 ~/.pony/config.toml 的 admin_token 字段</li>
-            <li>· 日志已丢失则设置变量后重启服务端</li>
-          </ul>
-          <p class="text-xs text-muted-foreground">
-            存储位置：{{ isTauri() ? 'Windows 凭据管理器' : '浏览器 localStorage（dev）' }}
-            · <button class="underline underline-offset-2 hover:text-foreground" @click="confirmForget = true">清除已存凭据</button>
+          <p class="text-xs leading-5 text-muted-foreground">
+            密钥保存在本机{{ isTauri() ? '系统凭据管理器' : '浏览器（dev 模式）' }}中，不会上传
+            · <button class="underline underline-offset-2 hover:text-foreground" @click="confirmForget = true">清除已保存的密钥</button>
           </p>
         </div>
 
         <!-- 单一原子按钮（无独立「保存」「测试」两钮） -->
-        <div class="space-y-2 border-t pt-4">
+        <div class="space-y-2 pt-1">
           <div class="flex flex-wrap items-center gap-3">
             <Button :disabled="testing || !url.trim()" @click="testAndSave">
               {{ testing ? '正在测试…' : '测试并保存' }}
             </Button>
             <!-- UX-8：置灰原因就地说明 -->
-            <span v-if="!url.trim()" class="text-xs text-muted-foreground">填写管理面地址后可测试</span>
+            <span v-if="!url.trim()" class="text-xs text-muted-foreground">填写网关地址后可测试</span>
           </div>
           <p v-if="testResult" class="text-sm" :class="resultClass">{{ testResult }}</p>
           <!-- UX-3：本次会话连接成功后的唯一下一步行动链接 -->
@@ -449,8 +446,11 @@ const resultClass = computed(() => {
     <!-- 卡一点五：隧道中继（白名单非空时的必配项；未配置则总开关拒绝开启） -->
     <Card>
       <CardHeader>
-        <CardTitle class="text-sm">隧道中继</CardTitle>
-        <CardDescription>白名单站点经中继出口访问。添加白名单后必须配置端点与令牌，否则「Proxy」页的总开关无法开启。</CardDescription>
+        <CardTitle class="flex items-center gap-1 text-sm">
+          隧道中继
+          <InfoTip text="给「代理加速」页的流量提供出口。添加了直连名单后必须配置，否则代理总开关无法开启" />
+        </CardTitle>
+        <CardDescription>加速流量的出口通道。用了「代理加速」页的名单后必须配置。</CardDescription>
       </CardHeader>
       <CardContent class="space-y-3">
         <div class="space-y-1.5">
@@ -464,18 +464,18 @@ const resultClass = computed(() => {
           />
         </div>
         <div class="space-y-1.5">
-          <Label for="tunnel-token">隧道令牌</Label>
+          <Label for="tunnel-token">隧道密钥</Label>
           <Input
             id="tunnel-token"
             v-model="tunnelTokenInput"
             type="password"
-            placeholder="留空沿用已保存令牌"
+            placeholder="留空沿用已保存的密钥"
             autocomplete="off"
           />
-          <p class="text-xs text-muted-foreground">
-            {{ tunnelHasToken ? '· 已保存令牌（存于系统凭据库）' : '· 尚未保存令牌' }}
+          <p class="text-xs leading-5 text-muted-foreground">
+            {{ tunnelHasToken ? '已保存密钥（存于本机系统凭据库）' : '尚未保存密钥' }}
             <template v-if="tunnelHasToken">
-              · <button class="underline underline-offset-2 hover:text-foreground" @click="confirmForgetToken = true">清除令牌</button>
+              · <button class="underline underline-offset-2 hover:text-foreground" @click="confirmForgetToken = true">清除密钥</button>
             </template>
           </p>
         </div>
@@ -518,9 +518,9 @@ const resultClass = computed(() => {
           <span class="font-medium">{{ appVersion || '—' }}</span>
         </div>
         <template v-if="updateAvailable">
-          <div class="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm dark:border-emerald-700 dark:bg-emerald-950">
+          <div class="rounded-lg bg-ok-soft px-3 py-2 text-sm text-ok">
             有新版本 <span class="font-semibold">{{ updateVersion }}</span> 可以升级了
-            <pre v-if="updateNotes" class="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{{ updateNotes }}</pre>
+            <pre v-if="updateNotes" class="mt-1 whitespace-pre-wrap text-xs opacity-80">{{ updateNotes }}</pre>
           </div>
           <div v-if="downloading" class="text-sm">正在下载… {{ downloadProgress }}%（下载完会自动弹出安装器）</div>
           <Button :disabled="downloading" @click="downloadAndInstall">
@@ -541,8 +541,8 @@ const resultClass = computed(() => {
     <!-- 清除隧道令牌二次确认 -->
     <ConfirmDialog
       :open="confirmForgetToken"
-      title="清除隧道令牌？"
-      description="清除后需重新粘贴新令牌才能使用隧道中继"
+      title="清除隧道密钥？"
+      description="清除后需重新粘贴新密钥才能使用隧道中继"
       confirm-text="清除"
       destructive
       @update:open="(v: boolean) => !v && (confirmForgetToken = false)"
@@ -552,8 +552,8 @@ const resultClass = computed(() => {
     <!-- 清除已存凭据二次确认（UX-7②：destructive，确认后才调 forgetToken） -->
     <ConfirmDialog
       :open="confirmForget"
-      title="清除已存凭据？"
-      description="清除后需要重新粘贴 admin token 才能管理网关"
+      title="清除已保存的密钥？"
+      description="清除后需要重新粘贴管理员密钥才能管理网关"
       confirm-text="清除"
       destructive
       @update:open="(v: boolean) => !v && (confirmForget = false)"

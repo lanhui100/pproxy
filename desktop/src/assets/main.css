@@ -170,26 +170,25 @@
 
 /* toast 居中展示：从上方轻轻落入 */
 @keyframes toast-in {
-  from { opacity: 0; transform: translate(-50%, -10px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
+  from { opacity: 0; transform: translateY(-10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes toast-out {
-  from { opacity: 1; transform: translate(-50%, 0); }
-  to { opacity: 0; transform: translate(-50%, -6px); }
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-6px); }
 }
 
 /* ToastHost 的 TransitionGroup（name="toast"）进出场；
-   leave 期绝对定位 + move 过渡，让剩余条目平滑上移。
-   容器本身以 left-1/2 定位，动画内自带 -50% 水平居中。 */
+   容器负责水平居中，leave 期条目回到容器流内绝对定位，
+   配合 move 过渡让剩余条目平滑上移。 */
 .toast-enter-active {
-  animation: toast-in 180ms ease-out both;
+  animation: toast-in 180ms ease-out;
 }
 .toast-leave-active {
   position: absolute;
-  left: 50%;
-  width: calc(100vw - 2rem - 40px);
-  max-width: 30rem;
+  left: 0;
+  right: 0;
   animation: toast-out 150ms ease-in forwards;
 }
 .toast-move {

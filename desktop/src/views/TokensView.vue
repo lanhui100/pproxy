@@ -20,6 +20,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Card } from '@/components/ui/card'
 import { copySecret, releaseAll } from '@/composables/useSecretCopy'
 import { useToast } from '@/composables/useToast'
 import { loadBackendUrl, loadDataPlaneUrl } from '@/lib/config'
@@ -253,7 +254,7 @@ async function doRevoke(): Promise<void> {
 
 <template>
   <div>
-    <PageHeader title="设备密钥" subtitle="即 token · 为每台设备发一把钥匙">
+    <PageHeader title="设备密钥" subtitle="为每台设备发一把独立钥匙">
       <template #actions>
         <Button @click="openCreate">创建</Button>
       </template>
@@ -263,7 +264,7 @@ async function doRevoke(): Promise<void> {
     <SkeletonTable v-if="loading && tokens.length === 0" :rows="6" />
 
     <!-- 加载失败（可重试） -->
-    <div v-else-if="loadError" class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    <div v-else-if="loadError" class="rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad">
       {{ loadError }}
       <Button variant="outline" size="sm" class="ml-2" @click="refresh">重试</Button>
     </div>
@@ -280,33 +281,35 @@ async function doRevoke(): Promise<void> {
     </EmptyState>
 
     <!-- 列表 -->
-    <div v-else class="overflow-hidden rounded-lg border">
+    <Card v-else class="py-1">
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>名称</TableHead>
+            <TableHead class="pl-4">名称</TableHead>
             <TableHead>状态</TableHead>
-            <TableHead>创建于</TableHead>
-            <TableHead>过期</TableHead>
+            <TableHead>创建时间</TableHead>
+            <TableHead>有效期至</TableHead>
             <TableHead>最后使用</TableHead>
-            <TableHead class="text-right">操作</TableHead>
+            <TableHead class="pr-4 text-right">操作</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          <TableRow v-for="t in tokens" :key="t.id">
-            <TableCell class="font-medium">{{ rowName(t) }}</TableCell>
+          <TableRow v-for="t in tokens" :key="t.id" class="border-b-border/60 last:border-b-0">
+            <TableCell class="pl-4 font-medium">{{ rowName(t) }}</TableCell>
             <TableCell><StatusDot v-bind="tokenStatusLabel(t.status)" /></TableCell>
             <TableCell class="text-muted-foreground">{{ fmtDate(t.created_at * 1000) }}</TableCell>
             <TableCell class="text-muted-foreground">{{ t.expires_at ? fmtDate(t.expires_at * 1000) : '永不过期' }}</TableCell>
             <TableCell class="text-muted-foreground">{{ t.last_used_at ? fmtRelative(t.last_used_at * 1000) : '—' }}</TableCell>
-            <TableCell class="text-right">
+            <TableCell class="pr-4 text-right">
               <span v-if="isAdminRow(t)" class="text-muted-foreground">—</span>
-              <Button v-else variant="destructive" size="sm" @click="askRevoke(t)">撤销</Button>
+              <Button v-else variant="ghost" size="sm" class="text-bad hover:bg-bad-soft hover:text-bad" @click="askRevoke(t)">
+                撤销
+              </Button>
             </TableCell>
           </TableRow>
         </TableBody>
       </Table>
-    </div>
+    </Card>
 
     <!-- 创建对话框：错误在内部渲染，失败不关不清；busy 中 Esc/遮罩不可关（UX-7③） -->
     <Dialog :open="showCreate" @update:open="onCreateOpenChange">
@@ -318,7 +321,7 @@ async function doRevoke(): Promise<void> {
           <div class="space-y-1">
             <Label for="token-name">名称</Label>
             <Input id="token-name" v-model="createName" placeholder="my-laptop" />
-            <p class="text-xs text-muted-foreground">建议用设备名命名，如 my-laptop</p>
+            <p class="text-xs leading-5 text-muted-foreground">建议用设备名命名，如 my-laptop</p>
           </div>
           <div class="space-y-1">
             <Label>有效期</Label>
@@ -341,7 +344,7 @@ async function doRevoke(): Promise<void> {
               class="mt-2 w-40"
             />
           </div>
-          <p v-if="createError" class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{{ createError }}</p>
+          <p v-if="createError" class="rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad">{{ createError }}</p>
         </div>
         <DialogFooter>
           <!-- UX-8：禁用不静默，灰字说明缺什么 -->
@@ -362,11 +365,11 @@ async function doRevoke(): Promise<void> {
           <DialogTitle>接入配置 ·「{{ configName }}」已创建</DialogTitle>
         </DialogHeader>
 
-        <p class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-800">
+        <p class="flex items-center gap-1.5 rounded-lg bg-bad-soft px-3 py-2 text-xs font-medium text-bad">
           明文仅此一次展示；片段含明文令牌，请勿截图外发
         </p>
         <!-- UX-4：自动复制了什么、去哪找，说清楚（成功复制后显示） -->
-        <p v-if="copied" class="text-xs font-medium text-emerald-700">
+        <p v-if="copied" class="text-xs font-medium text-ok">
           ✓ 密钥已自动复制到剪贴板（60 秒后自动清空）；下方地址请单独点『复制地址』
         </p>
 
@@ -379,19 +382,19 @@ async function doRevoke(): Promise<void> {
         </div>
 
         <template v-if="activeTab === 'general'">
-          <div v-if="!dataBase" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            未配置数据面地址，请先到设置完成连接
+          <div v-if="!dataBase" class="rounded-lg bg-warn-soft px-3 py-2 text-sm text-warn">
+            还没有接入地址：先到「设置」完成连接，再回来复制
           </div>
           <div v-else class="space-y-3">
             <div class="space-y-1">
               <Label>接入地址（把「&lt;服务&gt;」替换为实际路由名）</Label>
-              <code class="block break-all rounded-md bg-muted p-3 font-mono text-sm">{{ currentUrl('general') }}</code>
+              <code class="block break-all rounded-lg bg-muted p-3 font-mono text-sm">{{ currentUrl('general') }}</code>
             </div>
             <div class="flex items-center gap-2">
               <Button variant="outline" size="sm" @click="copyWithToast(currentUrl('general'))">复制地址</Button>
               <Button variant="outline" size="sm" @click="copyWithToast(tokenPlain)">复制密钥</Button>
             </div>
-            <details class="rounded-md border px-3 py-2">
+            <details class="rounded-lg bg-muted/50 px-3 py-2">
               <summary class="cursor-pointer text-sm font-medium">环境变量示例</summary>
               <div class="mt-2 space-y-2">
                 <div class="space-y-1">
@@ -399,14 +402,14 @@ async function doRevoke(): Promise<void> {
                     <span class="text-xs font-medium text-muted-foreground">bash</span>
                     <Button variant="ghost" size="xs" @click="copyWithToast(bashSnippet('general'))">复制</Button>
                   </div>
-                  <pre class="overflow-x-auto rounded bg-muted p-2 text-xs">{{ bashSnippet('general') }}</pre>
+                  <pre class="overflow-x-auto rounded-md bg-muted p-2 text-xs">{{ bashSnippet('general') }}</pre>
                 </div>
                 <div class="space-y-1">
                   <div class="flex items-center justify-between">
                     <span class="text-xs font-medium text-muted-foreground">PowerShell</span>
                     <Button variant="ghost" size="xs" @click="copyWithToast(psSnippet('general'))">复制</Button>
                   </div>
-                  <pre class="overflow-x-auto rounded bg-muted p-2 text-xs">{{ psSnippet('general') }}</pre>
+                  <pre class="overflow-x-auto rounded-md bg-muted p-2 text-xs">{{ psSnippet('general') }}</pre>
                 </div>
               </div>
             </details>
@@ -414,19 +417,19 @@ async function doRevoke(): Promise<void> {
         </template>
 
         <template v-else-if="activeTab === 'anthropic'">
-          <div v-if="!dataBase" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            未配置数据面地址，请先到设置完成连接
+          <div v-if="!dataBase" class="rounded-lg bg-warn-soft px-3 py-2 text-sm text-warn">
+            还没有接入地址：先到「设置」完成连接，再回来复制
           </div>
           <div v-else class="space-y-3">
             <div class="space-y-1">
               <Label>接入地址（供 Claude Code 等 Anthropic SDK 使用）</Label>
-              <code class="block break-all rounded-md bg-muted p-3 font-mono text-sm">{{ currentUrl('anthropic') }}</code>
+              <code class="block break-all rounded-lg bg-muted p-3 font-mono text-sm">{{ currentUrl('anthropic') }}</code>
             </div>
             <div class="flex items-center gap-2">
               <Button variant="outline" size="sm" @click="copyWithToast(currentUrl('anthropic'))">复制地址</Button>
               <Button variant="outline" size="sm" @click="copyWithToast(tokenPlain)">复制密钥</Button>
             </div>
-            <details class="rounded-md border px-3 py-2">
+            <details class="rounded-lg bg-muted/50 px-3 py-2">
               <summary class="cursor-pointer text-sm font-medium">环境变量示例</summary>
               <div class="mt-2 space-y-2">
                 <div class="space-y-1">
@@ -434,14 +437,14 @@ async function doRevoke(): Promise<void> {
                     <span class="text-xs font-medium text-muted-foreground">bash</span>
                     <Button variant="ghost" size="xs" @click="copyWithToast(bashSnippet('anthropic'))">复制</Button>
                   </div>
-                  <pre class="overflow-x-auto rounded bg-muted p-2 text-xs">{{ bashSnippet('anthropic') }}</pre>
+                  <pre class="overflow-x-auto rounded-md bg-muted p-2 text-xs">{{ bashSnippet('anthropic') }}</pre>
                 </div>
                 <div class="space-y-1">
                   <div class="flex items-center justify-between">
                     <span class="text-xs font-medium text-muted-foreground">PowerShell</span>
                     <Button variant="ghost" size="xs" @click="copyWithToast(psSnippet('anthropic'))">复制</Button>
                   </div>
-                  <pre class="overflow-x-auto rounded bg-muted p-2 text-xs">{{ psSnippet('anthropic') }}</pre>
+                  <pre class="overflow-x-auto rounded-md bg-muted p-2 text-xs">{{ psSnippet('anthropic') }}</pre>
                 </div>
               </div>
             </details>
@@ -449,19 +452,19 @@ async function doRevoke(): Promise<void> {
         </template>
 
         <template v-else>
-          <div v-if="!dataBase" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            未配置数据面地址，请先到设置完成连接
+          <div v-if="!dataBase" class="rounded-lg bg-warn-soft px-3 py-2 text-sm text-warn">
+            还没有接入地址：先到「设置」完成连接，再回来复制
           </div>
           <div v-else class="space-y-3">
             <div class="space-y-1">
               <Label>接入地址（供 OpenAI SDK 使用）</Label>
-              <code class="block break-all rounded-md bg-muted p-3 font-mono text-sm">{{ currentUrl('openai') }}</code>
+              <code class="block break-all rounded-lg bg-muted p-3 font-mono text-sm">{{ currentUrl('openai') }}</code>
             </div>
             <div class="flex items-center gap-2">
               <Button variant="outline" size="sm" @click="copyWithToast(currentUrl('openai'))">复制地址</Button>
               <Button variant="outline" size="sm" @click="copyWithToast(tokenPlain)">复制密钥</Button>
             </div>
-            <details class="rounded-md border px-3 py-2">
+            <details class="rounded-lg bg-muted/50 px-3 py-2">
               <summary class="cursor-pointer text-sm font-medium">环境变量示例</summary>
               <div class="mt-2 space-y-2">
                 <div class="space-y-1">
@@ -469,14 +472,14 @@ async function doRevoke(): Promise<void> {
                     <span class="text-xs font-medium text-muted-foreground">bash</span>
                     <Button variant="ghost" size="xs" @click="copyWithToast(bashSnippet('openai'))">复制</Button>
                   </div>
-                  <pre class="overflow-x-auto rounded bg-muted p-2 text-xs">{{ bashSnippet('openai') }}</pre>
+                  <pre class="overflow-x-auto rounded-md bg-muted p-2 text-xs">{{ bashSnippet('openai') }}</pre>
                 </div>
                 <div class="space-y-1">
                   <div class="flex items-center justify-between">
                     <span class="text-xs font-medium text-muted-foreground">PowerShell</span>
                     <Button variant="ghost" size="xs" @click="copyWithToast(psSnippet('openai'))">复制</Button>
                   </div>
-                  <pre class="overflow-x-auto rounded bg-muted p-2 text-xs">{{ psSnippet('openai') }}</pre>
+                  <pre class="overflow-x-auto rounded-md bg-muted p-2 text-xs">{{ psSnippet('openai') }}</pre>
                 </div>
               </div>
             </details>

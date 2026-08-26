@@ -10,6 +10,7 @@ import { RouterLink } from 'vue-router'
 
 import { api, type QuotaResp, type TokenDto, type UsageResp } from '@/api/client'
 import EmptyState from '@/components/common/EmptyState.vue'
+import InfoTip from '@/components/common/InfoTip.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import SkeletonTable from '@/components/common/SkeletonTable.vue'
@@ -120,14 +121,18 @@ function metricLabel(metric: string): string {
   <div>
     <PageHeader title="用量统计" subtitle="请求量、流量与上游额度">
       <template #actions>
-        <!-- 时间档 segmented：当前档高亮 -->
-        <div class="flex rounded-lg border p-0.5 text-sm" role="group" aria-label="统计区间">
+        <!-- 时间档 segmented：当前档高亮（浅灰槽内白色滑块） -->
+        <div class="flex gap-0.5 rounded-lg bg-muted/70 p-0.5 text-sm" role="group" aria-label="统计区间">
           <button
             v-for="opt in RANGE_OPTIONS"
             :key="opt.hours"
             type="button"
             class="rounded-md px-2.5 py-1 transition-colors duration-150"
-            :class="hours === opt.hours ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            :class="
+              hours === opt.hours
+                ? 'bg-card font-medium shadow-[0_1px_3px_rgba(0,0,0,0.08)]'
+                : 'text-muted-foreground hover:text-foreground'
+            "
             :disabled="loading"
             @click="setHours(opt.hours)"
           >
@@ -143,14 +148,14 @@ function metricLabel(metric: string): string {
         <SkeletonCard class="lg:col-span-3" />
         <SkeletonCard class="lg:col-span-2" />
       </div>
-      <div class="mt-6">
+      <div class="mt-8">
         <SkeletonTable :rows="4" />
       </div>
     </template>
 
     <!-- 首拉失败且无数据：整页错误态 -->
-    <div v-else-if="showFatal" class="rounded-lg border border-red-200 bg-red-50 px-4 py-10 text-center">
-      <p class="mx-auto max-w-lg break-all text-sm text-red-800">{{ error }}</p>
+    <div v-else-if="showFatal" class="rounded-xl bg-bad-soft px-4 py-10 text-center">
+      <p class="mx-auto max-w-lg break-all text-sm text-bad">{{ error }}</p>
       <Button class="mt-4" variant="outline" size="sm" :disabled="loading" @click="refresh">重试</Button>
     </div>
 
@@ -158,7 +163,7 @@ function metricLabel(metric: string): string {
       <!-- 刷新失败的横幅（已有旧数据时叠加展示） -->
       <div
         v-if="error"
-        class="mb-4 flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800"
+        class="mb-6 flex items-center gap-3 rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad"
       >
         <span class="min-w-0 flex-1 break-all">{{ error }}</span>
         <Button variant="outline" size="sm" :disabled="loading" @click="refresh">重试</Button>
@@ -168,7 +173,7 @@ function metricLabel(metric: string): string {
         <!-- 柱图 -->
         <Card class="lg:col-span-3">
           <CardContent>
-            <div class="text-sm font-medium">各服务请求次数</div>
+            <div class="text-sm font-medium tracking-tight">各服务请求次数</div>
             <div class="mt-3">
               <Bar v-if="byService.length > 0" :data="chartData" :options="chartOptions" />
               <EmptyState v-else title="区间内暂无请求" description="有设备开始访问后，这里会出现按服务的请求柱图。">
@@ -185,7 +190,10 @@ function metricLabel(metric: string): string {
         <!-- 上游额度 -->
         <Card class="lg:col-span-2">
           <CardContent>
-            <div class="text-sm font-medium">上游额度</div>
+            <div class="flex items-center gap-1 text-sm font-medium tracking-tight">
+              上游额度
+              <InfoTip text="中转线路的免费用量额度，触顶后会临时限流，次日恢复" />
+            </div>
             <div v-if="(quota?.snapshots ?? []).length > 0" class="mt-3 space-y-4">
               <div v-for="s in quota?.snapshots ?? []" :key="`${s.upstream}/${s.metric}`">
                 <div class="mb-1 flex items-center justify-between gap-2 text-sm">
@@ -194,14 +202,14 @@ function metricLabel(metric: string): string {
                 </div>
                 <template v-if="s.pct >= 0">
                   <!-- 三色阈值沿用既有逻辑：<80 绿 / ≥80 黄 / ≥95 红 -->
-                  <div class="h-2 overflow-hidden rounded-full bg-muted">
+                  <div class="h-1.5 overflow-hidden rounded-full bg-muted">
                     <div
                       class="h-full rounded-full transition-all duration-150"
-                      :class="s.pct >= 95 ? 'bg-red-500' : s.pct >= 80 ? 'bg-amber-500' : 'bg-emerald-500'"
+                      :class="s.pct >= 95 ? 'bg-bad' : s.pct >= 80 ? 'bg-warn' : 'bg-ok'"
                       :style="{ width: `${Math.min(s.pct, 100)}%` }"
                     />
                   </div>
-                  <div class="mt-0.5 text-xs tabular-nums text-muted-foreground">
+                  <div class="mt-1 text-xs tabular-nums text-muted-foreground">
                     上限 {{ fmtCount(s.quota) }} · 已达 {{ s.pct.toFixed(1) }}%
                   </div>
                 </template>
@@ -214,8 +222,8 @@ function metricLabel(metric: string): string {
       </div>
 
       <!-- 请求明细 -->
-      <div class="mt-6">
-        <h2 class="mb-2 text-sm font-semibold">请求明细</h2>
+      <section class="mt-8">
+        <h2 class="mb-3 text-sm font-semibold tracking-tight">请求明细</h2>
         <EmptyState v-if="rows.length === 0" title="暂无请求明细" description="当前时间范围内还没有请求记录。">
           <template #actions>
             <Button as-child>
@@ -223,29 +231,29 @@ function metricLabel(metric: string): string {
             </Button>
           </template>
         </EmptyState>
-        <div v-else class="overflow-hidden rounded-lg border">
+        <Card v-else class="py-1">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>服务</TableHead>
+                <TableHead class="pl-4">服务</TableHead>
                 <TableHead>设备密钥</TableHead>
                 <TableHead class="text-right">请求次数</TableHead>
                 <TableHead class="text-right">上行流量</TableHead>
-                <TableHead class="text-right">下行流量</TableHead>
+                <TableHead class="pr-4 text-right">下行流量</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              <TableRow v-for="r in rows" :key="`${r.route}/${r.token_id}`">
-                <TableCell>{{ r.route }}</TableCell>
+              <TableRow v-for="r in rows" :key="`${r.route}/${r.token_id}`" class="border-b-border/60 last:border-b-0">
+                <TableCell class="pl-4 font-medium">{{ r.route }}</TableCell>
                 <TableCell>{{ tokenName(r.token_id) }}</TableCell>
                 <TableCell class="text-right tabular-nums">{{ fmtCount(r.requests) }}</TableCell>
                 <TableCell class="text-right tabular-nums">{{ fmtBytes(r.bytes_in) }}</TableCell>
-                <TableCell class="text-right tabular-nums">{{ fmtBytes(r.bytes_out) }}</TableCell>
+                <TableCell class="pr-4 text-right tabular-nums">{{ fmtBytes(r.bytes_out) }}</TableCell>
               </TableRow>
             </TableBody>
           </Table>
-        </div>
-      </div>
+        </Card>
+      </section>
     </template>
   </div>
 </template>

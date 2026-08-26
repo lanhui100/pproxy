@@ -9,6 +9,7 @@ import { LoaderCircle } from '@lucide/vue'
 import { api, type RouteDto } from '@/api/client'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import InfoTip from '@/components/common/InfoTip.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonTable from '@/components/common/SkeletonTable.vue'
 import StatusDot from '@/components/common/StatusDot.vue'
@@ -19,6 +20,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Card } from '@/components/ui/card'
 import { useToast } from '@/composables/useToast'
 import { errText } from '@/lib/errors'
 import { SERVICE_TEMPLATES } from '@/lib/serviceTemplates'
@@ -244,7 +246,7 @@ async function doDelete(): Promise<void> {
     <SkeletonTable v-if="loading && routes.length === 0" :rows="6" />
 
     <!-- 加载失败（可重试） -->
-    <div v-else-if="loadError" class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+    <div v-else-if="loadError" class="rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad">
       {{ loadError }}
       <Button variant="outline" size="sm" class="ml-2" @click="refresh">重试</Button>
     </div>
@@ -252,7 +254,7 @@ async function doDelete(): Promise<void> {
     <!-- 空态（CTA 下一步）：EmptyState 仅渲染具名插槽 #actions -->
     <EmptyState
       v-else-if="routes.length === 0"
-      title="还没有服务路由"
+      title="还没有服务"
       description="从常用服务模板一键添加，或手动填入任意目标域名。"
     >
       <template #actions>
@@ -261,21 +263,26 @@ async function doDelete(): Promise<void> {
     </EmptyState>
 
     <!-- 列表 -->
-    <div v-else class="overflow-hidden rounded-lg border">
+    <Card v-else class="py-1">
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>名称</TableHead>
+            <TableHead class="pl-4">名称</TableHead>
             <TableHead>目标</TableHead>
-            <TableHead>上游</TableHead>
-            <TableHead>状态</TableHead>
+            <TableHead>
+              <span class="inline-flex items-center gap-1">
+                线路
+                <InfoTip text="请求从哪条中转线路出去，由网关按规则自动选择" />
+              </span>
+            </TableHead>
+            <TableHead>启用</TableHead>
             <TableHead>连通性</TableHead>
-            <TableHead class="text-right">操作</TableHead>
+            <TableHead class="pr-4 text-right">操作</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          <TableRow v-for="r in routes" :key="r.name">
-            <TableCell class="font-medium">{{ r.name }}</TableCell>
+          <TableRow v-for="r in routes" :key="r.name" class="border-b-border/60 last:border-b-0">
+            <TableCell class="pl-4 font-medium">{{ r.name }}</TableCell>
             <TableCell class="font-mono text-xs">{{ r.target_host }}</TableCell>
             <TableCell>
               <Badge variant="secondary">{{ upstreamLabel(r.effective_upstream).label }}</Badge>
@@ -283,7 +290,11 @@ async function doDelete(): Promise<void> {
             </TableCell>
             <TableCell>
               <div class="flex items-center gap-1.5">
-                <Switch :checked="r.enabled" :disabled="togglingName === r.name" @update:checked="toggle(r)" />
+                <Switch
+                  :model-value="r.enabled"
+                  :disabled="togglingName === r.name"
+                  @update:model-value="toggle(r)"
+                />
                 <LoaderCircle v-if="togglingName === r.name" class="size-3 animate-spin text-muted-foreground" />
               </div>
             </TableCell>
@@ -303,7 +314,7 @@ async function doDelete(): Promise<void> {
                 <StatusDot tone="error" :label="`失败：${failMessage(r.name)}`" />
                 <div class="flex items-center gap-1.5">
                   <select
-                    class="h-6 rounded-md border bg-background px-1.5 text-xs outline-none"
+                    class="h-6 rounded-md bg-muted px-1.5 text-xs outline-none transition-colors hover:bg-accent"
                     :disabled="switchingName === r.name"
                     aria-label="切换线路"
                     @change="onLineChange(r, $event)"
@@ -322,7 +333,7 @@ async function doDelete(): Promise<void> {
                 </div>
               </div>
             </TableCell>
-            <TableCell class="space-x-1 text-right">
+            <TableCell class="space-x-1 pr-4 text-right">
               <Button
                 variant="outline"
                 size="sm"
@@ -331,12 +342,14 @@ async function doDelete(): Promise<void> {
               >
                 {{ testOf(r.name).phase === 'testing' ? '测速中…' : '测速' }}
               </Button>
-              <Button variant="destructive" size="sm" @click="askDelete(r)">删除</Button>
+              <Button variant="ghost" size="sm" class="text-bad hover:bg-bad-soft hover:text-bad" @click="askDelete(r)">
+                删除
+              </Button>
             </TableCell>
           </TableRow>
         </TableBody>
       </Table>
-    </div>
+    </Card>
 
     <!-- 添加对话框（两段式）：错误在内部渲染，失败不关不清；busy 中 Esc/遮罩不可关（UX-7③） -->
     <Dialog :open="showAdd" @update:open="onAddOpenChange">
@@ -354,11 +367,11 @@ async function doDelete(): Promise<void> {
                 v-for="tpl in SERVICE_TEMPLATES"
                 :key="tpl.name"
                 type="button"
-                class="rounded-lg border px-3 py-2 text-left transition-colors"
+                class="rounded-lg px-3 py-2 text-left transition-colors"
                 :class="
                   selectedTemplate === tpl.name
-                    ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                    : 'hover:bg-muted'
+                    ? 'bg-accent ring-1 ring-foreground/70'
+                    : 'bg-muted/60 hover:bg-muted'
                 "
                 @click="pickTemplate(tpl.name)"
               >
@@ -369,35 +382,38 @@ async function doDelete(): Promise<void> {
           </div>
 
           <!-- 下段：手动添加（高级）折叠 -->
-          <details class="rounded-md border px-3 py-2">
+          <details class="rounded-lg bg-muted/50 px-3 py-2">
             <summary class="cursor-pointer text-sm font-medium">手动添加（高级）</summary>
             <div class="mt-3 space-y-3">
               <div class="space-y-1">
                 <Label for="route-name">名称</Label>
-                <Input id="route-name" v-model="addName" placeholder="如 gemini" />
+                <Input id="route-name" v-model="addName" placeholder="如 gemini" class="bg-background" />
               </div>
               <div class="space-y-1">
                 <Label for="route-host">目标域名</Label>
-                <Input id="route-host" v-model="addHost" placeholder="generativelanguage.googleapis.com" />
-                <p class="text-xs text-muted-foreground">只填域名本身，不带 https:// 与路径</p>
+                <Input id="route-host" v-model="addHost" placeholder="generativelanguage.googleapis.com" class="bg-background" />
+                <p class="text-xs leading-5 text-muted-foreground">只填域名本身，不带 https:// 与路径</p>
               </div>
               <div class="space-y-1">
-                <Label for="route-upstream">上游线路</Label>
+                <Label for="route-upstream">线路</Label>
                 <select
                   id="route-upstream"
                   v-model="addUpstream"
-                  class="h-8 w-full rounded-lg border bg-background px-2 text-sm outline-none"
+                  class="h-8 w-full rounded-lg bg-muted/70 px-2 text-sm outline-none transition-colors focus-visible:ring-3 focus-visible:ring-ring/40"
                 >
-                  <option value="">自动决策（缺省）</option>
+                  <option value="">智能选择（推荐）</option>
                   <option value="worker">{{ LINE_LABELS.worker }}</option>
                   <option value="vercel">{{ LINE_LABELS.vercel }}</option>
                 </select>
-                <p class="text-xs text-muted-foreground">自动决策按服务端规则选择出口，无需手动干预</p>
+                <p class="text-xs leading-5 text-muted-foreground">
+                  一般不用改，网关会自动挑一条可用的线路
+                  <InfoTip text="「智能选择」按服务端规则自动分配出口；仅在某条线路异常时才需要手动指定" />
+                </p>
               </div>
             </div>
           </details>
 
-          <p v-if="addError" class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">{{ addError }}</p>
+          <p v-if="addError" class="rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad">{{ addError }}</p>
         </div>
 
         <DialogFooter>
