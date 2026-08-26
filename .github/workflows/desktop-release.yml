@@ -43,7 +43,9 @@ jobs:
 
       - uses: tauri-apps/tauri-action@fce9c6108b31
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 账号级 GITHUB_TOKEN 权限策略已限制为只读（2026-08 起 release 创建被拒），
+          # 发布步骤改用专用 PAT（repo scope）确保可创建 Release。
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           # 签名密钥：tauri-action 检测到即生成 .sig 与 latest.json（自更新清单）
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
