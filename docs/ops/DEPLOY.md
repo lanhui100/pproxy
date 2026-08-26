@@ -116,3 +116,20 @@ cloudflared tunnel delete pony-access                                   # 需先
 - 回滚 = 删除 drop-in 的 Environment 行（未注入时应用回落 127.0.0.1:8900）+ `sudo ufw delete allow in on tailscale0 ...` + restart
 - GUI 连接失败三分支：地址解析失败→检查 Tailscale 连接；拒绝→检查 ufw 规则；
   超时→检查对端入网状态
+
+## 桌面版发布与更新源（/dsk/）
+
+```bash
+# 发布：打 tag 触发 GitHub Actions 构建 NSIS 安装包 → GitHub Release
+git tag desktop-v0.3.x && git push origin desktop-v0.3.x
+```
+
+- 更新源 = `access.ponyjob.top/dsk/latest.json`，由本机 `pony-dsk-sync.timer`
+  （每 15 分钟）检测新 tag 并自动执行 `scripts/sync-desktop-release.sh` 同步到
+  `/home/USER/pony-desktop-releases`（服务端 `/dsk/:filename` 按请求实时读盘，无需重启）
+- **2026-08-26 事故复盘**：0.3.7/0.3.8 发布后漏跑同步脚本，线上滞留 0.3.6，
+  已装客户端「检查更新」永远提示最新。现已由 timer 兜底自动化；
+  手动补同步仍可用 `scripts/sync-desktop-release.sh <tag>`
+- 排查口令：`journalctl -u pony-dsk-sync.service -n 20`、
+  `cat /home/USER/pony-desktop-releases/.synced-tag`（应等于最新 tag）、
+  `curl -s https://access.ponyjob.top/dsk/latest.json | grep version`
