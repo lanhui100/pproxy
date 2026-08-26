@@ -114,7 +114,7 @@ pub fn cleanup_stale() {
     else {
         return;
     };
-    if key.get_value("AutoConfigURL").ok().as_deref() == Some(PAC_URL) {
+    if key.get_value::<String, _>("AutoConfigURL").ok().as_deref() == Some(PAC_URL) {
         key.delete_value("AutoConfigURL").ok();
         broadcast_change();
         log::info!("cleaned stale AutoConfigURL left by previous crashed run");
