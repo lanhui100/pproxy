@@ -101,6 +101,29 @@ fn broadcast_change() {
     }
 }
 
+/// 启动自愈：上次进程崩溃/强杀时 AutoConfigURL 残留指向已死的本地 PAC 端口，
+/// 白名单站点会全部失败（PAC 无 DIRECT 兜底）。启动时若发现仍指向本应用 PAC，
+/// 说明引擎必然未运行，直接清除并广播还原直连。
+#[cfg(windows)]
+pub fn cleanup_stale() {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(key) = hkcu.open_subkey_with_flags(INTERNET_SETTINGS, KEY_SET_VALUE | KEY_QUERY_VALUE)
+    else {
+        return;
+    };
+    if key.get_value("AutoConfigURL").ok().as_deref() == Some(PAC_URL) {
+        key.delete_value("AutoConfigURL").ok();
+        broadcast_change();
+        log::info!("cleaned stale AutoConfigURL left by previous crashed run");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn cleanup_stale() {}
+
 // ---- 非 Windows 平台：no-op（开发期占位；生产目标仅 Windows）----
 
 

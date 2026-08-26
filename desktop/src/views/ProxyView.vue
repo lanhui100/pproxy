@@ -30,6 +30,9 @@ async function refresh(): Promise<void> {
   try {
     if (!isTauri()) return
     entries.value = await tauri<string[]>('proxy_whitelist_get')
+    // 回填引擎真实状态：页面切换/重开窗口后开关不再假显「未启用」
+    const st = await tauri<{ engine_running: boolean }>('proxy_status')
+    enabled.value = st.engine_running
     error.value = ''
   } catch (e) {
     error.value = String(e)

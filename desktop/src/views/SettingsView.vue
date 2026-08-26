@@ -446,11 +446,11 @@ const resultClass = computed(() => {
       </CardContent>
     </Card>
 
-    <!-- 卡一点五：隧道中继（可选；不配置则白名单流量不可用，引擎无直连回落） -->
+    <!-- 卡一点五：隧道中继（白名单非空时的必配项；未配置则总开关拒绝开启） -->
     <Card>
       <CardHeader>
-        <CardTitle class="text-sm">隧道中继（可选）</CardTitle>
-        <CardDescription>白名单站点经中继出口访问。不配置时白名单流量将直接失败，不会静默回落直连。</CardDescription>
+        <CardTitle class="text-sm">隧道中继</CardTitle>
+        <CardDescription>白名单站点经中继出口访问。添加白名单后必须配置端点与令牌，否则「Proxy」页的总开关无法开启。</CardDescription>
       </CardHeader>
       <CardContent class="space-y-3">
         <div class="space-y-1.5">
