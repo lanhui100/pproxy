@@ -605,7 +605,7 @@ onMounted(async () => {
       </div>
 
       <!-- 最近一次生成的专线直出卡片 -->
-      <div v-if="lastCreated" class="rounded-xl bg-ok-soft/25 p-3.5 space-y-2.5 shadow-xs">
+      <div v-if="lastCreated" class="rounded-xl bg-ok-soft/70 dark:bg-emerald-950/40 p-3.5 space-y-2.5 shadow-xs">
         <div class="flex items-center justify-between">
           <div class="text-xs font-semibold text-ok flex items-center gap-1.5">
             <span>🎉 专线「{{ lastCreated.service }}」接入就绪</span>
