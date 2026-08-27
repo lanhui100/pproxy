@@ -2,14 +2,14 @@
 import { computed, onMounted, ref } from 'vue'
 import {
   Activity,
-  Check,
+  ChevronDown,
   Copy,
   Globe,
   Loader2,
   LoaderCircle,
   Plus,
   RefreshCw,
-  Sparkles,
+  Trash2,
   Zap,
 } from '@lucide/vue'
 
@@ -17,30 +17,26 @@ import { api, type RouteDto } from '@/api/client'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
 import InfoTip from '@/components/common/InfoTip.vue'
+import LatencyBars from '@/components/common/LatencyBars.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonTable from '@/components/common/SkeletonTable.vue'
 import StatusDot from '@/components/common/StatusDot.vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { useAdaptivePoll } from '@/composables/useAdaptivePoll'
 import { useSessionSecret } from '@/composables/useSessionSecret'
 import { copySecret } from '@/composables/useSecretCopy'
 import { useToast } from '@/composables/useToast'
 import { provisionTunnel } from '@/composables/useTunnelProvision'
 import { loadBackendUrl, loadDataPlaneUrl } from '@/lib/config'
 import { errText } from '@/lib/errors'
-import { generatePresetSnippets, type PresetSnippet } from '@/lib/presetGenerator'
-import { SERVICE_TEMPLATES } from '@/lib/serviceTemplates'
+import { appendLatencyPoint, type LatencyPoint } from '@/lib/latencyHistory'
 import { upstreamLabel } from '@/lib/statusLabels'
 import { cleanDomainInput, deriveDataPlane, parseServiceUrlInput } from '@/lib/urls'
 
 const toast = useToast()
-const { getSessionSecret } = useSessionSecret()
+const { getSessionSecret, setSessionSecret } = useSessionSecret()
 
 function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -93,7 +89,7 @@ async function addWhitelistEntry(domainToAdd?: string): Promise<void> {
     if (isTauri()) await tauri('proxy_whitelist_set', { entries: next })
     whitelistEntries.value = next
     if (!domainToAdd) newWhitelistEntry.value = ''
-    toast.success(`已添加 ${v}`, '加速名单已实时热生效')
+    toast.success(`已添加 ${v}`, '加速名单已实时生效')
   } catch (e) {
     proxyError.value = String(e)
   }
@@ -161,46 +157,79 @@ const routesError = ref('')
 const inputUrl = ref('')
 const parsedUrl = computed(() => parseServiceUrlInput(inputUrl.value))
 const addingRoute = ref(false)
-
-// 客户端成品配置弹窗
-const showConfigDialog = ref(false)
-const configRouteName = ref('')
-const configCustomToken = ref('')
-const configCustomUpstreamKey = ref('')
-const activePresetTab = ref<string>('openai')
 const syncToWhitelist = ref(true)
 
-const configSnippets = computed<PresetSnippet[]>(() => {
-  const dataPlaneBase = loadDataPlaneUrl() || deriveDataPlane(loadBackendUrl()) || 'http://127.0.0.1:8899'
-  const token = configCustomToken.value.trim() || getSessionSecret() || undefined
-  const upstreamKey = configCustomUpstreamKey.value.trim() || undefined
+// 最近接入成功生成的专线信息
+interface CreatedAccessResult {
+  service: string
+  token: string
+  publicUrl: string
+  lanUrl: string
+}
+const lastCreated = ref<CreatedAccessResult | null>(null)
 
-  return generatePresetSnippets({
-    dataPlaneBase,
-    service: configRouteName.value,
-    token,
-    upstreamKey,
-  })
-})
-
-const activeSnippet = computed(() =>
-  configSnippets.value.find((s) => s.id === activePresetTab.value) || configSnippets.value[0],
-)
-
-const activeDisplayCode = computed(() => {
-  if (!activeSnippet.value) return ''
-  return (
-    activeSnippet.value.psSnippet ||
-    activeSnippet.value.bashSnippet ||
-    activeSnippet.value.codeSnippet ||
-    activeSnippet.value.baseUrl
-  )
-})
+// 专线测速时序历史（30 分钟轮询采样）
+const STORAGE_KEY = 'pony_route_latency_history_v1'
+const routeHistories = ref<Record<string, LatencyPoint[]>>({})
+const probingRoute = ref<string>('')
 
 // 编辑与删除
 const deleteTarget = ref<RouteDto | null>(null)
 const deleting = ref(false)
-const testingRouteName = ref<string | null>(null)
+
+function loadHistories(): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      routeHistories.value = parsed.routes || {}
+    }
+  } catch {
+    /* 忽略异常 */
+  }
+}
+
+function saveHistories(): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    const prev = raw ? JSON.parse(raw) : {}
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        ...prev,
+        routes: routeHistories.value,
+      }),
+    )
+  } catch {
+    /* 忽略异常 */
+  }
+}
+
+function getBaseUrls(): { publicBase: string; lanBase: string } {
+  const configuredDataPlane = loadDataPlaneUrl()
+  const backend = loadBackendUrl() || 'http://127.0.0.1:8900'
+  const derivedDataPlane = deriveDataPlane(backend) || 'http://127.0.0.1:8899'
+
+  const publicBase = configuredDataPlane || derivedDataPlane
+  let lanBase = 'http://127.0.0.1:8899'
+
+  try {
+    const u = new URL(derivedDataPlane)
+    lanBase = `http://${u.hostname}:8899`
+  } catch {
+    /* 默认 127.0.0.1 */
+  }
+  return { publicBase, lanBase }
+}
+
+function buildServiceUrls(service: string, token: string): { publicUrl: string; lanUrl: string } {
+  const { publicBase, lanBase } = getBaseUrls()
+  const tok = token.trim() || 'default_token'
+  return {
+    publicUrl: `${publicBase.replace(/\/$/, '')}/${tok}/${service}/v1`,
+    lanUrl: `${lanBase.replace(/\/$/, '')}/${tok}/${service}/v1`,
+  }
+}
 
 async function refreshRoutes(): Promise<void> {
   routesLoading.value = true
@@ -215,6 +244,76 @@ async function refreshRoutes(): Promise<void> {
   }
 }
 
+// 自动探活全部路由（30 分钟轮询一次）
+async function probeAllRoutes(): Promise<void> {
+  if (routes.value.length === 0) return
+  const now = Date.now()
+
+  for (const r of routes.value) {
+    if (!r.enabled) continue
+    try {
+      const res = await api.testRoute(r.name, { skipAuthRedirect: true })
+      routeHistories.value[r.name] = appendLatencyPoint(routeHistories.value[r.name], {
+        ts: now,
+        ok: res.ok,
+        ms: res.latency_ms ?? undefined,
+        err: res.error ? errText(res.error) : undefined,
+      })
+    } catch (e) {
+      routeHistories.value[r.name] = appendLatencyPoint(routeHistories.value[r.name], {
+        ts: now,
+        ok: false,
+        err: errText(e),
+      })
+    }
+  }
+  saveHistories()
+}
+
+// 自适应 30 分钟轮询（1,800,000 ms）
+const { start: start30MinPoll } = useAdaptivePoll(
+  async () => {
+    await refreshRoutes()
+    await probeAllRoutes()
+  },
+  {
+    baseIntervalMs: 1_800_000,
+    maxIntervalMs: 3_600_000,
+    immediate: false,
+  },
+)
+
+async function testSingleRoute(r: { name: string }): Promise<void> {
+  probingRoute.value = r.name
+  const now = Date.now()
+  try {
+    const res = await api.testRoute(r.name)
+    const pt: LatencyPoint = {
+      ts: now,
+      ok: res.ok,
+      ms: res.latency_ms ?? undefined,
+      err: res.error ? errText(res.error) : undefined,
+    }
+    routeHistories.value[r.name] = appendLatencyPoint(routeHistories.value[r.name], pt)
+    if (res.ok) {
+      toast.success(`${r.name} 连接正常`, `延迟: ${res.latency_ms}ms`)
+    } else {
+      toast.error(`${r.name} 测速异常`, res.error ? errText(res.error) : '连接失败')
+    }
+  } catch (e) {
+    const pt: LatencyPoint = {
+      ts: now,
+      ok: false,
+      err: errText(e),
+    }
+    routeHistories.value[r.name] = appendLatencyPoint(routeHistories.value[r.name], pt)
+    toast.error('测速失败', errText(e))
+  } finally {
+    probingRoute.value = ''
+    saveHistories()
+  }
+}
+
 async function submitSmartAccess(): Promise<void> {
   if (!parsedUrl.value) {
     toast.error('请输入有效的 API 地址或域名')
@@ -224,22 +323,42 @@ async function submitSmartAccess(): Promise<void> {
   const { inferredName, cleanHost } = parsedUrl.value
 
   try {
+    // 1. 自动为该服务创建专属 Token
+    let tokenStr = getSessionSecret() || ''
+    try {
+      const tokRes = await api.createToken({
+        name: `专线: ${cleanHost}`,
+      })
+      tokenStr = tokRes.token
+      setSessionSecret(tokRes.token, tokRes.name)
+    } catch {
+      /* 若已存在或静默沿用 */
+    }
+
+    // 2. 创建服务路由
     await api.createRoute({
       name: inferredName,
       target_host: cleanHost,
     })
 
+    // 3. 同步加入加速名单
     if (syncToWhitelist.value) {
       await addWhitelistEntry(cleanHost)
     }
 
+    // 4. 生成成品专线 URL（含已拼入的 Token）
+    const urls = buildServiceUrls(inferredName, tokenStr)
+    lastCreated.value = {
+      service: inferredName,
+      token: tokenStr,
+      publicUrl: urls.publicUrl,
+      lanUrl: urls.lanUrl,
+    }
+
     inputUrl.value = ''
-    configRouteName.value = inferredName
-    configCustomToken.value = getSessionSecret() || ''
-    configCustomUpstreamKey.value = ''
-    showConfigDialog.value = true
     await refreshRoutes()
-    toast.success(`服务「${inferredName}」已接入就绪`)
+    void testSingleRoute({ name: inferredName })
+    toast.success(`服务「${inferredName}」已接入，专线已就绪`)
   } catch (e) {
     toast.error(errText(e))
   } finally {
@@ -247,21 +366,9 @@ async function submitSmartAccess(): Promise<void> {
   }
 }
 
-function selectPresetTemplate(tpl: (typeof SERVICE_TEMPLATES)[number]): void {
-  inputUrl.value = `https://${tpl.target_host}`
-}
-
-function openRouteConfig(r: RouteDto): void {
-  configRouteName.value = r.name
-  configCustomToken.value = getSessionSecret() || ''
-  configCustomUpstreamKey.value = ''
-  showConfigDialog.value = true
-}
-
-async function copyActivePresetSnippet(): Promise<void> {
-  if (!activeDisplayCode.value) return
-  await copySecret(activeDisplayCode.value, {
-    onCopied: () => toast.success(`已复制 ${activeSnippet.value?.name || ''} 配置`),
+async function copyUrl(url: string, label: string): Promise<void> {
+  await copySecret(url, {
+    onCopied: () => toast.success(`已复制 ${label}`, '已包含专属访问令牌，可直接粘贴进客户端使用'),
   })
 }
 
@@ -272,22 +379,6 @@ async function toggleRouteEnabled(r: RouteDto, enabled: boolean): Promise<void> 
     toast.success(`服务「${r.name}」已${enabled ? '启用' : '停用'}`)
   } catch (e) {
     toast.error(errText(e))
-  }
-}
-
-async function testSingleRoute(r: RouteDto): Promise<void> {
-  testingRouteName.value = r.name
-  try {
-    const res = await api.testRoute(r.name)
-    if (res.ok) {
-      toast.success(`${r.name} 连接正常`, `延迟: ${res.latency_ms}ms`)
-    } else {
-      toast.error(`${r.name} 连接异常`, res.error ? errText(res.error) : '未能成功连通目标服务器')
-    }
-  } catch (e) {
-    toast.error('测速失败', errText(e))
-  } finally {
-    testingRouteName.value = null
   }
 }
 
@@ -306,9 +397,11 @@ async function doDeleteRoute(): Promise<void> {
   }
 }
 
-onMounted(() => {
-  void refreshProxy()
-  void refreshRoutes()
+onMounted(async () => {
+  loadHistories()
+  await refreshProxy()
+  await refreshRoutes()
+  start30MinPoll()
 })
 </script>
 
@@ -319,353 +412,330 @@ onMounted(() => {
       subtitle="Windows 系统全局透明加速与大模型 API 专线网关"
     />
 
-    <!-- ==================== 1. 本机透明代理总控 ==================== -->
-    <Card class="border-border shadow-xs">
-      <CardHeader class="pb-3">
+    <!-- ==================== 1. 本机透明代理总控（无边框 微圆角背景色） ==================== -->
+    <div class="rounded-xl bg-card p-4 space-y-4 shadow-xs">
+      <div class="flex items-center justify-between">
+        <div class="space-y-1">
+          <h2 class="text-sm font-semibold flex items-center gap-2">
+            <Globe class="size-4 text-primary" />
+            Windows 系统代理加速
+          </h2>
+          <p class="text-xs text-muted-foreground">
+            开启后名单内的网站自动走加速通道，免配置浏览器与终端。
+          </p>
+        </div>
+        <div class="flex items-center gap-2">
+          <Switch
+            :model-value="proxyEnabled"
+            :disabled="togglingProxy"
+            @update:model-value="toggleProxy"
+          />
+          <span v-if="togglingProxy"><Loader2 class="size-4 animate-spin text-muted-foreground" /></span>
+          <span v-else class="text-xs font-medium">{{ proxyEnabled ? '已接管' : '未开启' }}</span>
+        </div>
+      </div>
+
+      <p v-if="proxyError" class="rounded-lg bg-bad-soft px-3 py-2 text-xs text-bad break-all">
+        {{ proxyError }}
+      </p>
+
+      <!-- 连通性体检（微网格卡片矩阵） -->
+      <div class="rounded-lg bg-muted/40 p-3 space-y-2.5">
         <div class="flex items-center justify-between">
-          <div class="space-y-1">
-            <CardTitle class="text-sm font-semibold flex items-center gap-2">
-              <Globe class="size-4 text-primary" />
-              Windows 系统代理加速
-            </CardTitle>
-            <CardDescription class="text-xs">
-              开启后名单内的网站自动走加速通道，免配置浏览器与终端。
-            </CardDescription>
+          <div class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+            <Activity class="size-3.5" />
+            <span>网络连通性体检</span>
+            <InfoTip text="通过本机代理探测常用全球站点的连接畅通度与延迟" />
           </div>
-          <div class="flex items-center gap-2">
-            <Switch
-              :model-value="proxyEnabled"
-              :disabled="togglingProxy"
-              @update:model-value="toggleProxy"
-            />
-            <span v-if="togglingProxy"><Loader2 class="size-4 animate-spin text-muted-foreground" /></span>
-            <span v-else class="text-xs font-medium">{{ proxyEnabled ? '已接管' : '未开启' }}</span>
+          <Button
+            variant="outline"
+            size="xs"
+            class="h-7 px-2.5 text-xs rounded-md"
+            :disabled="!proxyEnabled || testingSites"
+            @click="testSites"
+          >
+            <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': testingSites }" />
+            {{ testingSites ? '测速中…' : '测速体检' }}
+          </Button>
+        </div>
+
+        <div v-if="siteResults.length" class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
+          <div
+            v-for="r in siteResults"
+            :key="r.site"
+            class="flex items-center justify-between p-2 rounded-md bg-background text-xs shadow-xs"
+          >
+            <div class="flex items-center gap-1.5 min-w-0">
+              <StatusDot :tone="r.ok ? 'ok' : 'error'" size="md" />
+              <span class="font-medium truncate">{{ r.site.replace(/\.(com|org|net|ai|io|cn|top)$/i, '') }}</span>
+            </div>
+            <span v-if="r.ok" class="font-mono text-[11px] font-medium text-foreground tabular-nums">
+              {{ r.ms }}ms
+            </span>
+            <span v-else class="text-[11px] text-bad font-medium truncate max-w-16" :title="r.error">
+              {{ r.error || '超时' }}
+            </span>
           </div>
         </div>
-      </CardHeader>
-
-      <CardContent class="space-y-3.5 pt-1">
-        <p v-if="proxyError" class="rounded-lg bg-bad-soft px-3 py-2 text-xs text-bad break-all">
-          {{ proxyError }}
+        <p v-else class="text-xs text-muted-foreground py-0.5">
+          {{ proxyEnabled ? '点击右上角「测速体检」测试常用站点延迟' : '开启系统代理后可进行连通性测速体检' }}
         </p>
+      </div>
 
-        <!-- 连通性体检（美观微网格卡片） -->
-        <div class="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-2.5">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-              <Activity class="size-3.5" />
-              <span>网络连通性体检</span>
-              <InfoTip text="通过本机代理探测常用全球站点的连接畅通度与延迟" />
-            </div>
+      <!-- 加速域名名单（折叠，大号三角指示器） -->
+      <details class="group rounded-lg bg-muted/40 p-3">
+        <summary class="flex cursor-pointer items-center justify-between font-medium text-xs text-muted-foreground select-none list-none">
+          <div class="flex items-center gap-1.5">
+            <span>加速域名名单</span>
+            <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground font-mono">
+              {{ whitelistEntries.length }} 个
+            </span>
+            <InfoTip text="添加主域名（如 google.com）将自动加速其全部子域名 (*.google.com)，修改即时热生效。" />
+          </div>
+          <ChevronDown class="size-4 text-muted-foreground transition-transform duration-200 group-open:rotate-180" />
+        </summary>
+
+        <div class="mt-3 space-y-2.5 pt-1">
+          <!-- 内嵌添加按钮的输入框 -->
+          <div class="relative flex items-center rounded-md bg-background shadow-xs">
+            <input
+              v-model="newWhitelistEntry"
+              placeholder="输入需要加速的域名或网址，如 google.com"
+              class="w-full bg-transparent pl-3 pr-20 py-1.5 text-xs outline-none"
+              @keyup.enter="addWhitelistEntry()"
+            />
             <Button
-              variant="outline"
               size="xs"
-              class="h-7 px-2.5 text-xs"
-              :disabled="!proxyEnabled || testingSites"
-              @click="testSites"
+              class="absolute right-1 h-6.5 px-2.5 text-xs rounded-sm shrink-0"
+              :disabled="!newWhitelistEntry.trim()"
+              @click="addWhitelistEntry()"
             >
-              <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': testingSites }" />
-              {{ testingSites ? '测速中…' : '测速体检' }}
+              <Plus class="size-3 mr-1" />
+              添加
             </Button>
           </div>
 
-          <!-- 网格卡片展示：2 列 / 4 列响应式微卡 -->
-          <div v-if="siteResults.length" class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
-            <div
-              v-for="r in siteResults"
-              :key="r.site"
-              class="flex items-center justify-between p-2 rounded-md border border-border/40 bg-background text-xs"
+          <div v-if="whitelistEntries.length" class="flex flex-wrap gap-1.5 pt-1">
+            <span
+              v-for="(e, i) in whitelistEntries"
+              :key="e"
+              class="inline-flex items-center gap-1 rounded-full bg-background px-2.5 py-0.5 text-xs text-foreground/80 shadow-xs"
             >
-              <div class="flex items-center gap-1.5 min-w-0">
-                <StatusDot :tone="r.ok ? 'ok' : 'error'" size="md" />
-                <span class="font-medium truncate">{{ r.site.replace(/\.(com|org|net|ai|io|cn|top)$/i, '') }}</span>
-              </div>
-              <span v-if="r.ok" class="font-mono text-[11px] font-medium text-foreground tabular-nums">
-                {{ r.ms }}ms
-              </span>
-              <span v-else class="text-[11px] text-bad font-medium truncate max-w-16" :title="r.error">
-                {{ r.error || '超时' }}
-              </span>
-            </div>
-          </div>
-          <p v-else class="text-xs text-muted-foreground py-0.5">
-            {{ proxyEnabled ? '点击右上角「测速体检」测试常用站点延迟' : '开启系统代理后可进行连通性测速体检' }}
-          </p>
-        </div>
-
-        <!-- 加速域名名单（默认折叠，需要时展开） -->
-        <details class="group rounded-lg border border-border/50 bg-muted/20 p-3">
-          <summary class="flex cursor-pointer items-center justify-between font-medium text-xs text-muted-foreground select-none">
-            <div class="flex items-center gap-1.5">
-              <span>加速域名名单</span>
-              <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground font-mono">
-                {{ whitelistEntries.length }} 个
-              </span>
-              <InfoTip text="添加主域名（如 google.com）将自动加速其全部子域名 (*.google.com)，修改即时热生效。" />
-            </div>
-            <span class="text-[11px] text-primary group-open:rotate-180 transition-transform duration-200">
-              ▾
+              {{ e }}
+              <button
+                type="button"
+                class="rounded-full text-muted-foreground hover:text-bad leading-none p-0.5 cursor-pointer"
+                @click="removeWhitelistEntry(i)"
+              >
+                ×
+              </button>
             </span>
-          </summary>
-
-          <div class="mt-3 space-y-2.5 pt-1">
-            <div class="flex gap-2">
-              <Input
-                v-model="newWhitelistEntry"
-                placeholder="输入需要加速的域名或网址，如 google.com"
-                class="h-8 text-xs bg-background flex-1"
-                @keyup.enter="addWhitelistEntry()"
-              />
-              <Button
-                size="xs"
-                class="h-8 px-3 text-xs shrink-0"
-                :disabled="!newWhitelistEntry.trim()"
-                @click="addWhitelistEntry()"
-              >
-                <Plus class="size-3 mr-1" />
-                添加
-              </Button>
-            </div>
-
-            <div v-if="whitelistEntries.length" class="flex flex-wrap gap-1.5">
-              <span
-                v-for="(e, i) in whitelistEntries"
-                :key="e"
-                class="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-xs text-foreground/80 hover:bg-muted/80"
-              >
-                {{ e }}
-                <button
-                  type="button"
-                  class="rounded-full text-muted-foreground hover:text-bad leading-none p-0.5 cursor-pointer"
-                  @click="removeWhitelistEntry(i)"
-                >
-                  ×
-                </button>
-              </span>
-            </div>
-            <p v-else class="text-[11px] text-muted-foreground">名单为空，可在上方输入框添加</p>
           </div>
-        </details>
-      </CardContent>
-    </Card>
+          <p v-else class="text-[11px] text-muted-foreground">名单为空，可在上方输入框添加</p>
+        </div>
+      </details>
+    </div>
 
-    <!-- ==================== 2. 客户端 API 专线接入 ==================== -->
-    <div class="space-y-4">
+    <!-- ==================== 2. 大模型 API 专线接入（无边框 微圆角背景色） ==================== -->
+    <div class="rounded-xl bg-card p-4 space-y-4 shadow-xs">
       <div>
         <h2 class="text-sm font-semibold tracking-tight flex items-center gap-2">
           <Zap class="size-4 text-primary" />
           大模型与 API 专线接入
         </h2>
         <p class="text-xs text-muted-foreground mt-0.5">
-          输入任意 API 地址或选择预设，自动生成兼容 Claude Code、Cursor、OpenAI SDK 的成品配置。
+          粘贴目标 API 地址，自动生成已嵌入专属 Token 的公网与局域网接入 URL，即拷即用。
         </p>
       </div>
 
-      <!-- 快速预设徽章 -->
-      <div class="flex flex-wrap gap-1.5">
-        <button
-          v-for="tpl in SERVICE_TEMPLATES.slice(0, 6)"
-          :key="tpl.name"
-          type="button"
-          class="inline-flex items-center gap-1 rounded-md bg-muted/60 px-2.5 py-1 text-xs text-muted-foreground transition hover:bg-accent hover:text-foreground cursor-pointer"
-          @click="selectPresetTemplate(tpl)"
-        >
-          <Sparkles class="size-3 text-primary/70" />
-          {{ tpl.label }}
-        </button>
-      </div>
-
-      <!-- 智能 URL 接入器 -->
-      <Card class="border-primary/20 bg-primary/[0.02]">
-        <CardContent class="p-4 space-y-3">
-          <div class="flex gap-2">
-            <Input
-              v-model="inputUrl"
-              placeholder="粘贴任意 API 地址，如 https://api.openai.com/v1 或 api.groq.com"
-              class="h-9 text-xs bg-background font-mono flex-1"
-              @keyup.enter="submitSmartAccess"
-            />
-            <Button
-              size="sm"
-              class="h-9 px-4 text-xs font-medium shrink-0"
-              :disabled="!inputUrl.trim() || addingRoute"
-              @click="submitSmartAccess"
-            >
-              <LoaderCircle v-if="addingRoute" class="size-3 animate-spin mr-1" />
-              一键接入
-            </Button>
-          </div>
-
-          <!-- 智能解析预览 -->
-          <div v-if="parsedUrl" class="flex items-center justify-between text-xs text-muted-foreground bg-background/80 rounded-md px-3 py-1.5 border border-border/50">
-            <span class="flex items-center gap-2">
-              <span class="text-ok font-medium">✓ 智能识别:</span>
-              <span>服务名 <strong>{{ parsedUrl.inferredName }}</strong></span>
-              <span>目标 <code>{{ parsedUrl.cleanHost }}</code></span>
-            </span>
-            <label class="flex items-center gap-1.5 text-[11px] cursor-pointer">
-              <input v-model="syncToWhitelist" type="checkbox" class="rounded text-primary" />
-              同时加入 Windows 代理加速名单
-            </label>
-          </div>
-        </CardContent>
-      </Card>
-
-      <!-- 已配置服务列表 -->
-      <Card>
-        <CardHeader class="pb-3">
-          <div class="flex items-center justify-between">
-            <CardTitle class="text-sm font-semibold">已接入专线列表</CardTitle>
-            <Button variant="ghost" size="xs" :disabled="routesLoading" @click="refreshRoutes">
-              <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': routesLoading }" />
-              刷新
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent class="p-0">
-          <SkeletonTable v-if="routesLoading && routes.length === 0" :rows="3" />
-          <EmptyState
-            v-else-if="routes.length === 0"
-            title="还没有添加任何专线服务"
-            description="在上方粘贴 API 地址或点击常用大模型预设，一键创建加速专线。"
+      <!-- 智能 URL 接入器：内嵌一键接入按钮 -->
+      <div class="space-y-2">
+        <div class="relative flex items-center rounded-lg bg-muted/50 p-1 shadow-xs">
+          <input
+            v-model="inputUrl"
+            placeholder="粘贴任意 API 地址，如 https://api.openai.com/v1 或 api.groq.com"
+            class="w-full bg-transparent pl-3 pr-24 py-2 text-xs font-mono outline-none"
+            @keyup.enter="submitSmartAccess"
           />
-          <Table v-else>
-            <TableHeader>
-              <TableRow>
-                <TableHead class="text-xs">服务标识</TableHead>
-                <TableHead class="text-xs">目标地址</TableHead>
-                <TableHead class="text-xs">中转线路</TableHead>
-                <TableHead class="text-xs">状态</TableHead>
-                <TableHead class="text-right text-xs">操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              <TableRow v-for="r in routes" :key="r.name">
-                <TableCell class="font-medium text-xs font-mono">{{ r.name }}</TableCell>
-                <TableCell class="text-xs font-mono text-muted-foreground">{{ r.target_host }}</TableCell>
-                <TableCell>
-                  <Badge variant="outline" class="text-[10px]">
-                    {{ upstreamLabel(r.upstream ?? '').label }}
-                  </Badge>
-                </TableCell>
-                <TableCell>
-                  <Switch
-                    :model-value="r.enabled"
-                    size="sm"
-                    @update:model-value="(val: boolean) => toggleRouteEnabled(r, val)"
-                  />
-                </TableCell>
-                <TableCell class="text-right space-x-1">
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    :disabled="testingRouteName === r.name"
-                    @click="testSingleRoute(r)"
-                  >
-                    <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': testingRouteName === r.name }" />
-                    测速
-                  </Button>
-                  <Button variant="default" size="xs" @click="openRouteConfig(r)">
-                    客户端配置
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    class="text-bad hover:bg-bad-soft"
-                    @click="deleteTarget = r"
-                  >
-                    删除
-                  </Button>
-                </TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-    </div>
-
-    <!-- ==================== 3. 客户端成品配置弹窗 ==================== -->
-    <Dialog :open="showConfigDialog" @update:open="(v) => (showConfigDialog = v)">
-      <DialogContent class="sm:max-w-2xl max-h-[85vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle class="flex items-center gap-2 text-base">
-            <Sparkles class="size-4 text-primary" />
-            「{{ configRouteName }}」客户端接入指南
-          </DialogTitle>
-        </DialogHeader>
-
-        <div class="space-y-4 overflow-y-auto pr-1 py-1">
-          <!-- 密钥与 Base URL 实时覆盖 -->
-          <div class="rounded-lg border border-border/60 bg-muted/30 p-3 space-y-3">
-            <div class="text-xs font-medium text-foreground">快速替换代码占位符：</div>
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div class="space-y-1">
-                <Label for="cfg-token-override" class="text-[11px]">本机接入密钥 (Token)</Label>
-                <Input
-                  id="cfg-token-override"
-                  v-model="configCustomToken"
-                  type="password"
-                  placeholder="已自动载入本次会话密钥"
-                  class="h-8 text-xs font-mono"
-                />
-              </div>
-              <div class="space-y-1">
-                <Label for="cfg-upstream-key-override" class="text-[11px]">上游 API Key（如 OpenAI / Anthropic Key）</Label>
-                <Input
-                  id="cfg-upstream-key-override"
-                  v-model="configCustomUpstreamKey"
-                  type="password"
-                  placeholder="留空则生成占位符"
-                  class="h-8 text-xs font-mono"
-                />
-              </div>
-            </div>
-            <p v-if="!configCustomToken" class="text-[11px] text-warn">
-              ⚠️ 未检测到已缓存的设备密钥，可在下方配置中手动将“&lt;YOUR_TOKEN&gt;”替换为你在「设置」页创建的密钥。
-            </p>
-          </div>
-
-          <!-- 场景切换 Tab 药丸 -->
-          <div class="flex flex-wrap gap-1 border-b border-border/40 pb-2">
-            <button
-              v-for="snip in configSnippets"
-              :key="snip.id"
-              type="button"
-              class="rounded-md px-2.5 py-1 text-xs font-medium transition"
-              :class="
-                activePresetTab === snip.id
-                  ? 'bg-primary text-primary-foreground shadow-xs'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-              "
-              @click="activePresetTab = snip.id"
-            >
-              {{ snip.name }}
-            </button>
-          </div>
-
-          <!-- 代码展示区 -->
-          <div v-if="activeSnippet" class="space-y-2">
-            <div class="flex items-center justify-between text-xs text-muted-foreground">
-              <span>{{ activeSnippet.title }}</span>
-              <Button size="xs" variant="outline" @click="copyActivePresetSnippet">
-                <Copy class="size-3 mr-1" />
-                一键复制
-              </Button>
-            </div>
-            <p v-if="activeSnippet.notes" class="text-[11px] text-muted-foreground">{{ activeSnippet.notes }}</p>
-            <pre class="overflow-x-auto rounded-lg bg-zinc-950 p-3.5 text-xs text-zinc-100 font-mono leading-relaxed select-all"><code>{{ activeDisplayCode }}</code></pre>
-          </div>
+          <Button
+            size="sm"
+            class="absolute right-1.5 h-7.5 px-3.5 text-xs font-medium rounded-md shrink-0"
+            :disabled="!inputUrl.trim() || addingRoute"
+            @click="submitSmartAccess"
+          >
+            <LoaderCircle v-if="addingRoute" class="size-3 animate-spin mr-1" />
+            一键接入
+          </Button>
         </div>
 
-        <DialogFooter class="border-t border-border/40 pt-3">
-          <Button variant="outline" size="sm" @click="showConfigDialog = false">关闭</Button>
-          <Button size="sm" @click="copyActivePresetSnippet">
-            <Check class="size-3.5 mr-1" />
-            复制并完成
+        <!-- 智能识别提示 -->
+        <div v-if="parsedUrl" class="flex items-center justify-between text-xs text-muted-foreground bg-muted/30 rounded-md px-3 py-1.5">
+          <span class="flex items-center gap-2">
+            <span class="text-ok font-medium">✓ 智能识别:</span>
+            <span>服务名 <strong>{{ parsedUrl.inferredName }}</strong></span>
+            <span>目标 <code>{{ parsedUrl.cleanHost }}</code></span>
+          </span>
+          <label class="flex items-center gap-1.5 text-[11px] cursor-pointer">
+            <input v-model="syncToWhitelist" type="checkbox" class="rounded text-primary" />
+            同时加入 Windows 代理加速名单
+          </label>
+        </div>
+      </div>
+
+      <!-- 最近一次生成的专线直出卡片 -->
+      <div v-if="lastCreated" class="rounded-lg bg-ok-soft/30 border border-ok/20 p-3.5 space-y-2.5">
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-semibold text-ok flex items-center gap-1.5">
+            <span>🎉 专线「{{ lastCreated.service }}」接入就绪</span>
+            <span class="text-[11px] font-normal text-muted-foreground">（Token 已在设置页自动备案）</span>
+          </div>
+          <button type="button" class="text-xs text-muted-foreground hover:text-foreground cursor-pointer" @click="lastCreated = null">
+            ✕
+          </button>
+        </div>
+
+        <div class="grid gap-2 sm:grid-cols-2 text-xs">
+          <!-- 公网接入地址 -->
+          <div class="rounded-md bg-background p-2.5 space-y-1 shadow-xs">
+            <div class="text-[11px] font-medium text-muted-foreground flex items-center justify-between">
+              <span>公网 / 外部设备接入 URL</span>
+              <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[11px]" @click="copyUrl(lastCreated!.publicUrl, '公网接入地址')">
+                <Copy class="size-3 mr-1" />
+                复制
+              </Button>
+            </div>
+            <code class="block text-[11px] font-mono break-all text-foreground select-all">{{ lastCreated.publicUrl }}</code>
+          </div>
+
+          <!-- 局域网接入地址 -->
+          <div class="rounded-md bg-background p-2.5 space-y-1 shadow-xs">
+            <div class="text-[11px] font-medium text-muted-foreground flex items-center justify-between">
+              <span>局域网 / 本地接入 URL</span>
+              <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[11px]" @click="copyUrl(lastCreated!.lanUrl, '局域网接入地址')">
+                <Copy class="size-3 mr-1" />
+                复制
+              </Button>
+            </div>
+            <code class="block text-[11px] font-mono break-all text-foreground select-all">{{ lastCreated.lanUrl }}</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- 已接入专线列表（待用户添加后显示，带时序微网格测速） -->
+      <div class="space-y-2 pt-2">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <h3 class="text-xs font-semibold text-foreground">已接入专线列表（{{ routes.length }}）</h3>
+            <span class="text-[11px] text-muted-foreground font-normal">（自动 30 分钟轮询测速）</span>
+          </div>
+          <Button variant="ghost" size="xs" :disabled="routesLoading" @click="refreshRoutes">
+            <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': routesLoading }" />
+            刷新列表
           </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </div>
+
+        <SkeletonTable v-if="routesLoading && routes.length === 0" :rows="2" />
+        
+        <!-- 初始空状态 -->
+        <EmptyState
+          v-else-if="routes.length === 0"
+          title="暂无 API 专线服务"
+          description="在上方粘贴 API 地址一键接入，系统将自动生成专线接入地址与访问令牌。"
+        />
+
+        <!-- 专线卡片列表 -->
+        <div v-else class="space-y-2">
+          <div
+            v-for="r in routes"
+            :key="r.name"
+            class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg bg-muted/30 transition hover:bg-muted/50"
+            :class="{ 'opacity-60': !r.enabled }"
+          >
+            <!-- 左侧：服务信息与快捷复制 -->
+            <div class="space-y-1 min-w-0">
+              <div class="flex items-center gap-2">
+                <span class="font-medium text-xs font-mono">{{ r.name }}</span>
+                <span class="text-[11px] font-mono text-muted-foreground">{{ r.target_host }}</span>
+                <Badge variant="outline" class="text-[10px]">
+                  {{ upstreamLabel(r.upstream ?? '').label }}
+                </Badge>
+              </div>
+
+              <!-- 快捷复制专线 URL -->
+              <div class="flex flex-wrap items-center gap-2 pt-0.5 text-[11px]">
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1 text-primary hover:underline cursor-pointer font-mono"
+                  @click="copyUrl(buildServiceUrls(r.name, getSessionSecret() || '').publicUrl, '公网专线地址')"
+                >
+                  <Copy class="size-2.5" />
+                  复制公网 URL
+                </button>
+                <span class="text-muted-foreground/40">·</span>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground hover:underline cursor-pointer font-mono"
+                  @click="copyUrl(buildServiceUrls(r.name, getSessionSecret() || '').lanUrl, '局域网专线地址')"
+                >
+                  <Copy class="size-2.5" />
+                  复制局域网 URL
+                </button>
+              </div>
+            </div>
+
+            <!-- 右侧：时序微图、纯图标即时测速、启停开关与删除 -->
+            <div class="flex items-center gap-3 shrink-0">
+              <!-- 12 根时序微柱条 -->
+              <div class="flex items-center gap-2">
+                <LatencyBars :history="routeHistories[r.name]" />
+                <span class="min-w-12 text-right font-mono text-xs tabular-nums font-medium text-foreground">
+                  <template v-if="probingRoute === r.name">
+                    <span class="text-muted-foreground animate-pulse text-[11px]">测速中…</span>
+                  </template>
+                  <template v-else-if="routeHistories[r.name]?.length">
+                    <span :class="routeHistories[r.name]?.at(-1)?.ok ? 'text-foreground' : 'text-bad'">
+                      {{ routeHistories[r.name]?.at(-1)?.ok ? `${routeHistories[r.name]?.at(-1)?.ms}ms` : '异常' }}
+                    </span>
+                  </template>
+                  <template v-else>
+                    <span class="text-muted-foreground text-[11px]">待测</span>
+                  </template>
+                </span>
+              </div>
+
+              <!-- 纯图标即时测速按钮 -->
+              <button
+                v-if="r.enabled"
+                type="button"
+                class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-background cursor-pointer transition"
+                :disabled="probingRoute === r.name"
+                title="立即测速"
+                @click="testSingleRoute(r)"
+              >
+                <RefreshCw class="size-3.5" :class="{ 'animate-spin': probingRoute === r.name }" />
+              </button>
+
+              <!-- 启停开关 -->
+              <Switch
+                :model-value="r.enabled"
+                size="sm"
+                @update:model-value="(val: boolean) => toggleRouteEnabled(r, val)"
+              />
+
+              <!-- 删除按钮 -->
+              <button
+                type="button"
+                class="p-1 rounded-md text-muted-foreground hover:text-bad hover:bg-bad-soft cursor-pointer transition"
+                title="删除专线"
+                @click="deleteTarget = r"
+              >
+                <Trash2 class="size-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- 删除服务确认 -->
     <ConfirmDialog
