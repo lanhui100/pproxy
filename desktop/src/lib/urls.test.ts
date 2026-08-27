@@ -72,4 +72,56 @@ describe('cleanDomainInput', () => {
     expect(cleanDomainInput('invalid..domain')).toBeNull()
     expect(cleanDomainInput('http://[::1]:8080')).toBeNull()
   })
+
+  it('支持清洗包裹引号', () => {
+    expect(cleanDomainInput('"https://api.openai.com"')).toBe('api.openai.com')
+    expect(cleanDomainInput("'github.com'")).toBe('github.com')
+    expect(cleanDomainInput('`chatgpt.com`')).toBe('chatgpt.com')
+  })
+})
+
+describe('parseServiceUrlInput', () => {
+  it('解析标准 OpenAI URL 并推导 openai 预设', async () => {
+    const { parseServiceUrlInput } = await import('./urls')
+    const r = parseServiceUrlInput('https://api.openai.com/v1/chat/completions')
+    expect(r).not.toBeNull()
+    expect(r?.cleanHost).toBe('api.openai.com')
+    expect(r?.inferredName).toBe('openai')
+    expect(r?.suggestedPreset).toBe('openai')
+  })
+
+  it('解析 Anthropic URL 并推导 claude 预设', async () => {
+    const { parseServiceUrlInput } = await import('./urls')
+    const r = parseServiceUrlInput('https://api.anthropic.com/v1/messages')
+    expect(r).not.toBeNull()
+    expect(r?.cleanHost).toBe('api.anthropic.com')
+    expect(r?.inferredName).toBe('anthropic')
+    expect(r?.suggestedPreset).toBe('claude')
+  })
+
+  it('解析 Google Gemini URL 并提取 query 中的 API key', async () => {
+    const { parseServiceUrlInput } = await import('./urls')
+    const r = parseServiceUrlInput('https://generativelanguage.googleapis.com/v1beta/models?key=AIzaSySecret123')
+    expect(r).not.toBeNull()
+    expect(r?.cleanHost).toBe('generativelanguage.googleapis.com')
+    expect(r?.inferredName).toBe('gemini')
+    expect(r?.extractedKey).toBe('AIzaSySecret123')
+    expect(r?.suggestedPreset).toBe('gemini')
+  })
+
+  it('解析带非标端口的 URL 并完整保留端口', async () => {
+    const { parseServiceUrlInput } = await import('./urls')
+    const r = parseServiceUrlInput('https://custom-proxy.example.com:8443/v1')
+    expect(r).not.toBeNull()
+    expect(r?.cleanHost).toBe('custom-proxy.example.com:8443')
+    expect(r?.inferredName).toBe('custom-proxy')
+  })
+
+  it('解析本地 Ollama 实例', async () => {
+    const { parseServiceUrlInput } = await import('./urls')
+    const r = parseServiceUrlInput('http://127.0.0.1:11434/v1')
+    expect(r).not.toBeNull()
+    expect(r?.cleanHost).toBe('127.0.0.1:11434')
+    expect(r?.inferredName).toBe('ollama')
+  })
 })

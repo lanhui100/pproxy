@@ -114,19 +114,21 @@ fn valid_override(edges: &HashMap<String, EdgeClient>, s: &str) -> bool {
 /// §6.0 name 校验（先于一切 host 校验）。pub 供迁移导入复用（F4：旧
 /// config.json routes 键入库前必须过同一套校验，非法项跳过不阻断）。
 pub fn validate_name(name: &str) -> Result<(), RouteError> {
-    // 保留前缀显式校验（S-P1-4/C-P1-2 裁决）：数据面以 `pony_` 前缀区分
-    // 路径中的 token 段与 route 段（T3 §4.1），该歧义必须由路由创建时显式
-    // 排除，不能依赖正则"天然排除"的错误断言。`__admin__`（下划线开头）
-    // 已被首字符 [a-z] 拒绝。
-    if name.starts_with("pony_") || name == "pony" {
+    if name.is_empty() || name.len() > 64 {
         return Err(RouteError::InvalidName);
     }
-    // ^[a-z][a-z0-9_-]{0,63}$：总长 1..=64，首字符 [a-z]
-    let b = name.as_bytes();
-    if b.is_empty() || b.len() > 64 || !b[0].is_ascii_lowercase() {
+    // 保留字与前缀拦截
+    const RESERVED_NAMES: &[&str] = &[
+        "pony", "api", "admin", "dsk", "health", "metrics", "sys", "static", "proxy", "token", "tokens",
+    ];
+    if name.starts_with("pony_") || RESERVED_NAMES.contains(&name) {
         return Err(RouteError::InvalidName);
     }
-    if !b[1..]
+    let bytes = name.as_bytes();
+    if !bytes[0].is_ascii_lowercase() {
+        return Err(RouteError::InvalidName);
+    }
+    if !bytes
         .iter()
         .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
     {
@@ -161,18 +163,13 @@ pub fn validate_host(host: &str) -> Result<(), RouteError> {
         return Err(RouteError::InvalidHost);
     }
     // 规则 2：字符白名单 [a-z0-9.-]（小写化后）。
-    // C-P2-1/S-P2-9 裁决：无 (\*\.)? 通配前缀——M1 路由均为精确域名，
-    // 通配语义未定义且扩大 SSRF 面；`*` 不在白名单内自然被拒。
-    // 下划线/空格等非法字符同样在此被拒。
     if !lower
         .bytes()
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
     {
         return Err(RouteError::InvalidHost);
     }
-    // 域名结构 ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$：
-    // ≥2 段；末段纯字母 ≥2（裸 IP 形式——纯数字+点，如 192.168.1.1、
-    // 127.0.0.1——末段为数字，在此被拒。裸 IP 无业务需求且是 SSRF 主载体）。
+    // 域名结构
     let labels: Vec<&str> = lower.split('.').collect();
     if labels.len() < 2 {
         return Err(RouteError::InvalidHost);
@@ -196,21 +193,22 @@ pub fn validate_host(host: &str) -> Result<(), RouteError> {
             return Err(RouteError::InvalidHost);
         }
     }
-    // 规则 3：黑名单后缀（内网域名；"localhost" 本身单段已被结构校验拒绝，
-    // 显式保留以防御未来结构规则放宽）。
-    const BLOCKED_SUFFIXES: &[&str] = &[".localhost", ".local", ".internal", ".localdomain"];
+    // 规则 3：黑名单后缀（内网域名与泛解析穿透域名）
+    const BLOCKED_SUFFIXES: &[&str] = &[
+        ".localhost",
+        ".local",
+        ".internal",
+        ".localdomain",
+        ".nip.io",
+        ".sslip.io",
+    ];
     if lower == "localhost" || BLOCKED_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
         return Err(RouteError::InvalidHost);
     }
-    // 规则 4：metadata 端点域名化变体。metadata.google.internal 已被
-    // ".internal" 后缀覆盖；169.254.169.254 IP 形式已被末段字母校验拒绝——
-    // 显式双保险，防结构规则未来放宽后遗漏。
-    if lower == "169.254.169.254" {
+    // 规则 4：metadata 端点与硬编码保留 IP
+    if lower == "169.254.169.254" || lower == "127.0.0.1" {
         return Err(RouteError::InvalidHost);
     }
-    // 规则 5：见函数级 doc 注释（不做 DNS 解析校验）。
-    // 规则 6：resolve 不重复校验——表内数据创建时已过本函数；DB 手工篡改
-    // 属运维越权，不在威胁模型内。
     Ok(())
 }
 

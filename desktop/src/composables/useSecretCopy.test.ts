@@ -42,11 +42,11 @@ describe('useSecretCopy', () => {
     expect(writes.at(-1)).toBe('')
   })
 
-  it('releaseAll 立即取消待清任务并尽力清一次', async () => {
+  it('forcePurgeClipboard 立即取消待清任务并尽力清一次', async () => {
+    const { forcePurgeClipboard } = await import('./useSecretCopy')
     await copySecret('leak-risk')
-    releaseAll()
+    forcePurgeClipboard()
     await vi.advanceTimersByTimeAsync(120_000)
-    // 唯一一次清空写发生在 releaseAll 同步路径，60s 定时器未再触发第二次
     const emptyWrites = writes.filter((w) => w === '')
     expect(emptyWrites).toHaveLength(1)
   })

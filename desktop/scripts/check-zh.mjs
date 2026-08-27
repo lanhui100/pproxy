@@ -8,19 +8,20 @@
 // 用法: node scripts/check-zh.mjs ；违规非零退出；顶部常量区可调参。
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = new URL('../src', import.meta.url).pathname
+const ROOT = fileURLToPath(new URL('../src', import.meta.url))
 
 const WHITELIST_WORDS = new Set([
   // 服务与专有名词
   'OpenAI', 'Anthropic', 'Gemini', 'GitHub', 'OpenRouter', 'Groq', 'Mistral', 'xAI',
-  'Hugging', 'Face', 'Twitter', 'Pony', 'Proxy', 'Vercel', 'Worker', 'PowerShell', 'bash',
+  'Hugging', 'Face', 'Twitter', 'Pony', 'Proxy', 'Vercel', 'Worker', 'PowerShell', 'bash', 'cURL', 'SDK', 'Code', 'Cursor', 'NextChat', 'Chatbox', 'Python',
   // 技术 token（界面允许保留的）
-  'token', 'admin', 'base_url', 'API', 'APIs', 'URL', 'URLs', 'ID', 'id', 'OS', 'HTTP',
+  'token', 'admin', 'base_url', 'API', 'APIs', 'URL', 'URLs', 'ID', 'id', 'OS', 'HTTP', 'Cloudflare', 'ms', 'YOUR_TOKEN', 'YOUR_API_KEY', 'lt', 'gt',
 ])
 
 // 允许纯英文存在的 .ts 文件名片段（技术模块，不直接承载用户文案）
-const TS_FILE_ALLOW = /(^|\/)(client|schemas|msw|config|normalize|urls|utils|format|statusLabels|errors|useUpdater|useAlertNotifications|useSecretCopy|useToast|useBackendGate|router)\.ts$/
+const TS_FILE_ALLOW = /(^|\/)(client|schemas|msw|config|normalize|urls|utils|format|statusLabels|errors|useUpdater|useAlertNotifications|useSecretCopy|useToast|useBackendGate|useAdaptivePoll|useTunnelProvision|useSessionSecret|presetGenerator|serviceTemplates|usageJoin|router)\.ts$/
 
 function extractWords(text) {
   return text.match(/[A-Za-z][A-Za-z_-]+/g) ?? []
@@ -47,7 +48,7 @@ function templateTextNodes(source) {
 
 const violations = []
 
-for (const name of ['DashboardView.vue', 'RoutesView.vue', 'TokensView.vue', 'UsageView.vue', 'SettingsView.vue', 'ProxyView.vue']) {
+for (const name of ['DashboardView.vue', 'CoreView.vue', 'SettingsView.vue']) {
   const file = join(ROOT, 'views', name)
   let source
   try {

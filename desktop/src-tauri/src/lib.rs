@@ -22,6 +22,12 @@ pub fn run() {
       // 启动自愈：清除上次崩溃残留的系统 PAC 注册（引擎未运行时 PAC 指向死端口）
       proxy::sysproxy::cleanup_stale();
 
+      let default_panic_hook = std::panic::take_hook();
+      std::panic::set_hook(Box::new(move |panic_info| {
+          proxy::sysproxy::cleanup_stale();
+          default_panic_hook(panic_info);
+      }));
+
       let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
       let on = MenuItem::with_id(app, "proxy_on", "启用代理", true, None::<&str>)?;
       let off = MenuItem::with_id(app, "proxy_off", "停用代理", true, None::<&str>)?;
@@ -343,11 +349,10 @@ static ENGINE_SPAWNED: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync::Mutex::new(None);
 
 #[tauri::command]
-fn proxy_enable() -> Result<(), String> {
+async fn proxy_enable() -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { return Ok(()); }
     let wl = proxy_whitelist_get();
     let mut effective_wl = wl.clone();
-    // 更新通道兜底：GitHub 下载域强制走隧道（见 ALWAYS_TUNNEL）
     for h in ALWAYS_TUNNEL {
         if !effective_wl.iter().any(|w| w == h) {
             effective_wl.push(h.to_string());
@@ -356,46 +361,49 @@ fn proxy_enable() -> Result<(), String> {
     *shared_whitelist().write().unwrap_or_else(|p| p.into_inner()) = effective_wl;
 
     let (tunnel_url, tunnel_token) = tunnel_config_load();
-    // 前置校验：白名单非空但隧道缺失 → 开了也翻不了墙（R4 无直连回落），
-    // 与其静默半配置不如显式拒绝，把用户引到设置页补齐配置。
     if !wl.is_empty() && (tunnel_url.is_none() || tunnel_token.is_none()) {
         return Err("隧道未配置：白名单流量无法出网。请先在「设置 → 隧道中继」保存端点与令牌（二者缺一不可），再开启总开关".into());
     }
     *shared_tunnel().write().unwrap_or_else(|p| p.into_inner()) = (tunnel_url, tunnel_token);
 
-    if !ENGINE_SPAWNED.swap(true, AOrd::SeqCst) {
+    if !ENGINE_SPAWNED.load(AOrd::SeqCst) {
         let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
         let swl = std::sync::Arc::clone(shared_whitelist());
         let stunnel = std::sync::Arc::clone(shared_tunnel());
         tauri::async_runtime::spawn(async move {
-            // 2026-08 审计整改：隧道端点/令牌由设置页经 keyring+本地文件注入（opt-in），
-            // 未配置时为 None → 白名单流量按引擎语义直接报错，绝不硬编码任何默认值。
             if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig {
                 listen_addr: "127.0.0.1:18900".into(),
                 whitelist: swl,
                 tunnel: stunnel,
             }, stats).await {
                 log::warn!("proxy engine exited: {e}");
+                ENGINE_SPAWNED.store(false, AOrd::SeqCst);
+                ENGINE_ON.store(false, AOrd::SeqCst);
             }
         });
+        ENGINE_SPAWNED.store(true, AOrd::SeqCst);
     }
 
-    // 竞态修复（2026-08）：必须等引擎真正监听 18900 后再设置系统 PAC，
-    // 否则浏览器立刻拉取 PAC 会连接拒绝 → Windows 回退 DIRECT → 加速站全部直连被墙。
-    // 探测最长 ~2s，超时也继续设置 PAC（引擎几乎必已在更早时间内就绪）。
-    let probe_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        if std::net::TcpStream::connect("127.0.0.1:18900").is_ok() {
+    // 异步端口就绪判定，绝不阻塞 UI 线程与消息循环
+    let probe_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut port_ready = false;
+    while tokio::time::Instant::now() < probe_deadline {
+        if tokio::net::TcpStream::connect("127.0.0.1:18900").await.is_ok() {
+            port_ready = true;
             break;
         }
-        if std::time::Instant::now() >= probe_deadline {
-            log::warn!("engine probe timeout, setting PAC anyway");
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    if !port_ready {
+        ENGINE_SPAWNED.store(false, AOrd::SeqCst);
+        return Err("代理引擎启动超时或 18900 端口被占用，已安全放弃设置系统代理".into());
+    }
+
+    let mut snap_guard = SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner());
     let snap = proxy::sysproxy::enable(proxy::sysproxy::Mode::Pac)?;
-    *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = Some(snap);
+    if snap_guard.is_none() {
+        *snap_guard = Some(snap);
+    }
     ENGINE_ON.store(true, AOrd::SeqCst);
     Ok(())
 }

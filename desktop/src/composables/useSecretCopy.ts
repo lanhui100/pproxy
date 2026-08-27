@@ -56,13 +56,24 @@ export async function copySecret(text: string, opts?: { onCopied?: () => void })
   }, CLEAR_DELAY_MS)
 }
 
+/**
+ * 释放本地暂存与取消待清定时器。
+ * 供弹窗关闭/组件销毁时调用：解除本地引用，保留用户粘贴窗口。
+ */
 export function releaseAll(): void {
   epoch++
   if (clearTimer) {
     clearTimeout(clearTimer)
     clearTimer = null
   }
-  const value = lastValue
   lastValue = ''
+}
+
+/**
+ * 主动安全擦除（仅在显式退出登录或敏感销毁时调用）。
+ */
+export function forcePurgeClipboard(): void {
+  const value = lastValue
+  releaseAll()
   if (value) void tryClear(value)
 }

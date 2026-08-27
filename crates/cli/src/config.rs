@@ -4,6 +4,7 @@
 
 use std::fmt;
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -78,29 +79,36 @@ pub fn save(cfg: &PonyConfig) -> Result<PathBuf, ConfigError> {
     let path = config_path()?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(ConfigError::Read)?;
+        #[cfg(unix)]
         let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
     }
     let body = toml::to_string_pretty(cfg).map_err(|e| ConfigError::Parse(e.to_string()))?;
     fs::write(&path, body).map_err(ConfigError::Read)?;
+    #[cfg(unix)]
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(ConfigError::Read)?;
     Ok(path)
 }
 
 /// group/other 位非零 → stderr warn（不阻断，M2 §3）。
 fn warn_permissive_mode(path: &Path) {
-    use std::io::Write;
-    if let Ok(meta) = fs::metadata(path) {
-        let mode = meta.permissions().mode();
-        if mode & 0o077 != 0 {
-            let mut err = std::io::stderr();
-            let _ = writeln!(
-                err,
-                "warning: {} is group/other readable (mode {:04o}); consider chmod 600",
-                path.display(),
-                mode & 0o777
-            );
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        if let Ok(meta) = fs::metadata(path) {
+            let mode = meta.permissions().mode();
+            if mode & 0o077 != 0 {
+                let mut err = std::io::stderr();
+                let _ = writeln!(
+                    err,
+                    "warning: {} is group/other readable (mode {:04o}); consider chmod 600",
+                    path.display(),
+                    mode & 0o777
+                );
+            }
         }
     }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// token 脱敏展示（前 10 位 + …）；过短则全遮。
@@ -166,9 +174,12 @@ mod tests {
         let cfg: PonyConfig = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(cfg.server, "http://127.0.0.1:8900");
         assert_eq!(cfg.data_plane, None);
-        // 权限位检测：0644 应被判定为宽松
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(fs::metadata(&path).unwrap().permissions().mode() & 0o077 != 0);
+        #[cfg(unix)]
+        {
+            // 权限位检测：0644 应被判定为宽松
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(fs::metadata(&path).unwrap().permissions().mode() & 0o077 != 0);
+        }
     }
 
     #[test]

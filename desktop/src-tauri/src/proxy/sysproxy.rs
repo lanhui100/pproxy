@@ -21,6 +21,7 @@ const PAC_URL: &str = "http://127.0.0.1:18900/pac";
 pub struct Snapshot {
     pub proxy_enable: Option<u32>,
     pub proxy_server: Option<String>,
+    pub proxy_override: Option<String>,
     pub autoconfig_url: Option<String>,
 }
 
@@ -37,13 +38,15 @@ pub fn enable(mode: Mode) -> Result<Snapshot, String> {
     let snapshot = Snapshot {
         proxy_enable: key.get_value("ProxyEnable").ok(),
         proxy_server: key.get_value("ProxyServer").ok(),
+        proxy_override: key.get_value("ProxyOverride").ok(),
         autoconfig_url: key.get_value("AutoConfigURL").ok(),
     };
 
     match mode {
         Mode::Pac => {
             key.set_value("AutoConfigURL", &PAC_URL).map_err(|e| e.to_string())?;
-            key.delete_value("ProxyEnable").ok();
+            // 显式写入 0 禁用手动代理，避免 Windows 状态机紊乱
+            key.set_value("ProxyEnable", &0u32).map_err(|e| e.to_string())?;
         }
         Mode::Manual => {
             key.set_value("ProxyEnable", &1u32).map_err(|e| e.to_string())?;
@@ -67,11 +70,15 @@ pub fn disable(snapshot: &Snapshot) -> Result<(), String> {
     if let Some(v) = snapshot.proxy_enable {
         key.set_value("ProxyEnable", &v).map_err(|e| e.to_string())?;
     } else {
-        key.delete_value("ProxyEnable").ok();
+        key.set_value("ProxyEnable", &0u32).ok();
     }
     match &snapshot.proxy_server {
         Some(v) => key.set_value("ProxyServer", v).map_err(|e| e.to_string())?,
         None => { key.delete_value("ProxyServer").ok(); }
+    }
+    match &snapshot.proxy_override {
+        Some(v) => key.set_value("ProxyOverride", v).map_err(|e| e.to_string())?,
+        None => { key.delete_value("ProxyOverride").ok(); }
     }
     match &snapshot.autoconfig_url {
         Some(v) => key.set_value("AutoConfigURL", v).map_err(|e| e.to_string())?,
@@ -84,11 +91,17 @@ pub fn disable(snapshot: &Snapshot) -> Result<(), String> {
 /// 广播设置变更（F10）：已运行应用感知代理切换。
 #[cfg(windows)]
 fn broadcast_change() {
-    // HWND_BROADCAST；SMTO_ABORTIFHUSH 避免挂起窗口阻塞
     unsafe {
+        use windows_sys::Win32::Networking::WinInet::{
+            InternetSetOptionA, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
+        };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             SendMessageTimeoutA, HWND_BROADCAST, SMTO_ABORTIFHUNG,
         };
+
+        InternetSetOptionA(std::ptr::null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, std::ptr::null_mut(), 0);
+        InternetSetOptionA(std::ptr::null_mut(), INTERNET_OPTION_REFRESH, std::ptr::null_mut(), 0);
+
         const WM_SETTINGCHANGE: u32 = 0x001A;
         SendMessageTimeoutA(
             HWND_BROADCAST,
@@ -96,7 +109,7 @@ fn broadcast_change() {
             0,
             c"Internet Settings".as_ptr() as _,
             SMTO_ABORTIFHUNG,
-            1000,
+            500,
             std::ptr::null_mut(),
         );
     }

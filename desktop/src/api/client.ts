@@ -31,6 +31,7 @@ export type {
   RouteDto,
   TokenDto,
   TokenStatus,
+  TunnelConfigResp,
   UsageResp,
 } from './schemas' 
 
@@ -152,16 +153,17 @@ async function rawRequest(
   const token = await tokenProvider()
   const headers: Record<string, string> = {}
   if (token) headers.Authorization = `Bearer ${token}`
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  const init: RequestInit = { method, headers }
+  if (body !== undefined && method !== 'GET') {
+    init.body = JSON.stringify(body)
+  }
 
   let resp: Response
   if (inTauri()) {
-    // R1：WebView 内禁用原生外联（CSP connect-src 'none'），走 plugin-http
-    //（Rust 侧发出，scope 白名单锁定管理面地址）
     const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http')
-    resp = await tauriFetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    resp = await tauriFetch(url, init)
   } else {
-    resp = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    resp = await fetch(url, init)
   }
 
   if (resp.status === 401) {
@@ -170,7 +172,13 @@ async function rawRequest(
   }
   if (!resp.ok) {
     const text = await resp.text()
-    const parsed = ApiErrorBodySchema.safeParse(text ? JSON.parse(text) : {})
+    let json: unknown = {}
+    try {
+      if (text) json = JSON.parse(text)
+    } catch {
+      json = { error: text || 'bad_request' }
+    }
+    const parsed = ApiErrorBodySchema.safeParse(json)
     throw parsed.success
       ? ({ kind: resp.status < 500 ? 'api' : 'server', status: resp.status, error: parsed.data.error } satisfies ApiError)
       : ({ kind: resp.status < 500 ? 'api' : 'server', status: resp.status, error: 'bad_request' } satisfies ApiError)

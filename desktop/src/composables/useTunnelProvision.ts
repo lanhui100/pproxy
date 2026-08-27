@@ -12,20 +12,28 @@ export type ProvisionOutcome =
 
 /** 装配隧道配置；不抛错，返回状态枚举。 */
 export async function provisionTunnel(): Promise<ProvisionOutcome> {
-  const local = await loadTunnelConfig()
-  if (local.url && local.hasToken) return 'ready'
+  try {
+    const local = await loadTunnelConfig()
+    if (local.url && local.hasToken) return 'ready'
 
-  // 本地缺配置 → 向网关拉取下发值
-  const remote = await api.tunnelConfig()
-  if (!remote.url || !remote.token) return 'unavailable'
+    // 本地缺配置 → 向网关拉取下发值
+    const remote = await api.tunnelConfig({ skipAuthRedirect: true })
+    if (!remote.url || !remote.token) return 'unavailable'
 
-  // 二者齐备才落盘（与引擎「部分配置不启用」语义一致）
-  await saveTunnelConfig(remote.url, remote.token)
-  return 'ready'
+    // 二者齐备才落盘（与引擎「部分配置不启用」语义一致）
+    await saveTunnelConfig(remote.url, remote.token)
+    return 'ready'
+  } catch {
+    return 'unavailable'
+  }
 }
 
 /** 本地隧道是否已就绪（仅供展示；不做网络请求）。 */
 export async function localTunnelReady(): Promise<boolean> {
-  const local = await loadTunnelConfig()
-  return Boolean(local.url && local.hasToken)
+  try {
+    const local = await loadTunnelConfig()
+    return Boolean(local.url && local.hasToken)
+  } catch {
+    return false
+  }
 }

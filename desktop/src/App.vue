@@ -2,7 +2,7 @@
 import type { Component } from 'vue'
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Activity, Bell, Gauge, Globe, ListTree, Settings, Ticket } from '@lucide/vue'
+import { Bell, Gauge, Globe, Settings } from '@lucide/vue'
 
 import { onUnauthorized } from '@/api/client'
 import NeedSetupGuide from '@/components/common/NeedSetupGuide.vue'
@@ -14,7 +14,7 @@ import { checkForUpdate, updateAvailable } from '@/composables/useUpdater'
 const router = useRouter()
 const route = useRoute()
 
-// 导航数据化（spec §3.1）：badge 按路由挂载，禁止按 label 文案匹配
+// 导航数据化：badge 按路由挂载，禁止按 label 文案匹配
 interface NavItem {
   to: string
   label: string
@@ -23,11 +23,8 @@ interface NavItem {
 }
 
 const nav: NavItem[] = [
-  { to: '/', label: '总览', icon: Gauge, badge: 'alerts' },
-  { to: '/routes', label: '服务', icon: ListTree },
-  { to: '/tokens', label: '设备密钥', icon: Ticket },
-  { to: '/usage', label: '用量统计', icon: Activity },
-  { to: '/proxy', label: '代理', icon: Globe },
+  { to: '/', label: '仪表盘', icon: Gauge, badge: 'alerts' },
+  { to: '/core', label: '代理与服务', icon: Globe },
   { to: '/settings', label: '设置', icon: Settings, badge: 'update' },
 ]
 
