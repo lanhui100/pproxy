@@ -1,6 +1,6 @@
 [package]
 name = "pony-desktop"
-version = "0.1.0"
+version = "0.3.14"
 description = "pony proxy 桌面管理端"
 authors = ["dm"]
 license = ""
@@ -15,7 +15,7 @@ name = "pony_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.6.3" }
+tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 serde_json = "1.0"
