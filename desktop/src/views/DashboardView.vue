@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { Activity, Bell, Loader2, RefreshCw, Zap } from '@lucide/vue'
 
 import { api, type AlertDto, type HealthResp, type QuotaResp, type UsageResp } from '@/api/client'
 import EmptyState from '@/components/common/EmptyState.vue'
 import InfoTip from '@/components/common/InfoTip.vue'
+import LatencyBars from '@/components/common/LatencyBars.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonCard from '@/components/common/SkeletonCard.vue'
 import SkeletonTable from '@/components/common/SkeletonTable.vue'
@@ -17,6 +18,7 @@ import { useAdaptivePoll } from '@/composables/useAdaptivePoll'
 import { useToast } from '@/composables/useToast'
 import { errText } from '@/lib/errors'
 import { fmtBytes, fmtCount, fmtRelative } from '@/lib/format'
+import { appendLatencyPoint, type LatencyPoint } from '@/lib/latencyHistory'
 import { alertLevelView, quotaSourceLabel, upstreamLabel, type Tone } from '@/lib/statusLabels'
 
 const toast = useToast()
@@ -30,18 +32,47 @@ const markingId = ref<number | null>(null)
 const markAllBusy = ref(false)
 const showUsageDrawer = ref(false)
 
-// 真实出口与服务连通性探活结果
-interface ProbeResult {
-  ok: boolean
-  ms?: number
-  err?: string
-}
-const upstreamProbes = ref<Record<string, ProbeResult>>({})
-const routeProbes = ref<Record<string, ProbeResult>>({})
+// 最近 1 小时时序采样历史（持久化保存在 localStorage 中）
+const STORAGE_KEY = 'pony_route_latency_history_v1'
+const routeHistories = ref<Record<string, LatencyPoint[]>>({})
+const upstreamHistories = ref<Record<string, LatencyPoint[]>>({})
 const probingRoute = ref<string>('')
+
+function loadSavedHistories(): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      routeHistories.value = parsed.routes || {}
+      upstreamHistories.value = parsed.upstreams || {}
+    }
+  } catch {
+    /* 忽略损坏缓存 */
+  }
+}
+
+function saveHistories(): void {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        routes: routeHistories.value,
+        upstreams: upstreamHistories.value,
+      }),
+    )
+  } catch {
+    /* 忽略存储异常 */
+  }
+}
+
+onMounted(() => {
+  loadSavedHistories()
+})
 
 async function probeAllRoutes(h: HealthResp): Promise<void> {
   const entries = Object.entries(h.routes || {})
+  const now = Date.now()
+
   for (const [name, cfg] of entries) {
     if (!cfg.enabled) continue
     const up = cfg.upstream || 'worker'
@@ -49,45 +80,54 @@ async function probeAllRoutes(h: HealthResp): Promise<void> {
 
     try {
       const res = await api.testRoute(name, { skipAuthRedirect: true })
-      const result: ProbeResult = {
+      const pt: LatencyPoint = {
+        ts: now,
         ok: res.ok,
         ms: res.latency_ms ?? undefined,
         err: res.error ? errText(res.error) : undefined,
       }
-      routeProbes.value[name] = result
+      routeHistories.value[name] = appendLatencyPoint(routeHistories.value[name], pt)
 
-      if (!upstreamProbes.value[upKey] || result.ok) {
-        upstreamProbes.value[upKey] = result
+      if (!upstreamHistories.value[upKey] || pt.ok) {
+        upstreamHistories.value[upKey] = appendLatencyPoint(upstreamHistories.value[upKey], pt)
       }
     } catch (e) {
-      const result: ProbeResult = {
+      const pt: LatencyPoint = {
+        ts: now,
         ok: false,
         err: errText(e),
       }
-      routeProbes.value[name] = result
-      if (!upstreamProbes.value[upKey]) {
-        upstreamProbes.value[upKey] = result
+      routeHistories.value[name] = appendLatencyPoint(routeHistories.value[name], pt)
+      if (!upstreamHistories.value[upKey]) {
+        upstreamHistories.value[upKey] = appendLatencyPoint(upstreamHistories.value[upKey], pt)
       }
     }
   }
+  saveHistories()
 }
 
 async function testSingleRouteInDashboard(name: string): Promise<void> {
   probingRoute.value = name
+  const now = Date.now()
   try {
     const res = await api.testRoute(name, { skipAuthRedirect: true })
-    routeProbes.value[name] = {
+    const pt: LatencyPoint = {
+      ts: now,
       ok: res.ok,
       ms: res.latency_ms ?? undefined,
       err: res.error ? errText(res.error) : undefined,
     }
+    routeHistories.value[name] = appendLatencyPoint(routeHistories.value[name], pt)
   } catch (e) {
-    routeProbes.value[name] = {
+    const pt: LatencyPoint = {
+      ts: now,
       ok: false,
       err: errText(e),
     }
+    routeHistories.value[name] = appendLatencyPoint(routeHistories.value[name], pt)
   } finally {
     probingRoute.value = ''
+    saveHistories()
   }
 }
 
@@ -134,17 +174,18 @@ const dbView = computed(() =>
 const quotaSources = computed(() => quota.value?.sources ?? [])
 
 function getUpstreamCardView(sourceName: string, sourceState: string): { label: string; tone: Tone; tip?: string } {
-  const probe = upstreamProbes.value[sourceName]
-  if (probe && probe.ok) {
+  const list = upstreamHistories.value[sourceName]
+  const last = list?.at(-1)
+  if (last && last.ok) {
     return {
-      label: `${probe.ms ?? 0}ms`,
+      label: `${last.ms ?? 0}ms`,
       tone: 'ok',
       tip: sourceState === 'unsupported_plan' ? '真实中转连通正常；Vercel 免费版不提供用量查询 API' : undefined,
     }
   }
-  if (probe && !probe.ok) {
+  if (last && !last.ok) {
     return {
-      label: `出口异常: ${probe.err || '超时'}`,
+      label: `出口异常: ${last.err || '超时'}`,
       tone: 'error',
     }
   }
@@ -297,23 +338,18 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
               <span>上游中转出口与连通度</span>
               <InfoTip text="中转线路出口的连通性与免费配额状态，自动双轨轮询探活" />
             </div>
-            <div v-if="quotaSources.length > 0" class="mt-3 space-y-2">
-              <div v-for="s in quotaSources" :key="s.name" class="flex items-start justify-between gap-2">
-                <div class="min-w-0">
-                  <span class="block truncate text-xs font-medium flex items-center gap-1">
-                    {{ upstreamLabel(s.name).label }}
-                    <InfoTip v-if="getUpstreamCardView(s.name, s.state).tip" :text="getUpstreamCardView(s.name, s.state).tip!" />
-                  </span>
-                  <span v-if="s.last_ok !== null && s.state === 'error'" class="block text-[11px] tabular-nums text-muted-foreground">
-                    上次正常: {{ fmtRelative(s.last_ok * 1000) }}
+            <div v-if="quotaSources.length > 0" class="mt-3 space-y-2.5">
+              <div v-for="s in quotaSources" :key="s.name" class="flex items-center justify-between gap-2">
+                <div class="min-w-0 flex items-center gap-1">
+                  <span class="block truncate text-xs font-medium">{{ upstreamLabel(s.name).label }}</span>
+                  <InfoTip v-if="getUpstreamCardView(s.name, s.state).tip" :text="getUpstreamCardView(s.name, s.state).tip!" />
+                </div>
+                <div class="flex items-center gap-2">
+                  <LatencyBars :history="upstreamHistories[s.name]" />
+                  <span class="min-w-12 text-right font-mono text-xs tabular-nums font-medium text-foreground">
+                    {{ getUpstreamCardView(s.name, s.state).label }}
                   </span>
                 </div>
-                <StatusDot
-                  :tone="getUpstreamCardView(s.name, s.state).tone"
-                  :label="getUpstreamCardView(s.name, s.state).label"
-                  size="md"
-                  class="shrink-0 text-xs font-mono font-medium"
-                />
               </div>
             </div>
             <p v-else class="mt-3 text-xs text-muted-foreground">暂无可用中转线路</p>
@@ -364,13 +400,16 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
         </ul>
       </section>
 
-      <!-- 核心服务健康度矩阵（语义大圆点 + 毫秒延时） -->
+      <!-- 核心服务健康度矩阵（12根时序微柱条 + 延时） -->
       <section class="mt-6">
         <div class="mb-2 flex items-center justify-between">
-          <h2 class="text-xs font-semibold tracking-tight text-foreground flex items-center gap-1.5">
-            <Zap class="size-3.5 text-primary" />
-            已配置服务健康度（{{ routeEntries.length }}）
-          </h2>
+          <div class="flex items-center gap-2">
+            <h2 class="text-xs font-semibold tracking-tight text-foreground flex items-center gap-1.5">
+              <Zap class="size-3.5 text-primary" />
+              已配置服务健康度（{{ routeEntries.length }}）
+            </h2>
+            <span class="text-[11px] text-muted-foreground font-normal">（近 1 小时 · 每柱 5 分钟）</span>
+          </div>
           <RouterLink to="/core" class="text-xs text-primary hover:underline">去管理服务 ›</RouterLink>
         </div>
 
@@ -401,32 +440,26 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
                 </span>
               </div>
 
-              <!-- 语义大圆点 + 毫秒延时 -->
-              <div class="flex items-center gap-2.5">
+              <!-- 12 根时序小柱条 + 最新延时 -->
+              <div class="flex items-center gap-3">
                 <template v-if="!cfg.enabled">
                   <StatusDot tone="muted" label="已停用" size="md" class="text-xs text-muted-foreground" />
                 </template>
-                <template v-else-if="probingRoute === name">
-                  <span class="text-[11px] text-muted-foreground animate-pulse">测速中…</span>
-                </template>
-                <template v-else-if="routeProbes[name]">
-                  <StatusDot
-                    v-if="routeProbes[name]?.ok"
-                    tone="ok"
-                    :label="`${routeProbes[name]?.ms ?? '?'}ms`"
-                    size="md"
-                    class="text-xs font-mono font-medium text-foreground"
-                  />
-                  <StatusDot
-                    v-else
-                    tone="error"
-                    :label="`异常: ${routeProbes[name]?.err || '超时'}`"
-                    size="md"
-                    class="text-xs text-bad"
-                  />
-                </template>
                 <template v-else>
-                  <StatusDot tone="ok" size="md" class="text-xs" />
+                  <LatencyBars :history="routeHistories[name]" />
+                  <span class="min-w-14 text-right font-mono text-xs tabular-nums text-foreground font-medium">
+                    <template v-if="probingRoute === name">
+                      <span class="text-muted-foreground animate-pulse text-[11px]">测速中…</span>
+                    </template>
+                    <template v-else-if="routeHistories[name]?.length">
+                      <span :class="routeHistories[name]?.at(-1)?.ok ? 'text-foreground' : 'text-bad'">
+                        {{ routeHistories[name]?.at(-1)?.ok ? `${routeHistories[name]?.at(-1)?.ms}ms` : '异常' }}
+                      </span>
+                    </template>
+                    <template v-else>
+                      <span class="text-muted-foreground text-[11px]">待测</span>
+                    </template>
+                  </span>
                 </template>
 
                 <!-- 行内单点快速复测 -->
