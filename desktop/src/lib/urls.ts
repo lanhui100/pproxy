@@ -27,3 +27,39 @@ export function deriveDataPlane(adminUrl: string): string | null {
   if (!host) return null
   return `${scheme}://${host}:${DATA_PLANE_PORT}`
 }
+
+/**
+ * 从用户输入中提取规范化域名（支持粘贴完整 URL、带端口、带通配符 *. 等）。
+ * 非法输入返回 null。
+ */
+export function cleanDomainInput(raw: string): string | null {
+  let s = raw.trim().toLowerCase()
+  if (!s) return null
+
+  // 剥除协议 http://, https://, ws:// 等
+  s = s.replace(/^[a-z]+:\/\//, '').replace(/^\/\//, '')
+
+  // 剥除路径、查询参数、hash
+  s = s.split('/')[0]?.split('?')[0]?.split('#')[0] ?? ''
+
+  // 剥除 IPv6 括号或端口
+  if (s.startsWith('[') && s.includes(']')) {
+    s = s.slice(1, s.indexOf(']'))
+  } else if (s.includes(':')) {
+    s = s.split(':')[0] ?? ''
+  }
+
+  // 剥除通配符前缀 *. 或 . 或 @
+  s = s.replace(/^(\*\.|\.+|@+)/, '')
+  // 剥除末尾点
+  s = s.replace(/\.+$/, '')
+
+  if (!s || s.length > 253) return null
+
+  // 域名合法字符校验 (字母、数字、点、减号、下划线)
+  if (!/^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/.test(s)) {
+    return null
+  }
+
+  return s
+}

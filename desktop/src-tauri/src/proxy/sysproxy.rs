@@ -102,9 +102,9 @@ fn broadcast_change() {
     }
 }
 
-/// 启动自愈：上次进程崩溃/强杀时 AutoConfigURL 残留指向已死的本地 PAC 端口，
-/// 白名单站点会全部失败（PAC 无 DIRECT 兜底）。启动时若发现仍指向本应用 PAC，
-/// 说明引擎必然未运行，直接清除并广播还原直连。
+/// 启动自愈：上次进程崩溃/强杀时 AutoConfigURL 或 ProxyServer 残留指向已死的本地 18900 端口，
+/// 会导致全系统网络或白名单站点全部失败。启动时若发现仍残留指向本应用端口，
+/// 直接清除并广播还原直连。
 #[cfg(windows)]
 pub fn cleanup_stale() {
     use winreg::enums::*;
@@ -115,10 +115,22 @@ pub fn cleanup_stale() {
     else {
         return;
     };
+    let mut changed = false;
     if key.get_value::<String, _>("AutoConfigURL").ok().as_deref() == Some(PAC_URL) {
         key.delete_value("AutoConfigURL").ok();
-        broadcast_change();
+        changed = true;
         log::info!("cleaned stale AutoConfigURL left by previous crashed run");
+    }
+    if let Ok(proxy_server) = key.get_value::<String, _>("ProxyServer") {
+        if proxy_server.contains("18900") || proxy_server == "127.0.0.1:18900" {
+            key.delete_value("ProxyServer").ok();
+            key.set_value("ProxyEnable", &0u32).ok();
+            changed = true;
+            log::info!("cleaned stale ProxyServer left by previous crashed run");
+        }
+    }
+    if changed {
+        broadcast_change();
     }
 }
 

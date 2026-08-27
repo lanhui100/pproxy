@@ -7,26 +7,80 @@ pub fn run() {
     .plugin(tauri_plugin_http::init())
     .plugin(tauri_plugin_process::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
+    .on_window_event(|window, event| {
+      if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        // 点击 X 按钮最小化到系统托盘，不直接退出进程
+        let _ = window.hide();
+        api.prevent_close();
+      }
+    })
     .setup(|app| {
       use tauri::menu::{Menu, MenuItem};
-      use tauri::tray::TrayIconBuilder;
+      use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+      use tauri::Manager;
+
       // 启动自愈：清除上次崩溃残留的系统 PAC 注册（引擎未运行时 PAC 指向死端口）
       proxy::sysproxy::cleanup_stale();
+
+      let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
       let on = MenuItem::with_id(app, "proxy_on", "启用代理", true, None::<&str>)?;
       let off = MenuItem::with_id(app, "proxy_off", "停用代理", true, None::<&str>)?;
       let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-      let menu = Menu::with_items(app, &[&on, &off, &quit])?;
+      let menu = Menu::with_items(app, &[&show, &on, &off, &quit])?;
+
       TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Pony Proxy")
         .menu(&menu)
+        .show_menu_on_left_click(false)
         .on_menu_event(|app, ev| match ev.id.as_ref() {
-            "proxy_on" => { let _ = proxy_enable(); }
+            "show" => {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.unminimize();
+                    let _ = win.set_focus();
+                }
+            }
+            "proxy_on" => {
+                if let Err(e) = proxy_enable() {
+                    use tauri_plugin_notification::NotificationExt;
+                    let _ = app.notification().builder()
+                        .title("代理开启失败")
+                        .body(e)
+                        .show();
+                }
+            }
             "proxy_off" => { let _ = proxy_disable(); }
-            "quit" => { let _ = proxy_disable(); app.exit(0); }
+            "quit" => {
+                let _ = proxy_disable();
+                app.exit(0);
+            }
             _ => {}
         })
+        .on_tray_icon_event(|tray, ev| {
+            match ev {
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
+                | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+                    let app = tray.app_handle();
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.unminimize();
+                        let _ = win.set_focus();
+                    }
+                }
+                _ => {}
+            }
+        })
         .build(app)?;
+
+      // 启动时自动接管：若隧道已配置，后台异步尝试开启代理（不阻塞 UI 主线程）
+      let (tunnel_url, tunnel_token) = tunnel_config_load();
+      if tunnel_url.is_some() && tunnel_token.is_some() {
+          tauri::async_runtime::spawn(async move {
+              let _ = proxy_enable();
+          });
+      }
+
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()
@@ -52,8 +106,13 @@ pub fn run() {
       tunnel_token_save,
       tunnel_token_clear,
     ])
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application")
+    .run(|_app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            let _ = proxy_disable();
+        }
+    });
 }
 
 /// admin token 存取（M5 §6.4）：仅经 OS 凭据库，前端只持引用句柄。
@@ -159,6 +218,20 @@ fn data_dir() -> std::path::PathBuf {
     { std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".pony-desktop")).unwrap_or(std::env::temp_dir()) }
 }
 
+static SHARED_WHITELIST: std::sync::OnceLock<proxy::engine::SharedWhitelist> = std::sync::OnceLock::new();
+
+fn shared_whitelist() -> &'static proxy::engine::SharedWhitelist {
+    SHARED_WHITELIST.get_or_init(|| {
+        let mut wl = proxy_whitelist_get();
+        for h in ALWAYS_TUNNEL {
+            if !wl.iter().any(|w| w == h) {
+                wl.push(h.to_string());
+            }
+        }
+        std::sync::Arc::new(std::sync::RwLock::new(wl))
+    })
+}
+
 #[tauri::command]
 fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
     for e in &entries {
@@ -169,7 +242,25 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("whitelist.json"), serde_json::to_string(&entries).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // 热更新内存白名单（并入 ALWAYS_TUNNEL 兜底）
+    let mut effective_wl = entries;
+    for h in ALWAYS_TUNNEL {
+        if !effective_wl.iter().any(|w| w == h) {
+            effective_wl.push(h.to_string());
+        }
+    }
+    *shared_whitelist().write().unwrap_or_else(|p| p.into_inner()) = effective_wl;
+    Ok(())
+}
+
+static SHARED_TUNNEL: std::sync::OnceLock<proxy::engine::SharedTunnel> = std::sync::OnceLock::new();
+
+fn shared_tunnel() -> &'static proxy::engine::SharedTunnel {
+    SHARED_TUNNEL.get_or_init(|| {
+        std::sync::Arc::new(std::sync::RwLock::new(tunnel_config_load()))
+    })
 }
 
 // ---- 隧道中继配置（2026-08 审计整改：端点/令牌全部 opt-in，禁止编译期硬编码）----
@@ -207,7 +298,9 @@ fn proxy_tunnel_set_url(url: String) -> Result<(), String> {
     dir.join(TUNNEL_FILE),
     serde_json::to_string(&serde_json::json!({ "url": url })).map_err(|e| e.to_string())?,
   )
-  .map_err(|e| e.to_string())
+  .map_err(|e| e.to_string())?;
+  shared_tunnel().write().unwrap_or_else(|p| p.into_inner()).0 = Some(url);
+  Ok(())
 }
 
 #[tauri::command]
@@ -215,12 +308,16 @@ fn tunnel_token_save(secret: String) -> Result<(), String> {
   if secret.trim().is_empty() {
     return Err("empty tunnel token".into());
   }
-  cred_set_impl(CREDENTIAL_USER_TUNNEL, secret)
+  cred_set_impl(CREDENTIAL_USER_TUNNEL, secret.clone())?;
+  shared_tunnel().write().unwrap_or_else(|p| p.into_inner()).1 = Some(secret);
+  Ok(())
 }
 
 #[tauri::command]
 fn tunnel_token_clear() -> Result<(), String> {
-  cred_delete_impl(CREDENTIAL_USER_TUNNEL)
+  cred_delete_impl(CREDENTIAL_USER_TUNNEL)?;
+  shared_tunnel().write().unwrap_or_else(|p| p.into_inner()).1 = None;
+  Ok(())
 }
 
 /// 引擎启动时装配隧道配置：端点与令牌**两者齐备**才启用隧道，
@@ -242,32 +339,47 @@ fn tunnel_config_load() -> (Option<String>, Option<String>) {
 }
 
 static ENGINE_ON: AtomicBool = AtomicBool::new(false);
+static ENGINE_SPAWNED: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync::Mutex::new(None);
 
 #[tauri::command]
 fn proxy_enable() -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { return Ok(()); }
-    let mut wl = proxy_whitelist_get();
+    let wl = proxy_whitelist_get();
+    let mut effective_wl = wl.clone();
     // 更新通道兜底：GitHub 下载域强制走隧道（见 ALWAYS_TUNNEL）
     for h in ALWAYS_TUNNEL {
-        if !wl.iter().any(|w| w == h) {
-            wl.push(h.to_string());
+        if !effective_wl.iter().any(|w| w == h) {
+            effective_wl.push(h.to_string());
         }
     }
+    *shared_whitelist().write().unwrap_or_else(|p| p.into_inner()) = effective_wl;
+
     let (tunnel_url, tunnel_token) = tunnel_config_load();
     // 前置校验：白名单非空但隧道缺失 → 开了也翻不了墙（R4 无直连回落），
     // 与其静默半配置不如显式拒绝，把用户引到设置页补齐配置。
     if !wl.is_empty() && (tunnel_url.is_none() || tunnel_token.is_none()) {
         return Err("隧道未配置：白名单流量无法出网。请先在「设置 → 隧道中继」保存端点与令牌（二者缺一不可），再开启总开关".into());
     }
-    let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
-    tauri::async_runtime::spawn(async move {
-        // 2026-08 审计整改：隧道端点/令牌由设置页经 keyring+本地文件注入（opt-in），
-        // 未配置时为 None → 白名单流量按引擎语义直接报错，绝不硬编码任何默认值。
-        if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: wl, tunnel_url, tunnel_token }, stats).await {
-            log::warn!("proxy engine exited: {e}");
-        }
-    });
+    *shared_tunnel().write().unwrap_or_else(|p| p.into_inner()) = (tunnel_url, tunnel_token);
+
+    if !ENGINE_SPAWNED.swap(true, AOrd::SeqCst) {
+        let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
+        let swl = std::sync::Arc::clone(shared_whitelist());
+        let stunnel = std::sync::Arc::clone(shared_tunnel());
+        tauri::async_runtime::spawn(async move {
+            // 2026-08 审计整改：隧道端点/令牌由设置页经 keyring+本地文件注入（opt-in），
+            // 未配置时为 None → 白名单流量按引擎语义直接报错，绝不硬编码任何默认值。
+            if let Err(e) = proxy::engine::run(proxy::engine::EngineConfig {
+                listen_addr: "127.0.0.1:18900".into(),
+                whitelist: swl,
+                tunnel: stunnel,
+            }, stats).await {
+                log::warn!("proxy engine exited: {e}");
+            }
+        });
+    }
+
     // 竞态修复（2026-08）：必须等引擎真正监听 18900 后再设置系统 PAC，
     // 否则浏览器立刻拉取 PAC 会连接拒绝 → Windows 回退 DIRECT → 加速站全部直连被墙。
     // 探测最长 ~2s，超时也继续设置 PAC（引擎几乎必已在更早时间内就绪）。
@@ -370,7 +482,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 #[tauri::command]
 fn proxy_pac() -> String {
-    proxy::pac::generate_pac(&proxy_whitelist_get())
+    let wl = shared_whitelist().read().unwrap_or_else(|p| p.into_inner());
+    proxy::pac::generate_pac(&wl)
 }
 
 #[cfg(test)]

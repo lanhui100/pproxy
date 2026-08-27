@@ -37,14 +37,13 @@ async fn establish(
     ),
     std::io::Error,
 > {
-    let url = cfg
-        .tunnel_url
-        .as_deref()
-        .ok_or_else(|| io("tunnel_url not configured"))?;
-    let token = cfg
-        .tunnel_token
-        .as_deref()
-        .ok_or_else(|| io("tunnel token missing"))?;
+    let (url, token) = {
+        let guard = cfg.tunnel.read().unwrap_or_else(|p| p.into_inner());
+        (
+            guard.0.clone().ok_or_else(|| io("tunnel_url not configured"))?,
+            guard.1.clone().ok_or_else(|| io("tunnel token missing"))?,
+        )
+    };
 
     let mut req = url
         .into_client_request()

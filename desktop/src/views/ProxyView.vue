@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { useToast } from '@/composables/useToast'
 import { provisionTunnel } from '@/composables/useTunnelProvision'
+import { cleanDomainInput } from '@/lib/urls'
 
 const toast = useToast()
 
@@ -41,7 +42,12 @@ const testing = ref(false)
 async function refresh(): Promise<void> {
   try {
     if (!isTauri()) return
-    entries.value = await tauri<string[]>('proxy_whitelist_get')
+    const [wl, st] = await Promise.all([
+      tauri<string[]>('proxy_whitelist_get'),
+      tauri<{ engine_running: boolean }>('proxy_status'),
+    ])
+    entries.value = wl
+    enabled.value = st.engine_running
     error.value = ''
   } catch (e) {
     error.value = String(e)
@@ -49,23 +55,33 @@ async function refresh(): Promise<void> {
 }
 
 async function addEntry(): Promise<void> {
-  const v = newEntry.value.trim().replace(/\.$/, '').toLowerCase()
-  if (!v || entries.value.includes(v)) return
+  const v = cleanDomainInput(newEntry.value)
+  if (!v) {
+    toast.error('域名格式不正确', '请输入合法的域名（如 google.com）或完整网址')
+    return
+  }
+  if (entries.value.includes(v)) {
+    toast.error('域名已在名单中', `${v} 已经存在于加速名单`)
+    return
+  }
   const next = [...entries.value, v]
   try {
     await tauri('proxy_whitelist_set', { entries: next })
     entries.value = next
     newEntry.value = ''
+    toast.success(`已添加 ${v}`, `即刻热生效，所有子域名 (*.${v}) 均已自动纳入加速`)
   } catch (e) {
     error.value = String(e)
   }
 }
 
 async function removeEntry(i: number): Promise<void> {
+  const target = entries.value[i]
   const next = entries.value.filter((_, idx) => idx !== i)
   try {
     await tauri('proxy_whitelist_set', { entries: next })
     entries.value = next
+    if (target) toast.success(`已移除 ${target}`, '已实时更新生效')
   } catch (e) {
     error.value = String(e)
   }
@@ -176,15 +192,15 @@ onMounted(refresh)
       <CardHeader>
         <CardTitle class="flex items-center gap-1 text-sm">
           加速名单
-          <InfoTip text="名单里的网站经加速通道访问，其余网站保持直连不受影响。填 example.com 会连同它的所有子域一起匹配" />
+          <InfoTip text="名单里的网站经加速通道出网，其余保持直连。添加主域名（如 google.com）将自动加速其所有子域名（*.google.com），支持直接粘贴网址" />
         </CardTitle>
-        <CardDescription>已预置常用网站，可随意增删；适合加访问慢或打不开的站点。</CardDescription>
+        <CardDescription>添加主域名自动覆盖全部子域名，支持粘贴网址自动提取；修改即刻热生效。</CardDescription>
       </CardHeader>
       <CardContent class="space-y-4">
         <div class="flex gap-2">
           <Input
             v-model="newEntry"
-            placeholder="输入域名，如 example.com"
+            placeholder="输入域名或网址，如 google.com"
             class="bg-muted/70"
             @keyup.enter="addEntry"
           />

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { deriveDataPlane } from './urls'
+import { cleanDomainInput, deriveDataPlane } from './urls'
 
 describe('deriveDataPlane', () => {
   it('管理面端口替换为 8899', () => {
@@ -44,5 +44,32 @@ describe('deriveDataPlane', () => {
 
   it('尾部空端口串按数字语义剥除（对齐 Rust 空串 all(digit)）', () => {
     expect(deriveDataPlane('http://host:/x')).toBe('http://host:8899')
+  })
+})
+
+describe('cleanDomainInput', () => {
+  it('标准域名正常保留并小写化', () => {
+    expect(cleanDomainInput('google.com')).toBe('google.com')
+    expect(cleanDomainInput('  GitHub.COM. ')).toBe('github.com')
+    expect(cleanDomainInput('one.google.com')).toBe('one.google.com')
+  })
+
+  it('剥除 http/https 协议和路径查询参数', () => {
+    expect(cleanDomainInput('https://mail.google.com/mail/u/0/#inbox')).toBe('mail.google.com')
+    expect(cleanDomainInput('http://api.github.com:443/repos?q=1')).toBe('api.github.com')
+    expect(cleanDomainInput('//sub.domain.co.uk/path')).toBe('sub.domain.co.uk')
+  })
+
+  it('剥除通配符与前后缀点', () => {
+    expect(cleanDomainInput('*.youtube.com')).toBe('youtube.com')
+    expect(cleanDomainInput('..openai.com...')).toBe('openai.com')
+  })
+
+  it('非法输入返回 null', () => {
+    expect(cleanDomainInput('')).toBeNull()
+    expect(cleanDomainInput('   ')).toBeNull()
+    expect(cleanDomainInput('http://')).toBeNull()
+    expect(cleanDomainInput('invalid..domain')).toBeNull()
+    expect(cleanDomainInput('http://[::1]:8080')).toBeNull()
   })
 })

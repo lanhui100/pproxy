@@ -25,7 +25,7 @@ function FindProxyForURL(url, host) {{
   var entries = [{list}];
   for (var i = 0; i < entries.length; i++) {{
     var e = entries[i];
-    if (h === e || h.indexOf('.' + e) === h.length - e.length - 1) {{
+    if (h === e || h.endsWith('.' + e)) {{
       return 'PROXY {host}:{port}';
     }}
   }}

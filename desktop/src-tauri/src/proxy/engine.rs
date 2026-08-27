@@ -13,23 +13,24 @@ use tokio::net::{TcpListener, TcpStream};
 use super::pac;
 use super::whitelist;
 
+pub type SharedWhitelist = Arc<std::sync::RwLock<Vec<String>>>;
+pub type SharedTunnel = Arc<std::sync::RwLock<(Option<String>, Option<String>)>>;
+
 /// 引擎配置。
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub listen_addr: String,
-    pub whitelist: Vec<String>,
-    /// 隧道端点（wss://…），None 时白名单流量直接报错关闭（无静默回落）
-    pub tunnel_url: Option<String>,
-    pub tunnel_token: Option<String>,
+    pub whitelist: SharedWhitelist,
+    /// 隧道端点与令牌 (url, token)，动态读写锁以支持热更新
+    pub tunnel: SharedTunnel,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         EngineConfig {
             listen_addr: "127.0.0.1:18900".into(),
-            whitelist: Vec::new(),
-            tunnel_url: None,
-            tunnel_token: None,
+            whitelist: Arc::new(std::sync::RwLock::new(Vec::new())),
+            tunnel: Arc::new(std::sync::RwLock::new((None, None))),
         }
     }
 }
@@ -75,7 +76,9 @@ enum Route {
 
 /// 分流判定（纯函数）：CONNECT 目标或 Host 头命中白名单 → 隧道。
 fn decide(host: &str, cfg: &EngineConfig) -> Route {
-    if whitelist::matches(host, &cfg.whitelist) && cfg.tunnel_url.is_some() {
+    let wl = cfg.whitelist.read().unwrap_or_else(|p| p.into_inner());
+    let tunnel_configured = cfg.tunnel.read().unwrap_or_else(|p| p.into_inner()).0.is_some();
+    if whitelist::matches(host, &wl) && tunnel_configured {
         Route::Tunnel
     } else {
         Route::Direct
@@ -151,7 +154,10 @@ async fn handle_conn(
     if head.starts_with("GET http://127.0.0.1:18900/pac ")
         || head.starts_with("GET /pac ")
     {
-        let body = pac::generate_pac(&cfg.whitelist);
+        let body = {
+            let wl = cfg.whitelist.read().unwrap_or_else(|p| p.into_inner());
+            pac::generate_pac(&wl)
+        };
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -272,8 +278,8 @@ mod tests {
     #[test]
     fn decide_whitelist_with_tunnel() {
         let cfg = EngineConfig {
-            whitelist: vec!["youtube.com".into()],
-            tunnel_url: Some("wss://gate/ws".into()),
+            whitelist: Arc::new(std::sync::RwLock::new(vec!["youtube.com".into()])),
+            tunnel: Arc::new(std::sync::RwLock::new((Some("wss://gate/ws".into()), Some("tok".into())))),
             ..Default::default()
         };
         assert_eq!(decide("www.youtube.com", &cfg), Route::Tunnel);
@@ -281,11 +287,27 @@ mod tests {
     }
 
     #[test]
+    fn decide_hot_reloads_on_whitelist_update() {
+        let wl = Arc::new(std::sync::RwLock::new(vec!["google.com".into()]));
+        let cfg = EngineConfig {
+            whitelist: Arc::clone(&wl),
+            tunnel: Arc::new(std::sync::RwLock::new((Some("wss://gate/ws".into()), Some("tok".into())))),
+            ..Default::default()
+        };
+        assert_eq!(decide("www.google.com", &cfg), Route::Tunnel);
+        assert_eq!(decide("www.youtube.com", &cfg), Route::Direct);
+
+        // 热更新白名单：无需重启 engine/config
+        wl.write().unwrap().push("youtube.com".into());
+        assert_eq!(decide("www.youtube.com", &cfg), Route::Tunnel);
+    }
+
+    #[test]
     fn decide_no_tunnel_url_never_tunnels() {
         // R4：隧道未配置时白名单也不走隧道（直连），但 UI 应提示引擎半配置
         let cfg = EngineConfig {
-            whitelist: vec!["youtube.com".into()],
-            tunnel_url: None,
+            whitelist: Arc::new(std::sync::RwLock::new(vec!["youtube.com".into()])),
+            tunnel: Arc::new(std::sync::RwLock::new((None, None))),
             ..Default::default()
         };
         assert_eq!(decide("www.youtube.com", &cfg), Route::Direct);
@@ -366,8 +388,8 @@ mod integration {
     async fn r4_tunnel_failure_never_silently_falls_back() {
         // R4 反证：白名单命中但隧道不可达 → 连接必须关闭且无 200 Established
         let cfg = EngineConfig {
-            whitelist: vec!["www.youtube.com".into()],
-            tunnel_url: Some("ws://127.0.0.1:9/unreachable".into()), // 不可达
+            whitelist: Arc::new(std::sync::RwLock::new(vec!["www.youtube.com".into()])),
+            tunnel: Arc::new(std::sync::RwLock::new((Some("ws://127.0.0.1:9/unreachable".into()), Some("tok".into())))), // 不可达
             ..Default::default()
         };
         let stats = Arc::new(EngineStats::default());
