@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import { getVersion } from '@tauri-apps/api/app'
-import { Check, Copy, Download, Key, LoaderCircle, Plus, RefreshCw, Trash2 } from '@lucide/vue'
+import { Check, ChevronDown, Copy, Download, Key, LoaderCircle, Plus, RefreshCw, Trash2 } from '@lucide/vue'
 
 import {
   api,
@@ -90,8 +90,13 @@ const createTokenName = ref('')
 const createTokenError = ref('')
 const creatingToken = ref(false)
 const newlyCreatedToken = ref<string | null>(null)
-const revokeTarget = ref<TokenDto | null>(null)
-const revokingToken = ref(false)
+
+// 行内就地二次确认删除
+const pendingDeleteTokenId = ref<number | null>(null)
+let deleteTimer: ReturnType<typeof setTimeout> | null = null
+
+// 仅展示有效活跃密钥，排除已撤销废弃项
+const activeTokens = computed(() => tokens.value.filter((t) => t.status === 'active'))
 
 async function refreshTokens(): Promise<void> {
   tokensLoading.value = true
@@ -101,6 +106,33 @@ async function refreshTokens(): Promise<void> {
     /* 未连通时静默 */
   } finally {
     tokensLoading.value = false
+  }
+}
+
+function triggerDeleteToken(t: TokenDto): void {
+  if (pendingDeleteTokenId.value === t.id) {
+    // 第二次点击：执行真正删除并从列表清理
+    void executeDeleteToken(t.id)
+  } else {
+    // 第一次点击：转为确认删除图标，启动 4 秒自动还原定时器
+    pendingDeleteTokenId.value = t.id
+    if (deleteTimer) clearTimeout(deleteTimer)
+    deleteTimer = setTimeout(() => {
+      pendingDeleteTokenId.value = null
+    }, 4000)
+  }
+}
+
+async function executeDeleteToken(id: number): Promise<void> {
+  if (deleteTimer) clearTimeout(deleteTimer)
+  pendingDeleteTokenId.value = null
+  try {
+    await api.revokeToken(id)
+    // 彻底从列表中物理清理
+    tokens.value = tokens.value.filter((t) => t.id !== id)
+    toast.success('密钥已删除并清理')
+  } catch (e) {
+    toast.error('删除密钥失败', errText(e))
   }
 }
 
@@ -149,11 +181,12 @@ async function saveTunnel(): Promise<void> {
 
 async function forgetTunnelToken(): Promise<void> {
   confirmForgetTunnelToken.value = false
-  if (await clearTunnelToken()) {
+  try {
+    await clearTunnelToken()
     tunnelHasToken.value = false
     tunnelAuto.value = 'manual'
     toast.success('已清除隧道密钥')
-  } else {
+  } catch {
     toast.error('隧道密钥清除失败')
   }
 }
@@ -218,7 +251,6 @@ async function testAndSave(): Promise<void> {
   const token = normalizeToken(tokenInput.value)
   tokenInput.value = token
   const persistSnapshot = { backend: loadBackendUrl(), dataPlane: loadDataPlaneUrl() }
-  let settled = false
 
   setBaseUrlProvider(() => url.value)
   setTokenProvider(async () => token || (await tokenFromStore()))
@@ -249,47 +281,59 @@ async function testAndSave(): Promise<void> {
       testResult.value = msg
       toast.error(msg)
     }
-    settled = true
   } catch (e) {
-    if (isUnauthorized(e)) testResult.value = '✗ 网关已连上但密钥不对：请核对管理员密钥'
-    else if ((e as { kind?: string }).kind === 'network') testResult.value = '✗ 无法连接：请检查网关地址是否正确'
-    else testResult.value = `✗ ${errText(e)}`
+    saveBackendUrl(prevUrl)
+    setBaseUrlProvider(() => prevUrl)
+    setTokenProvider(tokenFromStore)
+    if (isUnauthorized(e)) {
+      authHint.value = true
+      tokenFlash.value = true
+      testResult.value = '✗ 管理员密钥错误'
+      toast.error('管理员密钥错误')
+    } else {
+      const msg = '✗ 无法连接到网关，请检查地址是否正确'
+      testResult.value = msg
+      toast.error(msg, errText(e))
+    }
   } finally {
     testing.value = false
-    if (!settled) {
-      setBaseUrlProvider(() => prevUrl)
-      setTokenProvider(async () => (await tokenFromStore()) ?? (tokenInput.value || null))
-    }
   }
 }
 
 async function forgetToken(): Promise<void> {
-  const cleared = await clearAdminToken()
   confirmForget.value = false
-  if (cleared) {
-    tokenInput.value = ''
+  try {
+    await clearAdminToken()
     hasStoredToken.value = false
-    toast.success('已清除本机保存的管理员密钥')
-  } else {
-    toast.error('密钥清除失败')
+    tokenInput.value = ''
+    toast.success('已清除本地保存的管理员密钥')
+  } catch {
+    toast.error('清除失败，请检查系统安全凭据访问权限')
   }
 }
 
-// 告警档位
+// 轮询档位
 const POLL_TIERS = [
-  { value: 5, label: '标准（5 分钟）' },
-  { value: 15, label: '安静（15 分钟）' },
-  { value: 0, label: '手动（不自动通知）' },
-] as const
+  { value: 60, label: '1 小时' },
+  { value: 180, label: '3 小时' },
+  { value: 360, label: '6 小时' },
+  { value: 720, label: '12 小时' },
+  { value: 1440, label: '24 小时' },
+]
 
-function applyPollTier(value: number): void {
-  savePollIntervalMin(value)
+function applyPollTier(v: number): void {
+  savePollIntervalMin(v)
+  toast.success('已更新告警偏好')
 }
 
 // 软件更新
 async function onCheckUpdate(): Promise<void> {
   await checkForUpdate()
-  if (updateError.value) {
+  if (updateAvailable.value) {
+    toast.info(`发现新版本 ${updateVersion.value}`)
+  } else if (!updateError.value) {
+    toast.success('当前已是最新版本')
+  } else {
     toast.error('检查更新失败', updateError.value)
   }
 }
@@ -298,6 +342,8 @@ async function onDownloadUpdate(): Promise<void> {
   await downloadAndInstall()
   if (updateError.value) {
     toast.error('下载更新失败', updateError.value)
+  } else {
+    toast.success('更新已下载，应用即将重启生效')
   }
 }
 
@@ -322,17 +368,18 @@ const resultClass = computed(() => {
   return 'text-muted-foreground'
 })
 
-// 创建设备密钥
+// 创建设备密钥（名字规范化为 ^[a-zA-Z0-9._-]{1,64}$）
 async function doCreateToken(): Promise<void> {
   createTokenError.value = ''
-  if (!createTokenName.value.trim()) {
-    createTokenError.value = '请输入密钥备注名称'
+  const cleanName = createTokenName.value.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
+  if (!cleanName) {
+    createTokenError.value = '请输入合法的密钥名称（仅允许字母、数字、下划线、减号）'
     return
   }
   creatingToken.value = true
   try {
     const res = await api.createToken({
-      name: createTokenName.value.trim(),
+      name: cleanName,
     })
     setSessionSecret(res.token, res.name)
     newlyCreatedToken.value = res.token
@@ -360,21 +407,6 @@ function closeCreateModal(): void {
   newlyCreatedToken.value = null
   createTokenName.value = ''
   createTokenError.value = ''
-}
-
-async function doRevokeToken(): Promise<void> {
-  if (!revokeTarget.value) return
-  revokingToken.value = true
-  try {
-    await api.revokeToken(revokeTarget.value.id)
-    revokeTarget.value = null
-    await refreshTokens()
-    toast.success('密钥已撤销')
-  } catch (e) {
-    toast.error(errText(e))
-  } finally {
-    revokingToken.value = false
-  }
 }
 </script>
 
@@ -456,9 +488,9 @@ async function doRevokeToken(): Promise<void> {
       </CardContent>
     </Card>
 
-    <!-- 卡二：本机接入凭据与密钥管理 Section -->
+    <!-- 卡二：本机接入凭据与密钥管理 Section（折叠展示，支持二次确认删除与物理清理） -->
     <Card>
-      <CardHeader>
+      <CardHeader class="pb-3">
         <div class="flex items-center justify-between">
           <div class="space-y-0.5">
             <CardTitle class="text-sm font-semibold flex items-center gap-1.5">
@@ -475,37 +507,65 @@ async function doRevokeToken(): Promise<void> {
           </Button>
         </div>
       </CardHeader>
-      <CardContent class="space-y-3">
-        <!-- 密钥列表 -->
-        <div v-if="tokens.length" class="space-y-2">
-          <div
-            v-for="t in tokens"
-            :key="t.id"
-            class="flex items-center justify-between p-2.5 rounded-lg border border-border/50 bg-muted/20 text-xs"
-          >
-            <div class="space-y-0.5 min-w-0">
-              <div class="flex items-center gap-2">
-                <span class="font-medium truncate">{{ t.name === '__admin__' ? '系统管理员（内置）' : t.name }}</span>
-                <StatusDot v-bind="tokenStatusLabel(t.status)" class="text-[10px]" />
-              </div>
-              <p class="text-[11px] text-muted-foreground">
-                创建: {{ fmtDate(t.created_at * 1000) }} · 活跃: {{ t.last_used_at ? fmtRelative(t.last_used_at * 1000) : '从未' }}
-              </p>
+      <CardContent class="space-y-3 pt-0">
+        <!-- 折叠面板：已创建密钥列表 -->
+        <details class="group rounded-lg bg-muted/40 p-3">
+          <summary class="flex cursor-pointer items-center justify-between font-medium text-xs text-muted-foreground select-none list-none">
+            <div class="flex items-center gap-1.5">
+              <span>已创建密钥列表</span>
+              <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground font-mono">
+                {{ activeTokens.length }} 个
+              </span>
+              <InfoTip text="创建专线或外部设备接入时使用的专属 Token，删除后将彻底从网关注销。" />
             </div>
-            <div class="flex items-center gap-1 shrink-0">
-              <Button
-                v-if="t.name !== '__admin__'"
-                variant="ghost"
-                size="xs"
-                class="text-bad hover:bg-bad-soft cursor-pointer"
-                @click="revokeTarget = t"
+            <ChevronDown class="size-4 text-muted-foreground transition-transform duration-200 group-open:rotate-180" />
+          </summary>
+
+          <div class="mt-3 space-y-2 pt-1">
+            <div v-if="activeTokens.length" class="space-y-2">
+              <div
+                v-for="t in activeTokens"
+                :key="t.id"
+                class="flex items-center justify-between p-2.5 rounded-md bg-background text-xs shadow-xs"
               >
-                <Trash2 class="size-3" />
-              </Button>
+                <div class="space-y-0.5 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="font-medium font-mono truncate">{{ t.name === '__admin__' ? '系统管理员（内置）' : t.name }}</span>
+                    <StatusDot v-bind="tokenStatusLabel(t.status)" class="text-[10px]" />
+                  </div>
+                  <p class="text-[11px] text-muted-foreground">
+                    创建: {{ fmtDate(t.created_at * 1000) }} · 活跃: {{ t.last_used_at ? fmtRelative(t.last_used_at * 1000) : '从未' }}
+                  </p>
+                </div>
+                <div class="flex items-center gap-1 shrink-0">
+                  <!-- 行内二次确认删除按钮：首次点击转确认态，再次点击彻底删除并清理 -->
+                  <template v-if="t.name !== '__admin__'">
+                    <button
+                      v-if="pendingDeleteTokenId === t.id"
+                      type="button"
+                      class="inline-flex items-center gap-1 rounded bg-bad px-2 py-1 text-[11px] font-medium text-white shadow-xs transition hover:bg-bad/90 cursor-pointer animate-pulse"
+                      title="点击确认彻底删除"
+                      @click="triggerDeleteToken(t)"
+                    >
+                      <Check class="size-3" />
+                      确认删除
+                    </button>
+                    <button
+                      v-else
+                      type="button"
+                      class="p-1.5 rounded-md text-muted-foreground hover:text-bad hover:bg-bad-soft transition cursor-pointer"
+                      title="删除密钥"
+                      @click="triggerDeleteToken(t)"
+                    >
+                      <Trash2 class="size-3.5" />
+                    </button>
+                  </template>
+                </div>
+              </div>
             </div>
+            <p v-else class="text-xs text-muted-foreground py-1">暂无活跃密钥，点击右上角可新建</p>
           </div>
-        </div>
-        <p v-else class="text-xs text-muted-foreground">连接网关后自动加载密钥列表</p>
+        </details>
       </CardContent>
     </Card>
 
@@ -619,86 +679,81 @@ async function doRevokeToken(): Promise<void> {
     <Dialog :open="showCreateToken" @update:open="(v) => (!v && closeCreateModal())">
       <DialogContent class="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{{ newlyCreatedToken ? '接入密钥已生成' : '新建接入凭据' }}</DialogTitle>
+          <DialogTitle class="text-sm font-semibold flex items-center gap-1.5">
+            <Plus class="size-4 text-primary" />
+            新建接入密钥
+          </DialogTitle>
         </DialogHeader>
 
-        <!-- 状态 A：输入名称创建 -->
-        <div v-if="!newlyCreatedToken" class="space-y-3 py-2">
-          <div class="space-y-1">
-            <Label for="token-name-input" class="text-xs">备注名称</Label>
-            <Input
-              id="token-name-input"
-              v-model="createTokenName"
-              placeholder="例如：主力电脑、公司开发机"
-              class="text-xs"
-              @keyup.enter="doCreateToken"
-            />
+        <div class="space-y-3 py-1">
+          <div v-if="!newlyCreatedToken" class="space-y-3">
+            <div class="space-y-1">
+              <Label for="new-token-name" class="text-xs">密钥备注标识</Label>
+              <Input
+                id="new-token-name"
+                v-model="createTokenName"
+                placeholder="如 cursor_macbook 或 claude_cli"
+                class="h-8 text-xs"
+                @keyup.enter="doCreateToken"
+              />
+              <p class="text-[11px] text-muted-foreground">仅允许英文字母、数字、下划线与减号。</p>
+            </div>
+            <p v-if="createTokenError" class="text-xs text-bad">{{ createTokenError }}</p>
           </div>
-          <p v-if="createTokenError" class="text-xs text-bad bg-bad-soft p-2 rounded-md">{{ createTokenError }}</p>
-        </div>
 
-        <!-- 状态 B：生成成功明文展示 -->
-        <div v-else class="space-y-3 py-2">
-          <p class="text-xs text-muted-foreground">密钥仅显示一次，请复制并妥善保管：</p>
-          <div class="flex items-center gap-2">
-            <code class="flex-1 break-all rounded-md bg-muted p-2 font-mono text-xs text-foreground select-all">
-              {{ newlyCreatedToken }}
-            </code>
-            <Button size="xs" variant="outline" @click="copyNewToken">
-              <Copy class="size-3 mr-1" />
-              复制
-            </Button>
+          <!-- 创建成功后展示明文（仅此一次） -->
+          <div v-else class="space-y-2 rounded-lg bg-ok-soft/30 p-3">
+            <div class="text-xs font-semibold text-ok flex items-center gap-1">
+              <Check class="size-3.5" />
+              密钥创建成功
+            </div>
+            <p class="text-[11px] text-muted-foreground leading-relaxed">
+              明文仅展示此一次，已自动复制到剪贴板并缓存至当前会话。
+            </p>
+            <div class="flex items-center gap-2">
+              <code class="flex-1 rounded bg-background p-2 text-xs font-mono break-all select-all">
+                {{ newlyCreatedToken }}
+              </code>
+              <Button size="xs" variant="outline" @click="copyNewToken">
+                <Copy class="size-3" />
+              </Button>
+            </div>
           </div>
-          <p class="text-[11px] text-ok">💡 已复制到剪贴板（60 秒自清保护）并暂存于本次运行内存中。</p>
         </div>
 
         <DialogFooter>
-          <template v-if="!newlyCreatedToken">
-            <Button variant="outline" size="sm" @click="closeCreateModal">取消</Button>
-            <Button size="sm" :disabled="creatingToken || !createTokenName.trim()" @click="doCreateToken">
-              <LoaderCircle v-if="creatingToken" class="size-3 animate-spin mr-1" />
-              生成密钥
-            </Button>
-          </template>
-          <template v-else>
-            <Button size="sm" @click="closeCreateModal">
-              <Check class="size-3 mr-1" />
-              我已保存并完成
-            </Button>
-          </template>
+          <Button v-if="!newlyCreatedToken" variant="outline" size="xs" @click="closeCreateModal">取消</Button>
+          <Button
+            v-if="!newlyCreatedToken"
+            size="xs"
+            :disabled="creatingToken || !createTokenName.trim()"
+            @click="doCreateToken"
+          >
+            <LoaderCircle v-if="creatingToken" class="size-3 animate-spin mr-1" />
+            立即创建
+          </Button>
+          <Button v-else size="xs" @click="closeCreateModal">完成</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
 
-    <!-- 撤销确认 -->
-    <ConfirmDialog
-      :open="revokeTarget !== null"
-      :title="`撤销凭据「${revokeTarget?.name ?? ''}」？`"
-      description="使用该密钥的客户端将立即无法访问，且无法恢复。"
-      confirm-text="确认撤销"
-      destructive
-      :busy="revokingToken"
-      @update:open="(v) => !v && (revokeTarget = null)"
-      @confirm="doRevokeToken"
-    />
-
-    <!-- 清除凭据确认 -->
+    <!-- 清除已存管理员密钥确认 -->
     <ConfirmDialog
       :open="confirmForget"
-      title="清除本机管理员密钥？"
-      description="清除后需要重新输入管理员密钥才能管理网关。"
-      confirm-text="清除"
+      title="清除已存管理员密钥？"
+      description="清除后需重新输入并保存才能继续管理网关。密钥不会被服务器注销。"
+      confirm-text="确认清除"
       destructive
       @update:open="(v) => !v && (confirmForget = false)"
       @confirm="forgetToken"
     />
 
-    <!-- 清除隧道令牌确认 -->
+    <!-- 清除隧道密钥确认 -->
     <ConfirmDialog
       :open="confirmForgetTunnelToken"
-      title="清除隧道密钥？"
-      description="清除后将停止使用该隧道密钥进行中继出网。"
-      confirm-text="清除"
+      title="清除已存隧道密钥？"
+      description="清除后隧道中继将无法使用该密钥连接。"
+      confirm-text="确认清除"
       destructive
       @update:open="(v) => !v && (confirmForgetTunnelToken = false)"
       @confirm="forgetTunnelToken"
