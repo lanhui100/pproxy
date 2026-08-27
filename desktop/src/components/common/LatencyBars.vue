@@ -32,11 +32,11 @@ const BAR_COLOR: Record<LatencyTone, string> = {
 </script>
 
 <template>
-  <div class="inline-flex items-center gap-1" role="group" aria-label="近 1 小时连通性时序">
+  <div class="inline-flex items-center gap-0.5" role="group" aria-label="近 1 小时连通性时序">
     <div
       v-for="(slot, idx) in slots"
       :key="idx"
-      class="h-3.5 w-1.5 rounded-xs transition-all duration-150 cursor-pointer"
+      class="h-3.5 w-1 rounded-xs transition-all duration-150 cursor-pointer"
       :class="BAR_COLOR[getLatencyTone(slot, fastThreshold, warnThreshold)]"
       :title="formatSlotTooltip(slot)"
     />
