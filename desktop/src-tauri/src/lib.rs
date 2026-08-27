@@ -48,13 +48,16 @@ pub fn run() {
                 }
             }
             "proxy_on" => {
-                if let Err(e) = proxy_enable() {
-                    use tauri_plugin_notification::NotificationExt;
-                    let _ = app.notification().builder()
-                        .title("代理开启失败")
-                        .body(e)
-                        .show();
-                }
+                let app_handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = proxy_enable().await {
+                        use tauri_plugin_notification::NotificationExt;
+                        let _ = app_handle.notification().builder()
+                            .title("代理开启失败")
+                            .body(e)
+                            .show();
+                    }
+                });
             }
             "proxy_off" => { let _ = proxy_disable(); }
             "quit" => {
