@@ -605,11 +605,10 @@ onMounted(async () => {
       </div>
 
       <!-- 最近一次生成的专线直出卡片 -->
-      <div v-if="lastCreated" class="rounded-lg bg-ok-soft/30 border border-ok/20 p-3.5 space-y-2.5">
+      <div v-if="lastCreated" class="rounded-xl bg-ok-soft/25 p-3.5 space-y-2.5 shadow-xs">
         <div class="flex items-center justify-between">
           <div class="text-xs font-semibold text-ok flex items-center gap-1.5">
             <span>🎉 专线「{{ lastCreated.service }}」接入就绪</span>
-            <span class="text-[11px] font-normal text-muted-foreground">（Token 已在设置页自动备案）</span>
           </div>
           <button type="button" class="text-xs text-muted-foreground hover:text-foreground cursor-pointer" @click="lastCreated = null">
             ✕
@@ -619,8 +618,8 @@ onMounted(async () => {
         <div class="grid gap-2 sm:grid-cols-2 text-xs">
           <!-- 公网接入地址 -->
           <div class="rounded-md bg-background p-2.5 space-y-1 shadow-xs">
-            <div class="text-[11px] font-medium text-muted-foreground flex items-center justify-between">
-              <span>公网 / 外部设备接入 URL</span>
+            <div class="text-[11px] flex items-center justify-between">
+              <span class="font-bold text-foreground">公网接入</span>
               <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[11px]" @click="copyUrl(lastCreated!.publicUrl, '公网接入地址')">
                 <Copy class="size-3 mr-1" />
                 复制
@@ -631,8 +630,8 @@ onMounted(async () => {
 
           <!-- 局域网接入地址 -->
           <div class="rounded-md bg-background p-2.5 space-y-1 shadow-xs">
-            <div class="text-[11px] font-medium text-muted-foreground flex items-center justify-between">
-              <span>局域网 / 本地接入 URL</span>
+            <div class="text-[11px] flex items-center justify-between">
+              <span class="font-bold text-foreground">局域网接入</span>
               <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[11px]" @click="copyUrl(lastCreated!.lanUrl, '局域网接入地址')">
                 <Copy class="size-3 mr-1" />
                 复制
