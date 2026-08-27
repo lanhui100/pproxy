@@ -19,10 +19,10 @@ function viewOf(table: Record<string, StatusView>, raw: string): StatusView {
 
 // QuotaSourceState 四态（上游额度）
 const QUOTA_SOURCE_VIEWS: Record<QuotaSourceState, StatusView> = {
-  ok: { label: '运行正常', tone: 'ok' },
-  disabled: { label: '已停用', tone: 'muted' },
-  error: { label: '异常', tone: 'error' },
-  unsupported_plan: { label: '套餐不支持', tone: 'warn' },
+  ok: { label: '额度正常', tone: 'ok' },
+  disabled: { label: '未配监控', tone: 'muted' },
+  error: { label: '监控不可用', tone: 'muted' },
+  unsupported_plan: { label: '免费版无监控', tone: 'muted' },
 }
 
 // TokenStatus 三态（设备密钥）

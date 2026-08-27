@@ -30,6 +30,41 @@ const markingId = ref<number | null>(null)
 const markAllBusy = ref(false)
 const showUsageDrawer = ref(false)
 
+// 真实出口连通性探活结果 (上游 -> { ok, ms, err })
+interface UpstreamProbe {
+  ok: boolean
+  ms?: number
+  err?: string
+}
+const upstreamProbes = ref<Record<string, UpstreamProbe>>({})
+
+async function probeUpstreamHealth(h: HealthResp): Promise<void> {
+  const routes = Object.entries(h.routes || {})
+  const testedUpstreams = new Set<string>()
+
+  for (const [name, cfg] of routes) {
+    if (!cfg.enabled) continue
+    const up = cfg.upstream || 'worker'
+    const upKey = up === 'worker' ? 'cf' : up
+    if (testedUpstreams.has(upKey)) continue
+
+    testedUpstreams.add(upKey)
+    try {
+      const res = await api.testRoute(name, { skipAuthRedirect: true })
+      upstreamProbes.value[upKey] = {
+        ok: res.ok,
+        ms: res.latency_ms ?? undefined,
+        err: res.error ? errText(res.error) : undefined,
+      }
+    } catch (e) {
+      upstreamProbes.value[upKey] = {
+        ok: false,
+        err: errText(e),
+      }
+    }
+  }
+}
+
 async function pollDashboard(): Promise<void> {
   error.value = ''
   try {
@@ -43,6 +78,9 @@ async function pollDashboard(): Promise<void> {
     usage.value = u
     quota.value = q
     unread.value = a.alerts
+
+    // 后台轻量触发出口真实连通性探活
+    void probeUpstreamHealth(h)
   } catch (e) {
     error.value = errText(e)
     throw e
@@ -66,12 +104,29 @@ const dbView = computed(() =>
   health.value?.db === 'ok' ? { label: '网关运行正常', tone: 'ok' as Tone } : { label: '网关异常', tone: 'error' as Tone },
 )
 
-// 上游额度
+// 上游出口健康度聚合
 const quotaSources = computed(() => quota.value?.sources ?? [])
 
-function isQuotaAbnormal(state: string): boolean {
-  const tone = quotaSourceLabel(state).tone
-  return tone === 'error' || tone === 'warn'
+function getUpstreamCardView(sourceName: string, sourceState: string): { label: string; tone: Tone; tip?: string } {
+  const probe = upstreamProbes.value[sourceName]
+  // 1. 若真实出口探活已拿到结果且畅通
+  if (probe && probe.ok) {
+    return {
+      label: `畅通 · ${probe.ms ?? 0}ms`,
+      tone: 'ok',
+      tip: sourceState === 'unsupported_plan' ? '真实中转连通畅通；Vercel 免费版不提供用量查询 API' : undefined,
+    }
+  }
+  // 2. 若真实出口探活明确失败
+  if (probe && !probe.ok) {
+    return {
+      label: `出口异常: ${probe.err || '超时'}`,
+      tone: 'error',
+    }
+  }
+  // 3. 回退为官方配额接口状态
+  const qv = quotaSourceLabel(sourceState)
+  return { label: qv.label, tone: qv.tone }
 }
 
 // 告警
@@ -212,25 +267,32 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
           </CardContent>
         </Card>
 
-        <!-- 卡 3：上游额度监控 -->
+        <!-- 卡 3：上游出口与额度监控 (CF / Vercel) -->
         <Card class="flex flex-col justify-between">
           <CardContent class="p-4 flex flex-1 flex-col">
             <div class="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-              <span>上游中转额度（Cloudflare / Vercel 等）</span>
-              <InfoTip text="中转线路的免费用量额度，触顶后会临时限流，次日自动重置" />
+              <span>上游中转出口与连通度</span>
+              <InfoTip text="中转线路出口的连通性与免费配额状态，自动双轨轮询探活" />
             </div>
             <div v-if="quotaSources.length > 0" class="mt-3 space-y-2">
               <div v-for="s in quotaSources" :key="s.name" class="flex items-start justify-between gap-2">
                 <div class="min-w-0">
-                  <span class="block truncate text-xs font-medium">{{ upstreamLabel(s.name).label }}</span>
-                  <span v-if="isQuotaAbnormal(s.state)" class="block text-[11px] tabular-nums text-muted-foreground">
-                    {{ s.last_ok === null ? '未成功' : `上次正常: ${fmtRelative(s.last_ok * 1000)}` }}
+                  <span class="block truncate text-xs font-medium flex items-center gap-1">
+                    {{ upstreamLabel(s.name).label }}
+                    <InfoTip v-if="getUpstreamCardView(s.name, s.state).tip" :text="getUpstreamCardView(s.name, s.state).tip!" />
+                  </span>
+                  <span v-if="s.last_ok !== null && s.state === 'error'" class="block text-[11px] tabular-nums text-muted-foreground">
+                    上次正常: {{ fmtRelative(s.last_ok * 1000) }}
                   </span>
                 </div>
-                <StatusDot v-bind="quotaSourceLabel(s.state)" class="shrink-0 text-xs" />
+                <StatusDot
+                  :tone="getUpstreamCardView(s.name, s.state).tone"
+                  :label="getUpstreamCardView(s.name, s.state).label"
+                  class="shrink-0 text-xs"
+                />
               </div>
             </div>
-            <p v-else class="mt-3 text-xs text-muted-foreground">暂无额度数据</p>
+            <p v-else class="mt-3 text-xs text-muted-foreground">暂无可用中转线路</p>
             <button
               type="button"
               class="mt-auto pt-3 text-left text-xs font-medium text-primary hover:underline cursor-pointer"

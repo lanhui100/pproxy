@@ -5,10 +5,10 @@ import { alertLevelView, quotaSourceLabel, tokenStatusLabel, upstreamLabel } fro
 
 describe('quotaSourceLabel', () => {
   it('四态映射', () => {
-    expect(quotaSourceLabel('ok')).toEqual({ label: '运行正常', tone: 'ok' })
-    expect(quotaSourceLabel('disabled')).toEqual({ label: '已停用', tone: 'muted' })
-    expect(quotaSourceLabel('error')).toEqual({ label: '异常', tone: 'error' })
-    expect(quotaSourceLabel('unsupported_plan')).toEqual({ label: '套餐不支持', tone: 'warn' })
+    expect(quotaSourceLabel('ok')).toEqual({ label: '额度正常', tone: 'ok' })
+    expect(quotaSourceLabel('disabled')).toEqual({ label: '未配监控', tone: 'muted' })
+    expect(quotaSourceLabel('error')).toEqual({ label: '监控不可用', tone: 'muted' })
+    expect(quotaSourceLabel('unsupported_plan')).toEqual({ label: '免费版无监控', tone: 'muted' })
   })
 })
 
