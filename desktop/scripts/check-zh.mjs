@@ -15,7 +15,7 @@ const ROOT = fileURLToPath(new URL('../src', import.meta.url))
 const WHITELIST_WORDS = new Set([
   // 服务与专有名词
   'OpenAI', 'Anthropic', 'Gemini', 'GitHub', 'OpenRouter', 'Groq', 'Mistral', 'xAI',
-  'Hugging', 'Face', 'Twitter', 'Pony', 'Proxy', 'Vercel', 'Worker', 'PowerShell', 'bash', 'cURL', 'SDK', 'Code', 'Cursor', 'NextChat', 'Chatbox', 'Python',
+  'Hugging', 'Face', 'Twitter', 'Pony', 'Proxy', 'Vercel', 'Worker', 'PowerShell', 'bash', 'cURL', 'SDK', 'Code', 'Cursor', 'NextChat', 'Chatbox', 'Python', 'CF',
   // 技术 token（界面允许保留的）
   'token', 'admin', 'base_url', 'API', 'APIs', 'URL', 'URLs', 'ID', 'id', 'OS', 'HTTP', 'Cloudflare', 'ms', 'YOUR_TOKEN', 'YOUR_API_KEY', 'lt', 'gt',
 ])

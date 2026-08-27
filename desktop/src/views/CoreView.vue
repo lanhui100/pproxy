@@ -21,7 +21,6 @@ import LatencyBars from '@/components/common/LatencyBars.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SkeletonTable from '@/components/common/SkeletonTable.vue'
 import StatusDot from '@/components/common/StatusDot.vue'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { useAdaptivePoll } from '@/composables/useAdaptivePoll'
@@ -172,6 +171,7 @@ const lastCreated = ref<CreatedAccessResult | null>(null)
 const STORAGE_KEY = 'pony_route_latency_history_v1'
 const routeHistories = ref<Record<string, LatencyPoint[]>>({})
 const probingRoute = ref<string>('')
+const switchingRoute = ref<string>('')
 
 // 编辑与删除
 const deleteTarget = ref<RouteDto | null>(null)
@@ -222,13 +222,18 @@ function getBaseUrls(): { publicBase: string; lanBase: string } {
   return { publicBase, lanBase }
 }
 
-function buildServiceUrls(service: string, token: string): { publicUrl: string; lanUrl: string } {
+function buildServiceUrls(service: string, token: string, subPath = ''): { publicUrl: string; lanUrl: string } {
   const { publicBase, lanBase } = getBaseUrls()
   const tok = token.trim() || 'default_token'
+  const cleanPath = subPath ? (subPath.startsWith('/') ? subPath : `/${subPath}`) : '/v1'
   return {
-    publicUrl: `${publicBase.replace(/\/$/, '')}/${tok}/${service}/v1`,
-    lanUrl: `${lanBase.replace(/\/$/, '')}/${tok}/${service}/v1`,
+    publicUrl: `${publicBase.replace(/\/$/, '')}/${tok}/${service}${cleanPath}`,
+    lanUrl: `${lanBase.replace(/\/$/, '')}/${tok}/${service}${cleanPath}`,
   }
+}
+
+function getRouteUpstreamKey(r: RouteDto): string {
+  return r.override_upstream || r.effective_upstream || r.upstream || 'worker'
 }
 
 async function refreshRoutes(): Promise<void> {
@@ -320,19 +325,20 @@ async function submitSmartAccess(): Promise<void> {
     return
   }
   addingRoute.value = true
-  const { inferredName, cleanHost } = parsedUrl.value
+  const { inferredName, cleanHost, subPath } = parsedUrl.value
 
   try {
-    // 1. 自动为该服务创建专属 Token
+    // 1. 自动为该服务创建专属 Token（名称符合 ^[a-zA-Z0-9._-]{1,64}$ 规范）
+    const tokenName = `route_${inferredName.replace(/[^a-zA-Z0-9._-]/g, '_')}`.slice(0, 60)
     let tokenStr = getSessionSecret() || ''
     try {
       const tokRes = await api.createToken({
-        name: `专线: ${cleanHost}`,
+        name: tokenName,
       })
       tokenStr = tokRes.token
       setSessionSecret(tokRes.token, tokRes.name)
     } catch {
-      /* 若已存在或静默沿用 */
+      /* 若已存在同名密钥则沿用当前会话密钥 */
     }
 
     // 2. 创建服务路由
@@ -346,8 +352,8 @@ async function submitSmartAccess(): Promise<void> {
       await addWhitelistEntry(cleanHost)
     }
 
-    // 4. 生成成品专线 URL（含已拼入的 Token）
-    const urls = buildServiceUrls(inferredName, tokenStr)
+    // 4. 生成成品专线 URL（含已拼入的 Token 与完整子路径）
+    const urls = buildServiceUrls(inferredName, tokenStr, subPath)
     lastCreated.value = {
       service: inferredName,
       token: tokenStr,
@@ -358,11 +364,26 @@ async function submitSmartAccess(): Promise<void> {
     inputUrl.value = ''
     await refreshRoutes()
     void testSingleRoute({ name: inferredName })
-    toast.success(`服务「${inferredName}」已接入，专线已就绪`)
+    toast.success(`专线「${inferredName}」已接入就绪`)
   } catch (e) {
-    toast.error(errText(e))
+    toast.error('创建专线失败', errText(e))
   } finally {
     addingRoute.value = false
+  }
+}
+
+// 手动切换线路（CF Worker <-> Vercel）
+async function switchRouteUpstream(r: RouteDto, nextUpstream: 'worker' | 'vercel'): Promise<void> {
+  switchingRoute.value = r.name
+  try {
+    await api.patchRoute(r.name, { override_upstream: nextUpstream })
+    r.override_upstream = nextUpstream
+    toast.success(`「${r.name}」已切换至 ${upstreamLabel(nextUpstream).label}`)
+    void testSingleRoute({ name: r.name })
+  } catch (e) {
+    toast.error('切换线路失败', errText(e))
+  } finally {
+    switchingRoute.value = ''
   }
 }
 
@@ -553,7 +574,7 @@ onMounted(async () => {
         <div class="relative flex items-center rounded-lg bg-muted/50 p-1 shadow-xs">
           <input
             v-model="inputUrl"
-            placeholder="粘贴任意 API 地址，如 https://api.openai.com/v1 或 api.groq.com"
+            placeholder="粘贴任意 API 地址，如 https://api.openai.com/v1 或 opencode.ai/zen/v1"
             class="w-full bg-transparent pl-3 pr-24 py-2 text-xs font-mono outline-none"
             @keyup.enter="submitSmartAccess"
           />
@@ -626,7 +647,7 @@ onMounted(async () => {
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
             <h3 class="text-xs font-semibold text-foreground">已接入专线列表（{{ routes.length }}）</h3>
-            <span class="text-[11px] text-muted-foreground font-normal">（自动 30 分钟轮询测速）</span>
+            <span class="text-[11px] text-muted-foreground font-normal">（30 分钟轮询测速）</span>
           </div>
           <Button variant="ghost" size="xs" :disabled="routesLoading" @click="refreshRoutes">
             <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': routesLoading }" />
@@ -651,14 +672,33 @@ onMounted(async () => {
             class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg bg-muted/30 transition hover:bg-muted/50"
             :class="{ 'opacity-60': !r.enabled }"
           >
-            <!-- 左侧：服务信息与快捷复制 -->
-            <div class="space-y-1 min-w-0">
-              <div class="flex items-center gap-2">
-                <span class="font-medium text-xs font-mono">{{ r.name }}</span>
-                <span class="text-[11px] font-mono text-muted-foreground">{{ r.target_host }}</span>
-                <Badge variant="outline" class="text-[10px]">
-                  {{ upstreamLabel(r.upstream ?? '').label }}
-                </Badge>
+            <!-- 左侧：服务信息、线路切换器与快捷复制 -->
+            <div class="space-y-1.5 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-xs font-mono">{{ r.name }}</span>
+                <span class="text-[11px] font-mono text-muted-foreground">({{ r.target_host }})</span>
+                
+                <!-- 当前线路与手动切换器 (CF Worker <-> Vercel) -->
+                <div class="inline-flex items-center gap-1 rounded bg-muted/80 p-0.5 text-[10px]">
+                  <button
+                    type="button"
+                    class="rounded px-1.5 py-0.5 transition cursor-pointer font-medium"
+                    :class="getRouteUpstreamKey(r) === 'worker' || getRouteUpstreamKey(r) === 'cf' ? 'bg-primary text-primary-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
+                    :disabled="switchingRoute === r.name"
+                    @click="switchRouteUpstream(r, 'worker')"
+                  >
+                    CF Worker
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded px-1.5 py-0.5 transition cursor-pointer font-medium"
+                    :class="getRouteUpstreamKey(r) === 'vercel' ? 'bg-primary text-primary-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
+                    :disabled="switchingRoute === r.name"
+                    @click="switchRouteUpstream(r, 'vercel')"
+                  >
+                    Vercel 出口
+                  </button>
+                </div>
               </div>
 
               <!-- 快捷复制专线 URL -->
@@ -707,10 +747,10 @@ onMounted(async () => {
               <button
                 v-if="r.enabled"
                 type="button"
-                class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-background cursor-pointer transition"
+                class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-background cursor-pointer transition"
                 :disabled="probingRoute === r.name"
                 title="立即测速"
-                @click="testSingleRoute(r)"
+                @click="testSingleRoute({ name: r.name })"
               >
                 <RefreshCw class="size-3.5" :class="{ 'animate-spin': probingRoute === r.name }" />
               </button>
@@ -725,7 +765,7 @@ onMounted(async () => {
               <!-- 删除按钮 -->
               <button
                 type="button"
-                class="p-1 rounded-md text-muted-foreground hover:text-bad hover:bg-bad-soft cursor-pointer transition"
+                class="p-1.5 rounded-md text-muted-foreground hover:text-bad hover:bg-bad-soft cursor-pointer transition"
                 title="删除专线"
                 @click="deleteTarget = r"
               >
