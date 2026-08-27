@@ -153,6 +153,9 @@ async function rawRequest(
   const token = await tokenProvider()
   const headers: Record<string, string> = {}
   if (token) headers.Authorization = `Bearer ${token}`
+  if (body !== undefined && method !== 'GET') {
+    headers['Content-Type'] = 'application/json'
+  }
   const init: RequestInit = { method, headers }
   if (body !== undefined && method !== 'GET') {
     init.body = JSON.stringify(body)

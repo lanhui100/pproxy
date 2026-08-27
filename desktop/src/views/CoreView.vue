@@ -378,6 +378,7 @@ async function switchRouteUpstream(r: RouteDto, nextUpstream: 'worker' | 'vercel
   try {
     await api.patchRoute(r.name, { override_upstream: nextUpstream })
     r.override_upstream = nextUpstream
+    await refreshRoutes()
     toast.success(`「${r.name}」已切换至 ${upstreamLabel(nextUpstream).label}`)
     void testSingleRoute({ name: r.name })
   } catch (e) {
