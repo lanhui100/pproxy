@@ -438,42 +438,50 @@ function closeCreateModal(): void {
           </p>
         </div>
 
-        <div class="space-y-1">
-          <Label for="cfg-token" class="text-xs">管理员密钥</Label>
-          <Input
-            id="cfg-token"
-            ref="tokenInputRef"
-            v-model="tokenInput"
-            type="password"
-            placeholder="留空沿用本机已保存的密钥"
-            :aria-invalid="tokenFlash ? 'true' : undefined"
-            autocomplete="off"
-            class="text-xs"
-          />
-          <p class="text-[11px] leading-4 text-muted-foreground flex items-center justify-between">
-            <span>存于本机系统安全凭据库中。</span>
-            <button
-              v-if="hasStoredToken"
-              class="underline hover:text-foreground cursor-pointer"
-              @click="confirmForget = true"
-            >
-              清除已存密钥
-            </button>
-            <span v-else class="text-muted-foreground/60">当前未保存密钥</span>
-          </p>
-        </div>
+        <!-- 高级配置：折叠管理员密钥与数据面 Base URL -->
+        <details :open="authHint ? true : undefined" class="group rounded-lg bg-muted/40 p-3">
+          <summary class="flex cursor-pointer items-center justify-between font-medium text-xs text-muted-foreground select-none list-none">
+            <span>高级配置（管理员密钥与数据面）</span>
+            <ChevronDown class="size-4 text-muted-foreground transition-transform duration-200 group-open:rotate-180" />
+          </summary>
 
-        <!-- 数据面 Base URL（可选高级项） -->
-        <details class="rounded-lg bg-muted/40 p-2.5">
-          <summary class="cursor-pointer font-medium text-xs">高级：自定义数据面 Base URL</summary>
-          <div class="mt-2 space-y-1">
-            <Label for="cfg-data-plane" class="text-[11px]">数据面 Base URL（留空自动推导为 8899 端口）</Label>
-            <Input
-              id="cfg-data-plane"
-              v-model="dataPlaneInput"
-              placeholder="默认自动推导，如 http://100.x.x.x:8899"
-              class="h-8 text-xs font-mono"
-            />
+          <div class="mt-3 space-y-3 pt-1">
+            <!-- 管理员密钥 -->
+            <div class="space-y-1">
+              <Label for="cfg-token" class="text-xs">管理员密钥</Label>
+              <Input
+                id="cfg-token"
+                ref="tokenInputRef"
+                v-model="tokenInput"
+                type="password"
+                placeholder="留空沿用本机已保存的密钥"
+                :aria-invalid="tokenFlash ? 'true' : undefined"
+                autocomplete="off"
+                class="text-xs bg-background"
+              />
+              <p class="text-[11px] leading-4 text-muted-foreground flex items-center justify-between">
+                <span>存于本机系统安全凭据库中。</span>
+                <button
+                  v-if="hasStoredToken"
+                  class="underline hover:text-foreground cursor-pointer"
+                  @click="confirmForget = true"
+                >
+                  清除已存密钥
+                </button>
+                <span v-else class="text-muted-foreground/60">当前未保存密钥</span>
+              </p>
+            </div>
+
+            <!-- 数据面 Base URL -->
+            <div class="space-y-1">
+              <Label for="cfg-data-plane" class="text-[11px]">数据面 Base URL（留空自动推导为 8899 端口）</Label>
+              <Input
+                id="cfg-data-plane"
+                v-model="dataPlaneInput"
+                placeholder="默认自动推导，如 http://100.x.x.x:8899"
+                class="h-8 text-xs font-mono bg-background"
+              />
+            </div>
           </div>
         </details>
 
