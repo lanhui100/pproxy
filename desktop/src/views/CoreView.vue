@@ -1,16 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import {
+  Activity,
   Check,
   Copy,
   Globe,
-  Info,
   Loader2,
   LoaderCircle,
   Plus,
   RefreshCw,
   Sparkles,
-  Terminal,
   Zap,
 } from '@lucide/vue'
 
@@ -178,22 +177,37 @@ const configSnippets = computed<PresetSnippet[]>(() => {
 
   return generatePresetSnippets({
     dataPlaneBase,
-    token,
     service: configRouteName.value,
+    token,
     upstreamKey,
   })
 })
 
-const isTokenMissing = computed(() => {
-  const token = configCustomToken.value.trim() || getSessionSecret()
-  return !token
+const activeSnippet = computed(() =>
+  configSnippets.value.find((s) => s.id === activePresetTab.value) || configSnippets.value[0],
+)
+
+const activeDisplayCode = computed(() => {
+  if (!activeSnippet.value) return ''
+  return (
+    activeSnippet.value.psSnippet ||
+    activeSnippet.value.bashSnippet ||
+    activeSnippet.value.codeSnippet ||
+    activeSnippet.value.baseUrl
+  )
 })
+
+// 编辑与删除
+const deleteTarget = ref<RouteDto | null>(null)
+const deleting = ref(false)
+const testingRouteName = ref<string | null>(null)
 
 async function refreshRoutes(): Promise<void> {
   routesLoading.value = true
   routesError.value = ''
   try {
-    routes.value = (await api.listRoutes()).routes
+    const res = await api.listRoutes()
+    routes.value = res.routes
   } catch (e) {
     routesError.value = errText(e)
   } finally {
@@ -201,107 +215,90 @@ async function refreshRoutes(): Promise<void> {
   }
 }
 
-function selectPresetTemplate(tpl: { name: string; target_host: string }): void {
-  inputUrl.value = `https://${tpl.target_host}`
-}
-
 async function submitSmartAccess(): Promise<void> {
   if (!parsedUrl.value) {
-    toast.error('请输入有效的服务地址或域名')
+    toast.error('请输入有效的 API 地址或域名')
     return
   }
   addingRoute.value = true
-  const { cleanHost, inferredName, extractedKey, suggestedPreset } = parsedUrl.value
+  const { inferredName, cleanHost } = parsedUrl.value
 
   try {
-    const pureHost = cleanHost.split(':')[0] || cleanHost
-    // 1. 若路由不存在，则自动创建
-    const exists = routes.value.some((r) => r.name === inferredName)
-    if (!exists) {
-      await api.createRoute({
-        name: inferredName,
-        target_host: pureHost,
-      })
-      await refreshRoutes()
+    await api.createRoute({
+      name: inferredName,
+      target_host: cleanHost,
+    })
+
+    if (syncToWhitelist.value) {
+      await addWhitelistEntry(cleanHost)
     }
 
-    // 2. 智能联动加入加速名单
-    if (syncToWhitelist.value && pureHost) {
-      void addWhitelistEntry(pureHost)
-    }
-
-    // 3. 初始化弹窗上下文
+    inputUrl.value = ''
     configRouteName.value = inferredName
     configCustomToken.value = getSessionSecret() || ''
-    configCustomUpstreamKey.value = extractedKey || ''
-    activePresetTab.value = suggestedPreset === 'claude' ? 'claude' : suggestedPreset === 'cursor' ? 'cursor' : 'openai'
+    configCustomUpstreamKey.value = ''
     showConfigDialog.value = true
-    inputUrl.value = ''
-    toast.success(`服务「${inferredName}」已就绪`, '已生成专属客户端配置')
+    await refreshRoutes()
+    toast.success(`服务「${inferredName}」已接入就绪`)
   } catch (e) {
-    toast.error('接入失败', errText(e))
+    toast.error(errText(e))
   } finally {
     addingRoute.value = false
   }
 }
 
-// 复制配置助手
-async function copySnippet(text?: string): Promise<void> {
-  if (!text) return
-  try {
-    await copySecret(text, {
-      onCopied: () => toast.success('已复制到剪贴板（60 秒自动清理保护）'),
-    })
-  } catch {
-    toast.error('复制失败，请手动选择文本复制')
-  }
+function selectPresetTemplate(tpl: (typeof SERVICE_TEMPLATES)[number]): void {
+  inputUrl.value = `https://${tpl.target_host}`
 }
 
-// 行内开关与测速
-const togglingRoute = ref('')
-async function toggleRoute(r: RouteDto): Promise<void> {
-  togglingRoute.value = r.name
+function openRouteConfig(r: RouteDto): void {
+  configRouteName.value = r.name
+  configCustomToken.value = getSessionSecret() || ''
+  configCustomUpstreamKey.value = ''
+  showConfigDialog.value = true
+}
+
+async function copyActivePresetSnippet(): Promise<void> {
+  if (!activeDisplayCode.value) return
+  await copySecret(activeDisplayCode.value, {
+    onCopied: () => toast.success(`已复制 ${activeSnippet.value?.name || ''} 配置`),
+  })
+}
+
+async function toggleRouteEnabled(r: RouteDto, enabled: boolean): Promise<void> {
   try {
-    const resp = await api.patchRoute(r.name, { enabled: !r.enabled })
-    r.enabled = resp.enabled
+    await api.patchRoute(r.name, { enabled })
+    r.enabled = enabled
+    toast.success(`服务「${r.name}」已${enabled ? '启用' : '停用'}`)
   } catch (e) {
     toast.error(errText(e))
-  } finally {
-    togglingRoute.value = ''
   }
 }
-
-const testingRoute = ref('')
-const routeLatencies = ref<Record<string, { ok: boolean; ms?: number; err?: string }>>({})
 
 async function testSingleRoute(r: RouteDto): Promise<void> {
-  testingRoute.value = r.name
+  testingRouteName.value = r.name
   try {
-    const res = await api.testRoute(r.name, { skipAuthRedirect: true })
-    routeLatencies.value[r.name] = {
-      ok: res.ok,
-      ms: res.latency_ms ?? undefined,
-      err: res.error ? errText(res.error) : undefined,
+    const res = await api.testRoute(r.name)
+    if (res.ok) {
+      toast.success(`${r.name} 连接正常`, `延迟: ${res.latency_ms}ms`)
+    } else {
+      toast.error(`${r.name} 连接异常`, res.error ? errText(res.error) : '未能成功连通目标服务器')
     }
   } catch (e) {
-    routeLatencies.value[r.name] = { ok: false, err: errText(e) }
+    toast.error('测速失败', errText(e))
   } finally {
-    testingRoute.value = ''
+    testingRouteName.value = null
   }
 }
-
-// 删除确认
-const deleteTarget = ref<RouteDto | null>(null)
-const deleting = ref(false)
 
 async function doDeleteRoute(): Promise<void> {
   if (!deleteTarget.value) return
   deleting.value = true
   try {
     await api.deleteRoute(deleteTarget.value.name)
+    toast.success(`已删除服务「${deleteTarget.value.name}」`)
     deleteTarget.value = null
     await refreshRoutes()
-    toast.success('服务已移除')
   } catch (e) {
     toast.error(errText(e))
   } finally {
@@ -316,7 +313,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="space-y-8 max-w-3xl">
+  <div class="space-y-6">
     <PageHeader
       title="代理与服务"
       subtitle="Windows 系统全局透明加速与大模型 API 专线网关"
@@ -347,79 +344,108 @@ onMounted(() => {
         </div>
       </CardHeader>
 
-      <CardContent class="space-y-4 pt-2">
+      <CardContent class="space-y-3.5 pt-1">
         <p v-if="proxyError" class="rounded-lg bg-bad-soft px-3 py-2 text-xs text-bad break-all">
           {{ proxyError }}
         </p>
 
-        <!-- 连通性体检 -->
-        <div class="flex items-center justify-between rounded-lg bg-muted/40 p-2.5">
-          <div class="flex items-center gap-2 text-xs">
-            <span class="font-medium text-muted-foreground">网络状态:</span>
-            <template v-if="siteResults.length">
-              <span
-                v-for="r in siteResults"
-                :key="r.site"
-                class="inline-flex items-center gap-1 text-[11px] rounded bg-background px-1.5 py-0.5"
-              >
-                <StatusDot :tone="r.ok ? 'ok' : 'error'" :label="r.ok ? '正常' : '异常'" class="text-xs" />
-                <span>{{ r.site.replace(/.(com|org|net|ai|io|cn|top)$/i, '') }}</span>
-                <span v-if="r.ok" class="text-muted-foreground">{{ r.ms }}ms</span>
-              </span>
-            </template>
-            <span v-else class="text-muted-foreground">{{ proxyEnabled ? '等待体检' : '代理未开启' }}</span>
-          </div>
-          <Button
-            variant="outline"
-            size="xs"
-            :disabled="!proxyEnabled || testingSites"
-            @click="testSites"
-          >
-            <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': testingSites }" />
-            {{ testingSites ? '测速中…' : '测速体检' }}
-          </Button>
-        </div>
-
-        <!-- 加速域名白名单 -->
-        <div class="space-y-2">
+        <!-- 连通性体检（美观微网格卡片） -->
+        <div class="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-2.5">
           <div class="flex items-center justify-between">
-            <label class="text-xs font-medium text-muted-foreground flex items-center gap-1">
-              加速域名名单
-              <InfoTip text="添加主域名（如 google.com）将自动加速其全部子域名 (*.google.com)，修改即时热生效。" />
-            </label>
-            <span class="text-[11px] text-muted-foreground">{{ whitelistEntries.length }} 个域名</span>
-          </div>
-
-          <div class="flex gap-2">
-            <Input
-              v-model="newWhitelistEntry"
-              placeholder="输入需要加速的域名或网址，如 google.com"
-              class="h-8 text-xs bg-muted/50"
-              @keyup.enter="addWhitelistEntry()"
-            />
-            <Button size="xs" :disabled="!newWhitelistEntry.trim()" @click="addWhitelistEntry()">
-              <Plus class="size-3 mr-1" />
-              添加
+            <div class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+              <Activity class="size-3.5" />
+              <span>网络连通性体检</span>
+              <InfoTip text="通过本机代理探测常用全球站点的连接畅通度与延迟" />
+            </div>
+            <Button
+              variant="outline"
+              size="xs"
+              class="h-7 px-2.5 text-xs"
+              :disabled="!proxyEnabled || testingSites"
+              @click="testSites"
+            >
+              <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': testingSites }" />
+              {{ testingSites ? '测速中…' : '测速体检' }}
             </Button>
           </div>
 
-          <div v-if="whitelistEntries.length" class="flex flex-wrap gap-1.5 pt-1">
-            <span
-              v-for="(e, i) in whitelistEntries"
-              :key="e"
-              class="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-xs text-foreground/80 hover:bg-muted/80"
+          <!-- 网格卡片展示：2 列 / 4 列响应式微卡 -->
+          <div v-if="siteResults.length" class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
+            <div
+              v-for="r in siteResults"
+              :key="r.site"
+              class="flex items-center justify-between p-2 rounded-md border border-border/40 bg-background text-xs"
             >
-              {{ e }}
-              <button
-                type="button"
-                class="rounded-full text-muted-foreground hover:text-bad leading-none p-0.5 cursor-pointer"
-                @click="removeWhitelistEntry(i)"
-              >
-                ×
-              </button>
-            </span>
+              <div class="flex items-center gap-1.5 min-w-0">
+                <StatusDot :tone="r.ok ? 'ok' : 'error'" size="md" />
+                <span class="font-medium truncate">{{ r.site.replace(/\.(com|org|net|ai|io|cn|top)$/i, '') }}</span>
+              </div>
+              <span v-if="r.ok" class="font-mono text-[11px] font-medium text-foreground tabular-nums">
+                {{ r.ms }}ms
+              </span>
+              <span v-else class="text-[11px] text-bad font-medium truncate max-w-16" :title="r.error">
+                {{ r.error || '超时' }}
+              </span>
+            </div>
           </div>
+          <p v-else class="text-xs text-muted-foreground py-0.5">
+            {{ proxyEnabled ? '点击右上角「测速体检」测试常用站点延迟' : '开启系统代理后可进行连通性测速体检' }}
+          </p>
         </div>
+
+        <!-- 加速域名名单（默认折叠，需要时展开） -->
+        <details class="group rounded-lg border border-border/50 bg-muted/20 p-3">
+          <summary class="flex cursor-pointer items-center justify-between font-medium text-xs text-muted-foreground select-none">
+            <div class="flex items-center gap-1.5">
+              <span>加速域名名单</span>
+              <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground font-mono">
+                {{ whitelistEntries.length }} 个
+              </span>
+              <InfoTip text="添加主域名（如 google.com）将自动加速其全部子域名 (*.google.com)，修改即时热生效。" />
+            </div>
+            <span class="text-[11px] text-primary group-open:rotate-180 transition-transform duration-200">
+              ▾
+            </span>
+          </summary>
+
+          <div class="mt-3 space-y-2.5 pt-1">
+            <div class="flex gap-2">
+              <Input
+                v-model="newWhitelistEntry"
+                placeholder="输入需要加速的域名或网址，如 google.com"
+                class="h-8 text-xs bg-background flex-1"
+                @keyup.enter="addWhitelistEntry()"
+              />
+              <Button
+                size="xs"
+                class="h-8 px-3 text-xs shrink-0"
+                :disabled="!newWhitelistEntry.trim()"
+                @click="addWhitelistEntry()"
+              >
+                <Plus class="size-3 mr-1" />
+                添加
+              </Button>
+            </div>
+
+            <div v-if="whitelistEntries.length" class="flex flex-wrap gap-1.5">
+              <span
+                v-for="(e, i) in whitelistEntries"
+                :key="e"
+                class="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-0.5 text-xs text-foreground/80 hover:bg-muted/80"
+              >
+                {{ e }}
+                <button
+                  type="button"
+                  class="rounded-full text-muted-foreground hover:text-bad leading-none p-0.5 cursor-pointer"
+                  @click="removeWhitelistEntry(i)"
+                >
+                  ×
+                </button>
+              </span>
+            </div>
+            <p v-else class="text-[11px] text-muted-foreground">名单为空，可在上方输入框添加</p>
+          </div>
+        </details>
       </CardContent>
     </Card>
 
@@ -456,11 +482,12 @@ onMounted(() => {
             <Input
               v-model="inputUrl"
               placeholder="粘贴任意 API 地址，如 https://api.openai.com/v1 或 api.groq.com"
-              class="h-9 text-xs bg-background font-mono"
+              class="h-9 text-xs bg-background font-mono flex-1"
               @keyup.enter="submitSmartAccess"
             />
             <Button
               size="sm"
+              class="h-9 px-4 text-xs font-medium shrink-0"
               :disabled="!inputUrl.trim() || addingRoute"
               @click="submitSmartAccess"
             >
@@ -478,85 +505,73 @@ onMounted(() => {
             </span>
             <label class="flex items-center gap-1.5 text-[11px] cursor-pointer">
               <input v-model="syncToWhitelist" type="checkbox" class="rounded text-primary" />
-              同步加入加速名单
+              同时加入 Windows 代理加速名单
             </label>
           </div>
         </CardContent>
       </Card>
 
       <!-- 已配置服务列表 -->
-      <div class="space-y-2 pt-2">
-        <div class="flex items-center justify-between">
-          <h3 class="text-xs font-semibold text-muted-foreground">已接入服务（{{ routes.length }}）</h3>
-          <Button variant="ghost" size="xs" :disabled="routesLoading" @click="refreshRoutes">
-            <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': routesLoading }" />
-            刷新列表
-          </Button>
-        </div>
-
-        <SkeletonTable v-if="routesLoading && routes.length === 0" :rows="3" />
-        <EmptyState
-          v-else-if="routes.length === 0"
-          title="还没有接入任何服务"
-          description="在上方粘贴 API 地址或点击常用模板，一键建立专线接入。"
-        />
-        <Card v-else class="overflow-hidden py-1">
-          <Table>
+      <Card>
+        <CardHeader class="pb-3">
+          <div class="flex items-center justify-between">
+            <CardTitle class="text-sm font-semibold">已接入专线列表</CardTitle>
+            <Button variant="ghost" size="xs" :disabled="routesLoading" @click="refreshRoutes">
+              <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': routesLoading }" />
+              刷新
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent class="p-0">
+          <SkeletonTable v-if="routesLoading && routes.length === 0" :rows="3" />
+          <EmptyState
+            v-else-if="routes.length === 0"
+            title="还没有添加任何专线服务"
+            description="在上方粘贴 API 地址或点击常用大模型预设，一键创建加速专线。"
+          />
+          <Table v-else>
             <TableHeader>
-              <TableRow class="text-xs">
-                <TableHead class="pl-4">服务名</TableHead>
-                <TableHead>目标地址</TableHead>
-                <TableHead>中转线路</TableHead>
-                <TableHead>启用</TableHead>
-                <TableHead>连通性</TableHead>
-                <TableHead class="pr-4 text-right">操作</TableHead>
+              <TableRow>
+                <TableHead class="text-xs">服务标识</TableHead>
+                <TableHead class="text-xs">目标地址</TableHead>
+                <TableHead class="text-xs">中转线路</TableHead>
+                <TableHead class="text-xs">状态</TableHead>
+                <TableHead class="text-right text-xs">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              <TableRow v-for="r in routes" :key="r.name" class="text-xs border-b border-border/40">
-                <TableCell class="pl-4 font-medium">{{ r.name }}</TableCell>
-                <TableCell class="font-mono text-[11px] text-muted-foreground">{{ r.target_host }}</TableCell>
+              <TableRow v-for="r in routes" :key="r.name">
+                <TableCell class="font-medium text-xs font-mono">{{ r.name }}</TableCell>
+                <TableCell class="text-xs font-mono text-muted-foreground">{{ r.target_host }}</TableCell>
                 <TableCell>
-                  <Badge variant="secondary" class="text-[10px]">{{ upstreamLabel(r.effective_upstream).label }}</Badge>
+                  <Badge variant="outline" class="text-[10px]">
+                    {{ upstreamLabel(r.upstream ?? '').label }}
+                  </Badge>
                 </TableCell>
                 <TableCell>
                   <Switch
                     :model-value="r.enabled"
-                    :disabled="togglingRoute === r.name"
-                    @update:model-value="toggleRoute(r)"
+                    size="sm"
+                    @update:model-value="(val: boolean) => toggleRouteEnabled(r, val)"
                   />
                 </TableCell>
-                <TableCell>
-                  <template v-if="testingRoute === r.name">
-                    <span class="text-muted-foreground animate-pulse">测速中…</span>
-                  </template>
-                  <template v-else-if="routeLatencies[r.name]">
-                    <StatusDot
-                      v-if="routeLatencies[r.name]?.ok"
-                      tone="ok"
-                      :label="`正常 · ${routeLatencies[r.name]?.ms ?? '?'}ms`"
-                    />
-                    <StatusDot
-                      v-else
-                      tone="error"
-                      :label="`失败: ${routeLatencies[r.name]?.err || '超时'}`"
-                    />
-                  </template>
-                  <span v-else class="text-muted-foreground">未测</span>
-                </TableCell>
-                <TableCell class="pr-4 text-right space-x-1">
+                <TableCell class="text-right space-x-1">
                   <Button
                     variant="outline"
                     size="xs"
-                    :disabled="testingRoute === r.name"
+                    :disabled="testingRouteName === r.name"
                     @click="testSingleRoute(r)"
                   >
+                    <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': testingRouteName === r.name }" />
                     测速
+                  </Button>
+                  <Button variant="default" size="xs" @click="openRouteConfig(r)">
+                    客户端配置
                   </Button>
                   <Button
                     variant="ghost"
                     size="xs"
-                    class="text-bad hover:bg-bad-soft hover:text-bad"
+                    class="text-bad hover:bg-bad-soft"
                     @click="deleteTarget = r"
                   >
                     删除
@@ -565,140 +580,98 @@ onMounted(() => {
               </TableRow>
             </TableBody>
           </Table>
-        </Card>
-      </div>
+        </CardContent>
+      </Card>
     </div>
 
     <!-- ==================== 3. 客户端成品配置弹窗 ==================== -->
     <Dialog :open="showConfigDialog" @update:open="(v) => (showConfigDialog = v)">
-      <DialogContent class="sm:max-w-xl">
+      <DialogContent class="sm:max-w-2xl max-h-[85vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle class="flex items-center gap-2">
-            <Terminal class="size-4 text-primary" />
-            「{{ configRouteName }}」专线配置已生成
+          <DialogTitle class="flex items-center gap-2 text-base">
+            <Sparkles class="size-4 text-primary" />
+            「{{ configRouteName }}」客户端接入指南
           </DialogTitle>
         </DialogHeader>
 
-        <div class="space-y-4 pt-1">
-          <!-- Token 缺失警告与实时补充 -->
-          <div v-if="isTokenMissing" class="rounded-lg bg-warn-soft p-3 text-xs text-warn space-y-2">
-            <div class="flex items-start gap-2">
-              <Info class="size-4 shrink-0 mt-0.5" />
-              <span>当前未暂存设备密钥，上方代码使用了占位符 <code>&lt;YOUR_TOKEN&gt;</code>。你可直接在下方填入设备密钥实时替换代码。</span>
-            </div>
-            <div class="flex gap-2 pt-1">
-              <Input
-                v-model="configCustomToken"
-                placeholder="在此填入你的设备密钥（如 pony_live_xxx）"
-                class="h-7 text-xs bg-background text-foreground"
-              />
-            </div>
-          </div>
-
-          <!-- 预设 Tab 切换 -->
-          <div class="flex gap-1 rounded-lg bg-muted/60 p-1 text-xs overflow-x-auto">
-            <button
-              v-for="s in configSnippets"
-              :key="s.id"
-              type="button"
-              class="flex-1 min-w-20 rounded-md py-1.5 font-medium transition-colors cursor-pointer text-center"
-              :class="
-                activePresetTab === s.id
-                  ? 'bg-card text-foreground shadow-xs'
-                  : 'text-muted-foreground hover:text-foreground'
-              "
-              @click="activePresetTab = s.id"
-            >
-              {{ s.name }}
-            </button>
-          </div>
-
-          <!-- 当前 Tab 内容展示 -->
-          <template v-for="s in configSnippets" :key="s.id">
-            <div v-if="activePresetTab === s.id" class="space-y-3">
-              <!-- Base URL 框 -->
+        <div class="space-y-4 overflow-y-auto pr-1 py-1">
+          <!-- 密钥与 Base URL 实时覆盖 -->
+          <div class="rounded-lg border border-border/60 bg-muted/30 p-3 space-y-3">
+            <div class="text-xs font-medium text-foreground">快速替换代码占位符：</div>
+            <div class="grid gap-3 sm:grid-cols-2">
               <div class="space-y-1">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="font-medium text-muted-foreground">专属 Base URL</span>
-                  <Button variant="ghost" size="xs" @click="copySnippet(s.baseUrl)">
-                    <Copy class="size-3 mr-1" /> 复制地址
-                  </Button>
-                </div>
-                <code class="block break-all rounded-md bg-muted p-2.5 font-mono text-xs text-foreground select-all">
-                  {{ s.baseUrl }}
-                </code>
-              </div>
-
-              <!-- PowerShell 配置（Windows 优先） -->
-              <div v-if="s.psSnippet" class="space-y-1">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="font-medium text-muted-foreground">PowerShell 环境变量 (Windows 终端)</span>
-                  <Button variant="ghost" size="xs" @click="copySnippet(s.psSnippet)">
-                    <Copy class="size-3 mr-1" /> 一键复制
-                  </Button>
-                </div>
-                <pre class="overflow-x-auto rounded-md bg-muted p-2.5 font-mono text-xs text-foreground select-all">{{ s.psSnippet }}</pre>
-              </div>
-
-              <!-- Bash 配置 -->
-              <div v-if="s.bashSnippet" class="space-y-1">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="font-medium text-muted-foreground">Bash / Linux / macOS 环境变量</span>
-                  <Button variant="ghost" size="xs" @click="copySnippet(s.bashSnippet)">
-                    <Copy class="size-3 mr-1" /> 一键复制
-                  </Button>
-                </div>
-                <pre class="overflow-x-auto rounded-md bg-muted p-2.5 font-mono text-xs text-foreground select-all">{{ s.bashSnippet }}</pre>
-              </div>
-
-              <!-- 代码片段 -->
-              <div v-if="s.codeSnippet" class="space-y-1">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="font-medium text-muted-foreground">代码调用示例</span>
-                  <Button variant="ghost" size="xs" @click="copySnippet(s.codeSnippet)">
-                    <Copy class="size-3 mr-1" /> 复制代码
-                  </Button>
-                </div>
-                <pre class="overflow-x-auto rounded-md bg-muted p-2.5 font-mono text-xs text-foreground select-all">{{ s.codeSnippet }}</pre>
-              </div>
-
-              <p v-if="s.notes" class="text-xs text-ok bg-ok-soft px-3 py-1.5 rounded-md">
-                💡 {{ s.notes }}
-              </p>
-            </div>
-          </template>
-
-          <!-- 选填上游 API Key 替换 -->
-          <div class="pt-1 border-t border-border/50">
-            <details class="text-xs text-muted-foreground">
-              <summary class="cursor-pointer font-medium hover:text-foreground">可选：填入上游 API Key 自动拼入代码</summary>
-              <div class="pt-2 space-y-1">
-                <Label for="cfg-upstream-key" class="text-[11px]">上游 API Key</Label>
+                <Label for="cfg-token-override" class="text-[11px]">本机接入密钥 (Token)</Label>
                 <Input
-                  id="cfg-upstream-key"
-                  v-model="configCustomUpstreamKey"
-                  placeholder="如 sk-ant-api03-xxx 或 sk-proj-xxx"
+                  id="cfg-token-override"
+                  v-model="configCustomToken"
+                  type="password"
+                  placeholder="已自动载入本次会话密钥"
                   class="h-8 text-xs font-mono"
                 />
               </div>
-            </details>
+              <div class="space-y-1">
+                <Label for="cfg-upstream-key-override" class="text-[11px]">上游 API Key（如 OpenAI / Anthropic Key）</Label>
+                <Input
+                  id="cfg-upstream-key-override"
+                  v-model="configCustomUpstreamKey"
+                  type="password"
+                  placeholder="留空则生成占位符"
+                  class="h-8 text-xs font-mono"
+                />
+              </div>
+            </div>
+            <p v-if="!configCustomToken" class="text-[11px] text-warn">
+              ⚠️ 未检测到已缓存的设备密钥，可在下方配置中手动将“&lt;YOUR_TOKEN&gt;”替换为你在「设置」页创建的密钥。
+            </p>
+          </div>
+
+          <!-- 场景切换 Tab 药丸 -->
+          <div class="flex flex-wrap gap-1 border-b border-border/40 pb-2">
+            <button
+              v-for="snip in configSnippets"
+              :key="snip.id"
+              type="button"
+              class="rounded-md px-2.5 py-1 text-xs font-medium transition"
+              :class="
+                activePresetTab === snip.id
+                  ? 'bg-primary text-primary-foreground shadow-xs'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              "
+              @click="activePresetTab = snip.id"
+            >
+              {{ snip.name }}
+            </button>
+          </div>
+
+          <!-- 代码展示区 -->
+          <div v-if="activeSnippet" class="space-y-2">
+            <div class="flex items-center justify-between text-xs text-muted-foreground">
+              <span>{{ activeSnippet.title }}</span>
+              <Button size="xs" variant="outline" @click="copyActivePresetSnippet">
+                <Copy class="size-3 mr-1" />
+                一键复制
+              </Button>
+            </div>
+            <p v-if="activeSnippet.notes" class="text-[11px] text-muted-foreground">{{ activeSnippet.notes }}</p>
+            <pre class="overflow-x-auto rounded-lg bg-zinc-950 p-3.5 text-xs text-zinc-100 font-mono leading-relaxed select-all"><code>{{ activeDisplayCode }}</code></pre>
           </div>
         </div>
 
-        <DialogFooter>
-          <Button @click="showConfigDialog = false">
-            <Check class="size-3 mr-1" />
-            完成
+        <DialogFooter class="border-t border-border/40 pt-3">
+          <Button variant="outline" size="sm" @click="showConfigDialog = false">关闭</Button>
+          <Button size="sm" @click="copyActivePresetSnippet">
+            <Check class="size-3.5 mr-1" />
+            复制并完成
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
 
-    <!-- 删除确认 -->
+    <!-- 删除服务确认 -->
     <ConfirmDialog
       :open="deleteTarget !== null"
-      :title="`删除服务「${deleteTarget?.name ?? ''}」？`"
-      :description="`目标 ${deleteTarget?.target_host ?? ''} 将从网关移除，使用中的客户端将无法继续访问。`"
+      :title="`删除专线服务「${deleteTarget?.name ?? ''}」？`"
+      description="删除后，通过该专线路由的请求将无法连接。此操作不可恢复。"
       confirm-text="确认删除"
       destructive
       :busy="deleting"
