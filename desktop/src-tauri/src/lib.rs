@@ -129,8 +129,6 @@ fn credential_delete() -> Result<(), String> {
 // ---- M6 系统级白名单代理（spec m6 §4/§5）----
 use std::sync::atomic::{AtomicBool, Ordering as AOrd};
 
-const WL_KEY: &str = "pony-proxy-whitelist";
-
 #[tauri::command]
 fn proxy_whitelist_get() -> Vec<String> {
     let dir = data_dir();
@@ -244,7 +242,6 @@ fn tunnel_config_load() -> (Option<String>, Option<String>) {
 }
 
 static ENGINE_ON: AtomicBool = AtomicBool::new(false);
-static mut ENGINE_TASK: Option<tauri::async_runtime::JoinHandle<()>> = None;
 static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync::Mutex::new(None);
 
 #[tauri::command]

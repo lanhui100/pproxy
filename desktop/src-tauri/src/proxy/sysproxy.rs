@@ -8,6 +8,7 @@
 //! WM_SETTINGCHANGE 使运行中应用感知。非 Windows 平台为 no-op。
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum Mode {
     Pac,
     Manual,
@@ -93,7 +94,7 @@ fn broadcast_change() {
             HWND_BROADCAST,
             WM_SETTINGCHANGE,
             0,
-            "Internet Settings\0".as_ptr() as _,
+            c"Internet Settings".as_ptr() as _,
             SMTO_ABORTIFHUNG,
             1000,
             std::ptr::null_mut(),

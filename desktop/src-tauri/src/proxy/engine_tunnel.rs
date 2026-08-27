@@ -124,7 +124,7 @@ pub async fn connect_and_relay(
 /// 双向透传（单任务 select 驱动）：客户端读 ↔ WS 读任一事件即处理，
 /// 顺带应答 WS Ping/Pong（CF 侧空闲判定不误杀长连接）。
 async fn relay(
-    mut client: TcpStream,
+    client: TcpStream,
     mut ws_tx: futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>,
     mut ws_rx: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>,
 ) -> std::io::Result<()> {

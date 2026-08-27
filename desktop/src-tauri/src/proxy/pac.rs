@@ -3,8 +3,6 @@
 //! 返回串格式钉死：命中条目 → 单条 `PROXY 127.0.0.1:18900`（**无 DIRECT 兜底**，
 //! 防隧道失败静默裸连的安全错觉）；未命中 → `DIRECT`。
 
-use super::whitelist;
-
 pub const PROXY_HOST: &str = "127.0.0.1";
 pub const PROXY_PORT: u16 = 18900;
 
@@ -18,9 +16,13 @@ pub fn generate_pac(entries: &[String]) -> String {
     format!(
         r#"// pony-desktop PAC — 自动生成，请勿手改
 function FindProxyForURL(url, host) {{
-  var entries = [{list}];
   var h = host.toLowerCase();
   while (h.endsWith('.')) {{ h = h.slice(0, -1); }}
+  // 本地地址始终直连（防桌面端连接后端时被代理拦截）
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') {{
+    return 'DIRECT';
+  }}
+  var entries = [{list}];
   for (var i = 0; i < entries.length; i++) {{
     var e = entries[i];
     if (h === e || h.indexOf('.' + e) === h.length - e.length - 1) {{
@@ -65,5 +67,14 @@ mod tests {
         let pac = generate_pac(&[]);
         assert!(pac.contains("var entries = [];"));
         assert!(pac.contains("return 'DIRECT';"));
+    }
+
+    #[test]
+    fn pac_always_direct_for_localhost_and_loopback() {
+        // 本地地址必须直连，否则桌面端连接后端时会被代理拦截
+        let pac = generate_pac(&["youtube.com".to_string()]);
+        assert!(pac.contains("h === 'localhost'"), "应排除 localhost");
+        assert!(pac.contains("h === '127.0.0.1'"), "应排除 127.0.0.1");
+        assert!(pac.contains("h === '::1'"), "应排除 IPv6 loopback");
     }
 }
