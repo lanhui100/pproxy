@@ -30,38 +30,65 @@ const markingId = ref<number | null>(null)
 const markAllBusy = ref(false)
 const showUsageDrawer = ref(false)
 
-// 真实出口连通性探活结果 (上游 -> { ok, ms, err })
-interface UpstreamProbe {
+// 真实出口与服务连通性探活结果
+interface ProbeResult {
   ok: boolean
   ms?: number
   err?: string
 }
-const upstreamProbes = ref<Record<string, UpstreamProbe>>({})
+const upstreamProbes = ref<Record<string, ProbeResult>>({})
+const routeProbes = ref<Record<string, ProbeResult>>({})
+const probingRoute = ref<string>('')
 
-async function probeUpstreamHealth(h: HealthResp): Promise<void> {
-  const routes = Object.entries(h.routes || {})
-  const testedUpstreams = new Set<string>()
-
-  for (const [name, cfg] of routes) {
+async function probeAllRoutes(h: HealthResp): Promise<void> {
+  const entries = Object.entries(h.routes || {})
+  for (const [name, cfg] of entries) {
     if (!cfg.enabled) continue
     const up = cfg.upstream || 'worker'
     const upKey = up === 'worker' ? 'cf' : up
-    if (testedUpstreams.has(upKey)) continue
 
-    testedUpstreams.add(upKey)
     try {
       const res = await api.testRoute(name, { skipAuthRedirect: true })
-      upstreamProbes.value[upKey] = {
+      const result: ProbeResult = {
         ok: res.ok,
         ms: res.latency_ms ?? undefined,
         err: res.error ? errText(res.error) : undefined,
       }
+      routeProbes.value[name] = result
+
+      // 同时更新上游出口的代表性探活结果
+      if (!upstreamProbes.value[upKey] || result.ok) {
+        upstreamProbes.value[upKey] = result
+      }
     } catch (e) {
-      upstreamProbes.value[upKey] = {
+      const result: ProbeResult = {
         ok: false,
         err: errText(e),
       }
+      routeProbes.value[name] = result
+      if (!upstreamProbes.value[upKey]) {
+        upstreamProbes.value[upKey] = result
+      }
     }
+  }
+}
+
+async function testSingleRouteInDashboard(name: string): Promise<void> {
+  probingRoute.value = name
+  try {
+    const res = await api.testRoute(name, { skipAuthRedirect: true })
+    routeProbes.value[name] = {
+      ok: res.ok,
+      ms: res.latency_ms ?? undefined,
+      err: res.error ? errText(res.error) : undefined,
+    }
+  } catch (e) {
+    routeProbes.value[name] = {
+      ok: false,
+      err: errText(e),
+    }
+  } finally {
+    probingRoute.value = ''
   }
 }
 
@@ -79,8 +106,8 @@ async function pollDashboard(): Promise<void> {
     quota.value = q
     unread.value = a.alerts
 
-    // 后台轻量触发出口真实连通性探活
-    void probeUpstreamHealth(h)
+    // 后台轻量触发服务与出口真实连通性探活
+    void probeAllRoutes(h)
   } catch (e) {
     error.value = errText(e)
     throw e
@@ -109,7 +136,6 @@ const quotaSources = computed(() => quota.value?.sources ?? [])
 
 function getUpstreamCardView(sourceName: string, sourceState: string): { label: string; tone: Tone; tip?: string } {
   const probe = upstreamProbes.value[sourceName]
-  // 1. 若真实出口探活已拿到结果且畅通
   if (probe && probe.ok) {
     return {
       label: `畅通 · ${probe.ms ?? 0}ms`,
@@ -117,14 +143,12 @@ function getUpstreamCardView(sourceName: string, sourceState: string): { label: 
       tip: sourceState === 'unsupported_plan' ? '真实中转连通畅通；Vercel 免费版不提供用量查询 API' : undefined,
     }
   }
-  // 2. 若真实出口探活明确失败
   if (probe && !probe.ok) {
     return {
       label: `出口异常: ${probe.err || '超时'}`,
       tone: 'error',
     }
   }
-  // 3. 回退为官方配额接口状态
   const qv = quotaSourceLabel(sourceState)
   return { label: qv.label, tone: qv.tone }
 }
@@ -340,7 +364,7 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
         </ul>
       </section>
 
-      <!-- 核心服务健康度矩阵 -->
+      <!-- 核心服务健康度矩阵（含畅通性与延时指标） -->
       <section class="mt-6">
         <div class="mb-2 flex items-center justify-between">
           <h2 class="text-xs font-semibold tracking-tight text-foreground flex items-center gap-1.5">
@@ -366,12 +390,55 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
             <li
               v-for="[name, cfg] in routeEntries"
               :key="name"
-              class="mx-4 flex items-center gap-3 py-2.5 text-xs first:pt-2.5 last:pb-2.5"
+              class="mx-4 flex items-center justify-between gap-3 py-2.5 text-xs first:pt-2.5 last:pb-2.5"
               :class="{ 'opacity-60': !cfg.enabled }"
             >
-              <span class="font-medium min-w-20">{{ name }}</span>
-              <StatusDot :tone="cfg.enabled ? 'ok' : 'muted'" :label="cfg.enabled ? '已启用' : '已停用'" class="text-xs" />
-              <span class="ml-auto shrink-0 font-mono text-[11px] text-muted-foreground">{{ upstreamLabel(cfg.upstream).label }}</span>
+              <!-- 服务名与中转出口 -->
+              <div class="flex items-center gap-2 min-w-36">
+                <span class="font-medium">{{ name }}</span>
+                <span class="font-mono text-[10px] text-muted-foreground rounded bg-muted px-1.5 py-0.5">
+                  {{ upstreamLabel(cfg.upstream).label }}
+                </span>
+              </div>
+
+              <!-- 畅通性与延时指标 -->
+              <div class="flex items-center gap-2">
+                <template v-if="!cfg.enabled">
+                  <StatusDot tone="muted" label="已停用" class="text-xs" />
+                </template>
+                <template v-else-if="probingRoute === name">
+                  <span class="text-[11px] text-muted-foreground animate-pulse">测速中…</span>
+                </template>
+                <template v-else-if="routeProbes[name]">
+                  <StatusDot
+                    v-if="routeProbes[name]?.ok"
+                    tone="ok"
+                    :label="`畅通 · ${routeProbes[name]?.ms ?? '?'}ms`"
+                    class="text-xs font-mono"
+                  />
+                  <StatusDot
+                    v-else
+                    tone="error"
+                    :label="`异常: ${routeProbes[name]?.err || '超时'}`"
+                    class="text-xs"
+                  />
+                </template>
+                <template v-else>
+                  <StatusDot tone="ok" label="启用中" class="text-xs" />
+                </template>
+
+                <!-- 行内单点快速复测 -->
+                <button
+                  v-if="cfg.enabled"
+                  type="button"
+                  class="text-muted-foreground hover:text-foreground cursor-pointer p-0.5"
+                  :disabled="probingRoute === name"
+                  title="重新测速"
+                  @click="testSingleRouteInDashboard(name)"
+                >
+                  <RefreshCw class="size-3" :class="{ 'animate-spin': probingRoute === name }" />
+                </button>
+              </div>
             </li>
           </ul>
         </Card>
