@@ -56,7 +56,6 @@ async function probeAllRoutes(h: HealthResp): Promise<void> {
       }
       routeProbes.value[name] = result
 
-      // 同时更新上游出口的代表性探活结果
       if (!upstreamProbes.value[upKey] || result.ok) {
         upstreamProbes.value[upKey] = result
       }
@@ -114,10 +113,10 @@ async function pollDashboard(): Promise<void> {
   }
 }
 
-// 接入自适应轮询：15 秒基础间隔，后台休眠与退避保护
+// 接入自适应轮询：5 分钟基础间隔，后台休眠与退避保护
 const { start, refreshNow, isPolling } = useAdaptivePoll(pollDashboard, {
-  baseIntervalMs: 15_000,
-  maxIntervalMs: 120_000,
+  baseIntervalMs: 300_000,
+  maxIntervalMs: 600_000,
   immediate: true,
 })
 
@@ -138,9 +137,9 @@ function getUpstreamCardView(sourceName: string, sourceState: string): { label: 
   const probe = upstreamProbes.value[sourceName]
   if (probe && probe.ok) {
     return {
-      label: `畅通 · ${probe.ms ?? 0}ms`,
+      label: `${probe.ms ?? 0}ms`,
       tone: 'ok',
-      tip: sourceState === 'unsupported_plan' ? '真实中转连通畅通；Vercel 免费版不提供用量查询 API' : undefined,
+      tip: sourceState === 'unsupported_plan' ? '真实中转连通正常；Vercel 免费版不提供用量查询 API' : undefined,
     }
   }
   if (probe && !probe.ok) {
@@ -312,7 +311,8 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
                 <StatusDot
                   :tone="getUpstreamCardView(s.name, s.state).tone"
                   :label="getUpstreamCardView(s.name, s.state).label"
-                  class="shrink-0 text-xs"
+                  size="md"
+                  class="shrink-0 text-xs font-mono font-medium"
                 />
               </div>
             </div>
@@ -364,7 +364,7 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
         </ul>
       </section>
 
-      <!-- 核心服务健康度矩阵（含畅通性与延时指标） -->
+      <!-- 核心服务健康度矩阵（语义大圆点 + 毫秒延时） -->
       <section class="mt-6">
         <div class="mb-2 flex items-center justify-between">
           <h2 class="text-xs font-semibold tracking-tight text-foreground flex items-center gap-1.5">
@@ -395,16 +395,16 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
             >
               <!-- 服务名与中转出口 -->
               <div class="flex items-center gap-2 min-w-36">
-                <span class="font-medium">{{ name }}</span>
+                <span class="font-medium text-foreground">{{ name }}</span>
                 <span class="font-mono text-[10px] text-muted-foreground rounded bg-muted px-1.5 py-0.5">
                   {{ upstreamLabel(cfg.upstream).label }}
                 </span>
               </div>
 
-              <!-- 畅通性与延时指标 -->
-              <div class="flex items-center gap-2">
+              <!-- 语义大圆点 + 毫秒延时 -->
+              <div class="flex items-center gap-2.5">
                 <template v-if="!cfg.enabled">
-                  <StatusDot tone="muted" label="已停用" class="text-xs" />
+                  <StatusDot tone="muted" label="已停用" size="md" class="text-xs text-muted-foreground" />
                 </template>
                 <template v-else-if="probingRoute === name">
                   <span class="text-[11px] text-muted-foreground animate-pulse">测速中…</span>
@@ -413,25 +413,27 @@ const routeEntries = computed(() => Object.entries(health.value?.routes ?? {}))
                   <StatusDot
                     v-if="routeProbes[name]?.ok"
                     tone="ok"
-                    :label="`畅通 · ${routeProbes[name]?.ms ?? '?'}ms`"
-                    class="text-xs font-mono"
+                    :label="`${routeProbes[name]?.ms ?? '?'}ms`"
+                    size="md"
+                    class="text-xs font-mono font-medium text-foreground"
                   />
                   <StatusDot
                     v-else
                     tone="error"
                     :label="`异常: ${routeProbes[name]?.err || '超时'}`"
-                    class="text-xs"
+                    size="md"
+                    class="text-xs text-bad"
                   />
                 </template>
                 <template v-else>
-                  <StatusDot tone="ok" label="启用中" class="text-xs" />
+                  <StatusDot tone="ok" size="md" class="text-xs" />
                 </template>
 
                 <!-- 行内单点快速复测 -->
                 <button
                   v-if="cfg.enabled"
                   type="button"
-                  class="text-muted-foreground hover:text-foreground cursor-pointer p-0.5"
+                  class="text-muted-foreground/60 hover:text-foreground cursor-pointer p-0.5 transition-colors"
                   :disabled="probingRoute === name"
                   title="重新测速"
                   @click="testSingleRouteInDashboard(name)"
