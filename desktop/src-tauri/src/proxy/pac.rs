@@ -85,8 +85,7 @@ impl std::str::FromStr for ProxyMode {
 /// 由白名单条目及工作模式生成 PAC 脚本文本。
 pub fn generate_pac(entries: &[String], mode: ProxyMode) -> String {
     let bypass: Vec<String> = collect_bypass_hosts().into_iter().collect();
-    let expanded = super::whitelist::expand_entries(entries);
-    generate_pac_with_bypass(&expanded, &bypass, mode)
+    generate_pac_with_bypass(entries, &bypass, mode)
 }
 
 pub fn generate_pac_with_bypass(entries: &[String], bypass_hosts: &[String], mode: ProxyMode) -> String {
@@ -107,16 +106,16 @@ pub fn generate_pac_with_bypass(entries: &[String], bypass_hosts: &[String], mod
             r#"  var entries = [{entries_list}];
   for (var i = 0; i < entries.length; i++) {{
     var e = entries[i].toLowerCase();
-    if (h === e || h.endsWith('.' + e)) {{
+    if (h === e || strEndsWith(h, '.' + e)) {{
       return 'PROXY {host}:{port}';
     }}
-    // 通用 .com.xx 地区变体支持（如 google.com -> google.com.hk / accounts.google.com.hk）
-    if (e.endsWith('.com')) {{
+    // 区域别名收敛支持（如 google.com -> google.com.hk / accounts.google.com.hk）
+    if (e === 'google.com') {{
       var dot = h.lastIndexOf('.');
       if (dot > 0) {{
         var base = h.substring(0, dot);
         var tld = h.substring(dot + 1);
-        if (tld.length >= 2 && tld.length <= 3 && (base === e || base.endsWith('.' + e))) {{
+        if (/^[a-z]{{2,3}}$/.test(tld) && (base === e || strEndsWith(base, '.' + e))) {{
           return 'PROXY {host}:{port}';
         }}
       }}
@@ -132,33 +131,54 @@ pub fn generate_pac_with_bypass(entries: &[String], bypass_hosts: &[String], mod
     format!(
         r#"// pony-desktop PAC — 自动生成，请勿手改
 function FindProxyForURL(url, host) {{
+  // ES3 辅助函数（兼容 Windows JScript 5.8 / WinINET）
+  function strStartsWith(s, prefix) {{
+    return s.indexOf(prefix) === 0;
+  }}
+  function strEndsWith(s, suffix) {{
+    return s.length >= suffix.length && s.substr(s.length - suffix.length) === suffix;
+  }}
+  function strIncludes(s, sub) {{
+    return s.indexOf(sub) !== -1;
+  }}
+
   var h = host.toLowerCase();
-  while (h.endsWith('.')) {{ h = h.slice(0, -1); }}
-  function isPrivateHost(host) {{
-    if (host === "localhost" || host === "::1") return true;
-    // IPv6 private: fc00::/7, fe80::/10, ::1
-    if (host.includes(":")) {{
-      if (host === "::1") return true;
-      if (host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) return true;
+  while (strEndsWith(h, '.')) {{ h = h.slice(0, -1); }}
+
+  function isPrivateHost(target) {{
+    var t = target;
+    if (strStartsWith(t, '[') && strEndsWith(t, ']')) {{ t = t.slice(1, -1); }}
+    if (t === "localhost" || t === "::1" || t === "0.0.0.0") return true;
+    if (strStartsWith(t, "::ffff:")) {{ t = t.substring(7); }}
+
+    // IPv6 私网检测
+    if (strIncludes(t, ":")) {{
+      if (t === "::1") return true;
+      var low = t.toLowerCase();
+      if (strStartsWith(low, "fc") || strStartsWith(low, "fd") || strStartsWith(low, "fe8") || strStartsWith(low, "fe9") || strStartsWith(low, "fea") || strStartsWith(low, "feb")) return true;
       return false;
     }}
-    // IPv4 private: must be dotted-quad IP before prefix checks
-    if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return false;
-    if (host.startsWith("127.")) return true;
-    if (host.startsWith("10.")) return true;
-    if (host.startsWith("192.168.")) return true;
-    if (host.startsWith("172.")) {{
-      var m = host.match(/^172\.(\d+)\./);
+
+    // IPv4 私网检测（必须是合法点分十进制 IP）
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(t)) return false;
+    if (strStartsWith(t, "127.") || strStartsWith(t, "10.") || strStartsWith(t, "192.168.") || strStartsWith(t, "169.254.")) return true;
+    if (strStartsWith(t, "172.")) {{
+      var m = t.match(/^172\.(\d+)\./);
       if (m) {{ var n = parseInt(m[1], 10); if (n >= 16 && n <= 31) return true; }}
+    }}
+    if (strStartsWith(t, "100.")) {{
+      var m2 = t.match(/^100\.(\d+)\./);
+      if (m2) {{ var n2 = parseInt(m2[1], 10); if (n2 >= 64 && n2 <= 127) return true; }}
     }}
     return false;
   }}
+
   // DIRECT 优先级最高：plain host / localhost / private / bypass
-  if (isPlainHostName(host) || h === "localhost" || isPrivateHost(h)) return 'DIRECT';
+  if (isPlainHostName(h) || h === "localhost" || isPrivateHost(h)) return 'DIRECT';
   var bypass = [{bypass_list}];
   for (var j = 0; j < bypass.length; j++) {{
     var b = bypass[j].toLowerCase();
-    if (h === b || h.endsWith('.' + b)) return 'DIRECT';
+    if (h === b || strEndsWith(h, '.' + b)) return 'DIRECT';
   }}
 {routing_body}
 }}

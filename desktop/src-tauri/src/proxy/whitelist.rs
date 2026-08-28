@@ -75,7 +75,7 @@ fn aliases_for(entry: &str) -> &'static [&'static str] {
     }
 }
 
-/// 对单个 entry 的别名命中（显式别名表 + 通用 .com.xx 规则）
+/// 对单个 entry 的别名命中（显式别名表 + Google 区域 .com.xx 规则）
 fn alias_match(host: &str, entry: &str) -> bool {
     // 显式别名
     for alias in aliases_for(entry) {
@@ -83,12 +83,11 @@ fn alias_match(host: &str, entry: &str) -> bool {
             return true;
         }
     }
-    // 通用规则：entry 以 .com 结尾时，host 以 entry + ".<2-3小写字母>" 结尾即视为地区变体
-    // 例如 google.com -> google.com.hk / google.com.ph（含子域 www.google.com.hk、accounts.google.com.hk）
-    if entry.ends_with(".com") {
+    // 仅对 google.com 启用通用 .com.xx 国家地区变体（如 google.com.hk / accounts.google.com.hk），避免 github.com.cn / x.com.cn 等第三方国内域被误劫持
+    if entry == "google.com" {
         if let Some(dot) = host.rfind('.') {
             let suffix = &host[dot + 1..];
-            if suffix.len() >= 2 && suffix.len() <= 3 && suffix.chars().all(|c| c.is_ascii_lowercase()) {
+            if (suffix.len() == 2 || suffix.len() == 3) && suffix.chars().all(|c| c.is_ascii_lowercase()) {
                 let base = &host[..dot];
                 if suffix_match(base, entry) {
                     return true;
@@ -234,13 +233,17 @@ mod tests {
 
     #[test]
     fn regional_generic_com_xx() {
-        // 任意 .com 域名其 .com.xx 区域变体应被通用规则覆盖
-        let e = entries(&["example.com"]);
-        assert!(matches("example.com.hk", &e));
-        assert!(matches("www.example.com.hk", &e));
-        assert!(matches("example.com.ph", &e));
-        // .com.evil 不应命中（非 2-3 字母或含非字母）
-        assert!(!matches("example.com.evil", &e));
+        let e = entries(&["google.com"]);
+        // google.com.xx 命中
+        assert!(matches("google.com.hk", &e));
+        assert!(matches("www.google.com.hk", &e));
+        assert!(matches("accounts.google.com.hk", &e));
+        assert!(matches("google.com.sg", &e));
+        // 非 google.com 的通用域名不得被 .com.xx 误伤劫持（如 github.com.cn / example.com.cn）
+        let other = entries(&["example.com", "github.com"]);
+        assert!(!matches("example.com.hk", &other));
+        assert!(!matches("github.com.cn", &other));
+        assert!(!matches("google.com.evil", &e));
     }
 
     #[test]

@@ -22,9 +22,8 @@ pub struct EngineConfig {
     pub listen_addr: String,
     pub whitelist: watch::Receiver<Vec<String>>,
     pub mode: watch::Receiver<pac::ProxyMode>,
-    /// 隧道端点（wss://…），None 时白名单流量直接报错关闭（无静默回落）
-    pub tunnel_url: Option<String>,
-    pub tunnel_token: Option<String>,
+    /// 隧道凭据热更新通道 (url, token)
+    pub tunnel: watch::Receiver<(Option<String>, Option<String>)>,
 }
 
 impl Default for EngineConfig {
@@ -32,12 +31,12 @@ impl Default for EngineConfig {
         // 创建空 watch channel 供测试使用
         let (_tx, rx) = watch::channel(Vec::new());
         let (_mtx, mrx) = watch::channel(pac::ProxyMode::Whitelist);
+        let (_ttx, trx) = watch::channel((None, None));
         EngineConfig {
             listen_addr: "127.0.0.1:18900".into(),
             whitelist: rx,
             mode: mrx,
-            tunnel_url: None,
-            tunnel_token: None,
+            tunnel: trx,
         }
     }
 }
@@ -59,16 +58,20 @@ pub async fn run(cfg: EngineConfig, stats: SharedStats) -> std::io::Result<()> {
     let listener = TcpListener::bind(&cfg.listen_addr).await?;
     let cfg = Arc::new(cfg);
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        let (stream, _) = listener.accept().await?;
         stats
             .conns
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let cfg = Arc::clone(&cfg);
-        let stats = Arc::clone(&stats);
+        let cfg_clone = cfg.clone();
+        let stats_clone = stats.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, &cfg, &stats).await {
-                stats.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                *stats.last_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
+            if let Err(e) = handle_conn(stream, &cfg_clone, &stats_clone).await {
+                stats_clone
+                    .errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(mut g) = stats_clone.last_error.lock() {
+                    *g = Some(e.to_string());
+                }
                 log::warn!("proxy conn failed: {e}");
             }
         });
@@ -81,15 +84,19 @@ enum Route {
     Direct,
 }
 
-/// 分流判定（纯函数）：根据工作模式（白名单/全局）与隧道配置决定路由。
-fn decide(host: &str, whitelist_snapshot: &[String], tunnel_url: &Option<String>, mode: pac::ProxyMode) -> Route {
-    if tunnel_url.is_none() {
+/// 分流判定（纯函数）：根据工作模式（白名单/全局）决定路由。
+/// 严禁在隧道未配置时静默回落 Direct（R4 契约）；本地地址与 Bypass 管理面强制 Direct。
+fn decide(host: &str, whitelist_snapshot: &[String], mode: pac::ProxyMode) -> Route {
+    let norm = whitelist::normalize_host(host);
+    // 防回环：本地与 Bypass 管理面强制 Direct
+    let bypass_set = pac::collect_bypass_hosts();
+    if norm == "localhost" || norm == "127.0.0.1" || norm == "::1" || bypass_set.contains(&norm) {
         return Route::Direct;
     }
     match mode {
         pac::ProxyMode::Global => Route::Tunnel,
         pac::ProxyMode::Whitelist => {
-            if whitelist::matches(host, whitelist_snapshot) {
+            if whitelist::matches(&norm, whitelist_snapshot) {
                 Route::Tunnel
             } else {
                 Route::Direct
@@ -132,10 +139,14 @@ fn parse_head(head: &str) -> Option<ReqHead> {
 
 fn split_host_port(authority: &str, default_port: u16) -> Option<(String, u16)> {
     if let Some(stripped) = authority.strip_prefix('[') {
-        // IPv6 字面量 [::1]:port
+        // IPv6 字面量 [::1]:port 或 [::1]
         let (h, rest) = stripped.split_once(']')?;
-        let port = rest.strip_prefix(':').and_then(|p| p.parse().ok());
-        return Some((h.to_string(), port.unwrap_or(default_port)));
+        if rest.is_empty() {
+            return Some((h.to_string(), default_port));
+        }
+        let port_str = rest.strip_prefix(':')?;
+        let port: u16 = port_str.parse().ok()?;
+        return Some((h.to_string(), port));
     }
     match authority.rsplit_once(':') {
         Some((h, p)) => Some((h.to_string(), p.parse().ok()?)),
@@ -163,11 +174,13 @@ async fn handle_conn(
     }
     let head = String::from_utf8_lossy(&buf);
 
-    // 引擎自身的控制面：PAC 脚本（放行带 ?v= 时间戳与参数的请求）
+    // 引擎自身的控制面：PAC 脚本（放行 /pac 或 /pac?t=...）
     let is_pac_req = if let Some(first) = head.lines().next() {
-        first.starts_with("GET /pac")
-            || first.starts_with("GET http://127.0.0.1:18900/pac")
-            || first.starts_with("GET http://localhost:18900/pac")
+        let path = first.strip_prefix("GET ").and_then(|r| r.split_whitespace().next()).unwrap_or("");
+        path == "/pac"
+            || path.starts_with("/pac?")
+            || path.starts_with("http://127.0.0.1:18900/pac")
+            || path.starts_with("http://localhost:18900/pac")
     } else {
         false
     };
@@ -199,7 +212,7 @@ async fn handle_conn(
         g.clone()
     };
     let mode_snapshot = *cfg.mode.borrow();
-    let route = decide(&parsed.host, &wl_snapshot, &cfg.tunnel_url, mode_snapshot);
+    let route = decide(&parsed.host, &wl_snapshot, mode_snapshot);
     match route {
         Route::Direct => {
             stats.direct.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -254,10 +267,15 @@ fn rewrite_first_line_absolute(first: &str) -> String {
     if parts.len() != 3 {
         return first.to_string();
     }
-    let path = parts[1]
-        .strip_prefix("http://")
-        .and_then(|rest| rest.find('/').map(|i| &rest[i..]))
-        .unwrap_or("/");
+    let after_scheme = parts[1].strip_prefix("http://").unwrap_or(parts[1]);
+    let path_start = after_scheme.find(|c| c == '/' || c == '?');
+    let path = match path_start {
+        Some(i) if after_scheme.as_bytes()[i] == b'?' => {
+            format!("/{}", &after_scheme[i..])
+        }
+        Some(i) => after_scheme[i..].to_string(),
+        None => "/".to_string(),
+    };
     format!("{} {} {}", parts[0], path, parts[2])
 }
 
@@ -279,7 +297,8 @@ mod tests {
 
     fn cfg_with_whitelist(list: Vec<String>, tunnel: Option<String>) -> EngineConfig {
         let (_tx, rx) = watch::channel(list);
-        EngineConfig { whitelist: rx, tunnel_url: tunnel, ..Default::default() }
+        let (_ttx, trx) = watch::channel((tunnel, Some("mock-token".into())));
+        EngineConfig { whitelist: rx, tunnel: trx, ..Default::default() }
     }
 
     #[test]
@@ -309,24 +328,28 @@ mod tests {
     fn decide_whitelist_with_tunnel() {
         let cfg = cfg_with_whitelist(vec!["youtube.com".into()], Some("wss://gate/ws".into()));
         let snap = cfg.whitelist.borrow().clone();
-        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Whitelist), Route::Tunnel);
-        assert_eq!(decide("baidu.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Whitelist), Route::Direct);
+        assert_eq!(decide("www.youtube.com", &snap, pac::ProxyMode::Whitelist), Route::Tunnel);
+        assert_eq!(decide("baidu.com", &snap, pac::ProxyMode::Whitelist), Route::Direct);
     }
 
     #[test]
     fn decide_global_mode_tunnels_all() {
         let cfg = cfg_with_whitelist(vec![], Some("wss://gate/ws".into()));
         let snap = cfg.whitelist.borrow().clone();
-        assert_eq!(decide("baidu.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Global), Route::Tunnel);
-        assert_eq!(decide("google.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Global), Route::Tunnel);
+        assert_eq!(decide("baidu.com", &snap, pac::ProxyMode::Global), Route::Tunnel);
+        assert_eq!(decide("google.com", &snap, pac::ProxyMode::Global), Route::Tunnel);
     }
 
     #[test]
-    fn decide_no_tunnel_url_never_tunnels() {
+    fn decide_no_tunnel_url_still_routes_to_tunnel_to_prevent_silent_fallback() {
         let cfg = cfg_with_whitelist(vec!["youtube.com".into()], None);
         let snap = cfg.whitelist.borrow().clone();
-        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Whitelist), Route::Direct);
-        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Global), Route::Direct);
+        // R4 契约：白名单/全局目标必须 Route::Tunnel（进入建连阶段后因无配置而关闭连接，绝不回落 Direct 裸连）
+        assert_eq!(decide("www.youtube.com", &snap, pac::ProxyMode::Whitelist), Route::Tunnel);
+        assert_eq!(decide("www.youtube.com", &snap, pac::ProxyMode::Global), Route::Tunnel);
+        // 本地回环与 Bypass 目标仍必须走 Direct 防自锁
+        assert_eq!(decide("localhost", &snap, pac::ProxyMode::Global), Route::Direct);
+        assert_eq!(decide("127.0.0.1", &snap, pac::ProxyMode::Global), Route::Direct);
     }
 
     #[test]
@@ -334,6 +357,10 @@ mod tests {
         assert_eq!(
             rewrite_first_line_absolute("GET http://example.com/path?a=1 HTTP/1.1"),
             "GET /path?a=1 HTTP/1.1"
+        );
+        assert_eq!(
+            rewrite_first_line_absolute("GET http://example.com?a=1 HTTP/1.1"),
+            "GET /?a=1 HTTP/1.1"
         );
     }
 }
@@ -401,9 +428,10 @@ mod integration {
     #[tokio::test]
     async fn r4_tunnel_failure_never_silently_falls_back() {
         let (_tx, rx) = watch::channel(vec!["www.youtube.com".into()]);
+        let (_ttx, trx) = watch::channel((Some("ws://127.0.0.1:9/unreachable".into()), Some("mock-token".into())));
         let cfg = EngineConfig {
             whitelist: rx,
-            tunnel_url: Some("ws://127.0.0.1:9/unreachable".into()),
+            tunnel: trx,
             ..Default::default()
         };
         let stats = Arc::new(EngineStats::default());

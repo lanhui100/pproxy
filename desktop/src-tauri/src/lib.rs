@@ -6,40 +6,56 @@ use tokio::sync::watch;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  // ---- 单实例最小实现（二次启动检测，带 stale 清理）----
+  // ---- 单实例保护（严格基于 PID 存活性，严禁基于运行时间自毁锁文件）----
   {
     let lock_path = data_dir().join("instance.lock");
     if std::fs::create_dir_all(lock_path.parent().unwrap()).is_ok() {
-      // stale 清理：崩溃残留锁文件 mtime > 10s 或 pid 已不存在则删除后重试
-      let should_try_create = match std::fs::metadata(&lock_path) {
-        Ok(meta) => {
-          let stale = meta.modified().ok().and_then(|t| t.elapsed().ok()).map(|d| d.as_secs() > 10).unwrap_or(false);
-          if stale {
-            let _ = std::fs::remove_file(&lock_path);
-            true
-          } else {
-            // 尝试判断 pid 是否存活：读文件 pid，若与当前 pid 不同且 kill 0 失败则视为 stale
-            let pid_alive = std::fs::read_to_string(&lock_path).ok().and_then(|s| s.trim().parse::<u32>().ok()).map(|pid| {
-              if pid == std::process::id() { true } else {
-                #[cfg(unix)]
-                { std::process::Command::new("kill").args(["-0", &pid.to_string()]).output().map(|o| o.status.success()).unwrap_or(true) }
+      let is_stale = match std::fs::metadata(&lock_path) {
+        Ok(_) => {
+          let pid_alive = std::fs::read_to_string(&lock_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .map(|pid| {
+              if pid == std::process::id() {
+                true
+              } else {
                 #[cfg(windows)]
-                { std::process::Command::new("tasklist").args(["/FI", &format!("PID eq {}", pid)]).output().map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())).unwrap_or(true) }
+                {
+                  use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+                  use windows_sys::Win32::Foundation::CloseHandle;
+                  unsafe {
+                    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                    if !handle.is_null() {
+                      CloseHandle(handle);
+                      true
+                    } else {
+                      false
+                    }
+                  }
+                }
+                #[cfg(unix)]
+                {
+                  std::process::Command::new("kill").args(["-0", &pid.to_string()]).output().map(|o| o.status.success()).unwrap_or(false)
+                }
                 #[cfg(not(any(unix, windows)))]
                 { true }
               }
-            }).unwrap_or(true);
-            if !pid_alive { let _ = std::fs::remove_file(&lock_path); true } else { true }
-          }
+            })
+            .unwrap_or(false);
+          !pid_alive
         }
-        Err(_) => true,
+        Err(_) => false,
       };
-      if should_try_create {
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
-          Ok(mut f) => { use std::io::Write as _; let _ = writeln!(f, "{}", std::process::id()); }
-          Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => { eprintln!("another instance is running, exiting"); std::process::exit(0); }
-          Err(_) => {}
+      if is_stale {
+        let _ = std::fs::remove_file(&lock_path);
+      }
+      match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+        Ok(mut f) => { use std::io::Write as _; let _ = writeln!(f, "{}", std::process::id()); }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+          eprintln!("another instance is running, exiting");
+          std::process::exit(0);
         }
+        Err(_) => {}
       }
     }
   }
@@ -244,6 +260,14 @@ fn ensure_mode_watch() -> &'static watch::Sender<proxy::pac::ProxyMode> {
         tx
     })
 }
+static TUNNEL_TX: OnceLock<watch::Sender<(Option<String>, Option<String>)>> = OnceLock::new();
+fn ensure_tunnel_watch() -> &'static watch::Sender<(Option<String>, Option<String>)> {
+    TUNNEL_TX.get_or_init(|| {
+        let (u, t) = tunnel_config_load();
+        let (tx, _rx) = watch::channel((u, t));
+        tx
+    })
+}
 #[tauri::command]
 fn proxy_whitelist_get() -> Vec<String> {
     if let Some(tx) = WHITELIST_TX.get() {
@@ -282,12 +306,16 @@ fn is_valid_domain(e: &str) -> bool {
     if e.is_empty() || e.len() > 253 { return false; }
     if e.contains('_') || e.contains('*') || e.contains(':') || e.contains('/') || e.contains('?') || e.contains('#') || e.contains(' ') { return false; }
     let parts: Vec<&str> = e.split('.').collect();
-    if parts.is_empty() { return false; }
-    for p in parts {
+    if parts.len() < 2 { return false; } // 必须包含二级域及以上，严禁单段 TLD 通配
+    for (i, p) in parts.iter().enumerate() {
         if p.is_empty() || p.len() > 63 { return false; }
         let bytes = p.as_bytes();
         if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len()-1].is_ascii_alphanumeric() { return false; }
         if !bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-') { return false; }
+        // 顶级域 (TLD) 不得为纯数字或带减号，且长度 >= 2
+        if i == parts.len() - 1 && (!p.chars().all(|c| c.is_ascii_alphabetic()) || p.len() < 2) {
+            return false;
+        }
     }
     true
 }
@@ -377,15 +405,26 @@ fn proxy_tunnel_set_url(url: String) -> Result<(), String> {
   validate_tunnel_url(&url)?;
   let dir = data_dir();
   std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-  std::fs::write(dir.join(TUNNEL_FILE), serde_json::to_string(&serde_json::json!({ "url": url })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+  let tmp = dir.join("tunnel.json.tmp");
+  let target = dir.join(TUNNEL_FILE);
+  std::fs::write(&tmp, serde_json::to_string(&serde_json::json!({ "url": url })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+  std::fs::rename(&tmp, target).map_err(|e| e.to_string())?;
+  let _ = ensure_tunnel_watch().send(tunnel_config_load());
+  Ok(())
 }
 #[tauri::command]
 fn tunnel_token_save(secret: String) -> Result<(), String> {
   if secret.trim().is_empty() { return Err("empty tunnel token".into()); }
-  cred_set_impl(CREDENTIAL_USER_TUNNEL, secret)
+  cred_set_impl(CREDENTIAL_USER_TUNNEL, secret)?;
+  let _ = ensure_tunnel_watch().send(tunnel_config_load());
+  Ok(())
 }
 #[tauri::command]
-fn tunnel_token_clear() -> Result<(), String> { cred_delete_impl(CREDENTIAL_USER_TUNNEL) }
+fn tunnel_token_clear() -> Result<(), String> {
+  cred_delete_impl(CREDENTIAL_USER_TUNNEL)?;
+  let _ = ensure_tunnel_watch().send(tunnel_config_load());
+  Ok(())
+}
 fn tunnel_config_load() -> (Option<String>, Option<String>) {
   let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from)).filter(|u| validate_tunnel_url(u).is_ok());
   let token = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().filter(|t| !t.is_empty());
@@ -393,7 +432,7 @@ fn tunnel_config_load() -> (Option<String>, Option<String>) {
 }
 static ENGINE_ON: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync::Mutex::new(None);
-static ENGINE_TASK: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = std::sync::Mutex::new(None);
+static ENGINE_TASK: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> = std::sync::Mutex::new(None);
 fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
   use tauri::Emitter;
   let current_mode = if let Some(tx) = PROXY_MODE_TX.get() { *tx.borrow() } else { load_proxy_mode_from_file() };
@@ -405,7 +444,7 @@ fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
     let app_handle = app.clone();
     let _ = (|| -> tauri::Result<()> {
       let show = MenuItem::with_id(&app_handle, "show", "显示主窗口", true, None::<&str>)?;
-      let toggle = CheckMenuItem::with_id(&app_handle, "proxy_toggle", "系统代理: 已启用", true, on, None::<&str>)?;
+      let toggle = CheckMenuItem::with_id(&app_handle, "proxy_toggle", if on { "系统代理: 已启用" } else { "系统代理: 已停用" }, true, on, None::<&str>)?;
       let mode_wl = CheckMenuItem::with_id(&app_handle, "mode_whitelist", "  白名单模式 (智能分流)", true, current_mode == proxy::pac::ProxyMode::Whitelist, None::<&str>)?;
       let mode_gb = CheckMenuItem::with_id(&app_handle, "mode_global", "  全局模式 (全部流量)", true, current_mode == proxy::pac::ProxyMode::Global, None::<&str>)?;
       let quit = MenuItem::with_id(&app_handle, "quit", "退出", true, None::<&str>)?;
@@ -428,30 +467,37 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     {
         let tx = ensure_watch();
         if tx.borrow().clone() != wl { let _ = tx.send(wl.clone()); }
+        let _ = ensure_tunnel_watch().send((tunnel_url, tunnel_token));
     }
     // Engine singleton: reuse existing task if alive (热更新 via watch, 不重复 bind)
     let already_running = {
-        let guard = ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner());
-        guard.is_some()
+        let mut guard = ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_ref() {
+            Some(h) if !h.is_finished() => true,
+            _ => {
+                *guard = None;
+                false
+            }
+        }
     };
     if !already_running {
         let rx = ensure_watch().subscribe();
         let rx_mode = ensure_mode_watch().subscribe();
+        let rx_tunnel = ensure_tunnel_watch().subscribe();
         let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
         let rx_clone = rx.clone();
-        let handle = tauri::async_runtime::spawn(async move {
+        let handle = tokio::spawn(async move {
             let cfg = proxy::engine::EngineConfig {
                 listen_addr: "127.0.0.1:18900".into(),
                 whitelist: rx_clone,
                 mode: rx_mode,
-                tunnel_url,
-                tunnel_token,
+                tunnel: rx_tunnel,
             };
             if let Err(e) = proxy::engine::run(cfg, stats).await { log::warn!("proxy engine exited: {e}"); }
         });
         *ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
     } else {
-        // Already running: whitelist 已 via watch 更新，无需重 spawn
+        // Already running: whitelist 与 tunnel 已 via watch 更新，无需重 spawn
         log::info!("engine already running, reuse existing listener");
     }
     // Probe: must succeed before setting PAC, otherwise fail fast (Blocker #1)

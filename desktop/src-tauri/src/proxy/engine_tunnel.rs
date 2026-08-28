@@ -37,8 +37,13 @@ async fn establish(
     ),
     std::io::Error,
 > {
-    let url = cfg.tunnel_url.as_deref().ok_or_else(|| io("tunnel_url not configured"))?;
-    let token = cfg.tunnel_token.as_deref().ok_or_else(|| io("tunnel token missing"))?;
+    let (url, token) = {
+        let (u, t) = cfg.tunnel.borrow().clone();
+        (
+            u.ok_or_else(|| io("tunnel_url not configured"))?,
+            t.ok_or_else(|| io("tunnel token missing"))?,
+        )
+    };
 
     let mut req = url
         .into_client_request()
@@ -96,9 +101,19 @@ pub async fn connect_and_relay(
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         .await?;
                 } else {
-                    let first_line = rewrite_first_line(head);
+                    let mut lines = head.lines();
+                    let first = lines.next().unwrap_or("");
+                    let rewritten = rewrite_first_line(first);
+                    let mut full_req = String::new();
+                    full_req.push_str(&rewritten);
+                    full_req.push_str("\r\n");
+                    for l in lines {
+                        full_req.push_str(l);
+                        full_req.push_str("\r\n");
+                    }
+                    full_req.push_str("\r\n");
                     ws_tx
-                        .send(Message::Binary(first_line.into_bytes()))
+                        .send(Message::Binary(full_req.into_bytes()))
                         .await
                         .map_err(io)?;
                 }
@@ -147,14 +162,19 @@ async fn relay(
     Ok(())
 }
 
-fn rewrite_first_line(head: &str) -> String {
-    let parts: Vec<&str> = head.lines().next().unwrap_or("").splitn(3, ' ').collect();
+fn rewrite_first_line(first: &str) -> String {
+    let parts: Vec<&str> = first.splitn(3, ' ').collect();
     if parts.len() != 3 {
-        return head.lines().next().unwrap_or("").to_string();
+        return first.to_string();
     }
-    let path = parts[1]
-        .strip_prefix("http://")
-        .and_then(|rest| rest.find('/').map(|i| &rest[i..]))
-        .unwrap_or("/");
+    let after_scheme = parts[1].strip_prefix("http://").unwrap_or(parts[1]);
+    let path_start = after_scheme.find(|c| c == '/' || c == '?');
+    let path = match path_start {
+        Some(i) if after_scheme.as_bytes()[i] == b'?' => {
+            format!("/{}", &after_scheme[i..])
+        }
+        Some(i) => after_scheme[i..].to_string(),
+        None => "/".to_string(),
+    };
     format!("{} {} {}", parts[0], path, parts[2])
 }

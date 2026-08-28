@@ -25,6 +25,7 @@ const SNAPSHOT_FILE: &str = "sysproxy_snapshot.json";
 pub struct Snapshot {
     pub proxy_enable: Option<u32>,
     pub proxy_server: Option<String>,
+    pub proxy_override: Option<String>,
     pub autoconfig_url: Option<String>,
     /// 持久化扩展：写入时 pid/ts，仅用于诊断；还原时忽略
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,8 +106,11 @@ pub fn flush_wininet_cache() {
         use windows_sys::Win32::Networking::WinInet::{
             InternetSetOptionA, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
         };
-        InternetSetOptionA(std::ptr::null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, std::ptr::null_mut(), 0);
-        InternetSetOptionA(std::ptr::null_mut(), INTERNET_OPTION_REFRESH, std::ptr::null_mut(), 0);
+        let r1 = InternetSetOptionA(std::ptr::null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, std::ptr::null_mut(), 0);
+        let r2 = InternetSetOptionA(std::ptr::null_mut(), INTERNET_OPTION_REFRESH, std::ptr::null_mut(), 0);
+        if r1 == 0 || r2 == 0 {
+            log::warn!("InternetSetOptionA returned 0 during flush_wininet_cache (settings: {r1}, refresh: {r2})");
+        }
     }
 }
 
@@ -157,6 +161,7 @@ pub fn enable(mode: Mode) -> Result<Snapshot, String> {
     let snapshot = Snapshot {
         proxy_enable: key.get_value("ProxyEnable").ok(),
         proxy_server: key.get_value("ProxyServer").ok(),
+        proxy_override: key.get_value("ProxyOverride").ok(),
         autoconfig_url: key.get_value("AutoConfigURL").ok(),
         pid: None,
         ts: None,
@@ -219,6 +224,7 @@ pub fn disable(snapshot: &Snapshot) -> Result<(), String> {
     // 若传入为 default 空且存在持久化快照，则用持久化快照（崩溃后退出路径）
     let snap = if snapshot.proxy_enable.is_none()
         && snapshot.proxy_server.is_none()
+        && snapshot.proxy_override.is_none()
         && snapshot.autoconfig_url.is_none()
     {
         if let Some(persisted) = load_snapshot() {
@@ -244,6 +250,12 @@ pub fn disable(snapshot: &Snapshot) -> Result<(), String> {
         Some(v) => key.set_value("ProxyServer", v).map_err(|e| e.to_string())?,
         None => {
             key.delete_value("ProxyServer").ok();
+        }
+    }
+    match &snap.proxy_override {
+        Some(v) => key.set_value("ProxyOverride", v).map_err(|e| e.to_string())?,
+        None => {
+            key.delete_value("ProxyOverride").ok();
         }
     }
     match &snap.autoconfig_url {
@@ -278,24 +290,24 @@ pub fn disable_with_persisted_fallback(snapshot_opt: Option<Snapshot>) -> Result
 /// 广播设置变更（F10）：已运行应用感知代理切换。返回是否成功（SendMessageTimeoutA !=0）
 #[cfg(windows)]
 pub fn broadcast_change() -> bool {
-    // HWND_BROADCAST；SMTO_ABORTIFHUNG 避免挂起窗口阻塞
     unsafe {
+        use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutA,
+            SendMessageTimeoutA, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
         };
-        const WM_SETTINGCHANGE: u32 = 0x001A;
+        const TIMEOUT_MS: u32 = 1000;
         let mut result: usize = 0;
-        let ret = SendMessageTimeoutA(
-            HWND_BROADCAST,
+        let ret: LRESULT = SendMessageTimeoutA(
+            HWND_BROADCAST as HWND,
             WM_SETTINGCHANGE,
-            0,
-            "Internet Settings\0".as_ptr() as _,
+            0 as WPARAM,
+            b"InternetSettings\0".as_ptr() as LPARAM,
             SMTO_ABORTIFHUNG,
-            1000,
-            &mut result as *mut _,
+            TIMEOUT_MS,
+            &mut result as *mut usize,
         );
         if ret == 0 {
-            log::warn!("SendMessageTimeoutA failed or timed out, result={result}");
+            log::warn!("SendMessageTimeoutA WM_SETTINGCHANGE failed (ret=0, timeout={TIMEOUT_MS}ms)");
             return false;
         }
         true
@@ -307,36 +319,39 @@ pub fn broadcast_change() -> bool {
     true
 }
 
-/// 启动自愈：优先按持久化快照还原；否则回落旧逻辑：若 AutoConfigURL 指向本应用 PAC，则清除。
+/// 启动自愈：优先按持久化快照还原；否则回落旧逻辑：若 AutoConfigURL 或 ProxyServer 指向本应用，则清除。
 #[cfg(windows)]
 pub fn cleanup_stale() {
-    // 优先：若存在快照文件，按快照还原（崩溃后残留 PAC 的精确还原，非简单 delete）
+    // 优先：若存在快照文件，按快照还原（崩溃后残留 PAC / Manual 代理的精确还原）
     if let Some(snap) = load_snapshot() {
-        // 仅当当前 PAC 仍指向本应用时才还原，避免覆盖用户后续手动改的代理
         use winreg::enums::*;
         use winreg::RegKey;
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         if let Ok(key) =
             hkcu.open_subkey_with_flags(INTERNET_SETTINGS, KEY_SET_VALUE | KEY_QUERY_VALUE)
         {
-            let cur: Option<String> = key.get_value("AutoConfigURL").ok();
-            let should_restore = match cur.as_deref() {
-                Some(v) => v.starts_with(PAC_URL),
-                None => false,
-            };
-            if should_restore {
-                // 使用快照还原
+            let is_our_pac = key
+                .get_value::<String, _>("AutoConfigURL")
+                .ok()
+                .map(|v| v.starts_with(PAC_URL))
+                .unwrap_or(false);
+            let is_our_manual = key
+                .get_value::<String, _>("ProxyServer")
+                .ok()
+                .map(|v| v.contains("127.0.0.1:18900"))
+                .unwrap_or(false);
+            if is_our_pac || is_our_manual {
                 let _ = disable(&snap);
-                log::info!("restored proxy from persisted snapshot after stale PAC detected");
+                log::info!("restored proxy from persisted snapshot after stale settings detected");
                 return;
             } else {
-                // PAC 已被用户/其他程序改写，快照过期，清理文件
+                // 已被外部改写，清理失效快照
                 clear_snapshot();
             }
         }
     }
 
-    // 回落：旧逻辑 - 简单清除指向本应用 PAC 的残留
+    // 回落：清除指向本应用 18900 的残留设置
     use winreg::enums::*;
     use winreg::RegKey;
 
@@ -346,17 +361,30 @@ pub fn cleanup_stale() {
     else {
         return;
     };
-    if key
+    let is_our_pac = key
         .get_value::<String, _>("AutoConfigURL")
         .ok()
-        .as_deref()
         .map(|v| v.starts_with(PAC_URL))
-        .unwrap_or(false)
-    {
-        key.delete_value("AutoConfigURL").ok();
+        .unwrap_or(false);
+    let is_our_manual = key
+        .get_value::<String, _>("ProxyServer")
+        .ok()
+        .map(|v| v.contains("127.0.0.1:18900"))
+        .unwrap_or(false);
+
+    if is_our_pac || is_our_manual {
+        if is_our_pac {
+            key.delete_value("AutoConfigURL").ok();
+        }
+        if is_our_manual {
+            key.delete_value("ProxyEnable").ok();
+            key.delete_value("ProxyServer").ok();
+            key.delete_value("ProxyOverride").ok();
+        }
+        flush_wininet_cache();
         broadcast_change();
         clear_snapshot();
-        log::info!("cleaned stale AutoConfigURL left by previous crashed run");
+        log::info!("cleaned stale proxy settings left by previous crashed run");
     }
 }
 
