@@ -17,7 +17,6 @@ use std::fmt;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::response::Response;
 use futures::stream::{SplitSink, SplitStream};
@@ -176,15 +175,21 @@ impl fmt::Display for EstablishError {
 
 /// CONNECT 处理入口（RouterHyperAdapter 拦截后调用，spec §3.2）。
 ///
+/// 接收 URI 目标（host:port）和 hyper::upgrade::OnUpgrade future（已在
+/// RouterHyperAdapter::call 中注册，此处在 200 写出后异步完成）。
+///
 /// 响应语义（spec §3.6，枚举固定，不携带内部细节）：
 /// 403 `tunnel_not_configured` / `port_not_allowed` / `no_tunnel_route`，
 /// 502 `tunnel_failed`（establish 失败，详情仅入日志）。
-pub async fn handle_connect(state: GatewayState, mut req: Request<Body>) -> Response {
-    // authority-form 目标（hyper 已解析）：host:port
-    let uri = req.uri().clone();
-    let (Some(host), Some(port)) = (uri.host().map(str::to_string), uri.port_u16()) else {
+pub async fn handle_connect(
+    state: GatewayState,
+    on_upgrade: hyper::upgrade::OnUpgrade,
+    host: &str,
+    port: u16,
+) -> Response {
+    if host.is_empty() || port == 0 {
         return deny_response(StatusCode::BAD_REQUEST, "bad_target");
-    };
+    }
     let Some(cfg) = state.tunnel.as_ref() else {
         return deny_response(StatusCode::FORBIDDEN, "tunnel_not_configured");
     };
@@ -193,27 +198,28 @@ pub async fn handle_connect(state: GatewayState, mut req: Request<Body>) -> Resp
         tracing::info!(host = %host, port, "connect denied: port not allowed");
         return deny_response(StatusCode::FORBIDDEN, "port_not_allowed");
     }
-    if !allowlist_match(&host, &cfg.allowlist) {
+    if !allowlist_match(host, &cfg.allowlist) {
         tracing::info!(host = %host, "connect denied: no tunnel route");
         return deny_response(StatusCode::FORBIDDEN, "no_tunnel_route");
     }
 
+    let host = host.to_string();
     // 先 establish（R4）：写 200 前可重试；denied 不重试；绝不静默回落直连
     for attempt in 0..MAX_ATTEMPTS {
         match establish(cfg, &host, port).await {
             Ok((ws_tx, ws_rx)) => {
                 tracing::info!(host = %host, "tunnel established");
-                // P0（reviewer-a 发现）：hyper::upgrade::on 必须在返回响应之前调用，
-                // 以注册 OnUpgrade 兴趣（从 request extensions 中取出 OnUpgrade future）。
-                // 返回的 OnUpgrade future 传给 relay 任务，在 200 写出后异步完成升级。
-                let on_upgrade = hyper::upgrade::on(&mut req);
+                // OnUpgrade future 已在 RouterHyperAdapter::call 中注册，
+                // 此处 spawn 异步等待升级完成（200 写出后 hyper 完成 upgrade）。
                 tokio::spawn(async move {
-                    match on_upgrade.await {
-                        Ok(upgraded) => {
+                    tracing::debug!("waiting for hyper upgrade...");
+                    match tokio::time::timeout(Duration::from_secs(10), on_upgrade).await {
+                        Ok(Ok(upgraded)) => {
                             tracing::info!(host = %host, "tunnel upgraded, relaying");
                             relay(TokioIo::new(upgraded), ws_tx, ws_rx).await;
                         }
-                        Err(e) => tracing::warn!(host = %host, error = %e, "upgrade failed (client gone?)"),
+                        Ok(Err(e)) => tracing::warn!(host = %host, error = %e, "upgrade failed"),
+                        Err(_) => tracing::warn!(host = %host, "upgrade timeout (10s): OnUpgrade never completed"),
                     }
                 });
                 return established_response();
@@ -291,30 +297,52 @@ where
 {
     let (mut cr, mut cw) = tokio::io::split(client);
     let mut buf = vec![0u8; 8192];
+    tracing::debug!("relay: starting bidirectional relay");
     loop {
         tokio::select! {
             n = cr.read(&mut buf) => match n {
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    tracing::debug!("relay: client closed");
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!("relay: client read error: {e}");
+                    break;
+                }
                 Ok(n) => {
+                    tracing::debug!("relay: client -> ws {} bytes", n);
                     if ws_tx.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
+                        tracing::debug!("relay: ws send error");
                         break;
                     }
+                    tracing::trace!("relay: client -> ws ok");
                 }
             },
             msg = ws_rx.next() => match msg {
                 Some(Ok(Message::Binary(b))) => {
+                    tracing::debug!("relay: ws -> client {} bytes", b.len());
                     if cw.write_all(&b).await.is_err() {
+                        tracing::debug!("relay: client write error");
                         break;
                     }
+                    tracing::trace!("relay: ws -> client ok");
                 }
                 Some(Ok(Message::Ping(p))) => {
                     let _ = ws_tx.send(Message::Pong(p)).await;
                 }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) | None => {
+                    tracing::debug!("relay: ws closed");
+                    break;
+                }
+                Some(Err(e)) => {
+                    tracing::debug!("relay: ws error: {e}");
+                    break;
+                }
                 _ => {}
             },
         }
     }
+    tracing::debug!("relay: done");
     let _ = cw.shutdown().await;
 }
 

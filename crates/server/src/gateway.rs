@@ -351,12 +351,26 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for RouterHy
         Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
     >;
 
-    fn call(&self, req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
+    fn call(&self, mut req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
         let state = self.state.clone();
         if req.method() == axum::http::Method::CONNECT {
-            let req = req.map(Body::new);
+            let host = req.uri().host().unwrap_or("").to_string();
+            let port = req.uri().port_u16().unwrap_or(0);
+            // 非标准 CONNECT（无 target 或 port），直接返回 400，不调用 upgrade::on
+            if host.is_empty() || port == 0 {
+                return Box::pin(async {
+                    Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .header("x-pproxy-reason", "bad_target")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"error":"connect_forbidden"}"#))
+                        .expect("static response"))
+                });
+            }
+            let on_upgrade = hyper::upgrade::on(&mut req);
+            let host2 = host.clone();
             return Box::pin(async move {
-                Ok(crate::connect::handle_connect(state, req).await)
+                Ok(crate::connect::handle_connect(state, on_upgrade, &host2, port).await)
             });
         }
         Box::pin(tower::Service::call(&mut self.router.clone(), req.map(Body::new)))
