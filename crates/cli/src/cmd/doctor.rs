@@ -152,7 +152,7 @@ pub(crate) fn run(
 }
 
 /// CONNECT 隧道探针结果。
-enum TunnelProbeResult {
+pub(crate) enum TunnelProbeResult {
     Pass,
     Skip(&'static str),
     Fail(String),
