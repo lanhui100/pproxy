@@ -90,6 +90,58 @@ fn clear_snapshot() {
     let _ = std::fs::remove_file(snapshot_path());
 }
 
+#[allow(dead_code)]
+pub fn current_pac_url() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{PAC_URL}?t={now}")
+}
+
+#[cfg(windows)]
+pub fn flush_wininet_cache() {
+    unsafe {
+        use windows_sys::Win32::Networking::WinInet::{
+            InternetSetOptionA, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
+        };
+        InternetSetOptionA(std::ptr::null_mut(), INTERNET_OPTION_SETTINGS_CHANGED, std::ptr::null_mut(), 0);
+        InternetSetOptionA(std::ptr::null_mut(), INTERNET_OPTION_REFRESH, std::ptr::null_mut(), 0);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn flush_wininet_cache() {}
+
+/// 当白名单列表或模式改变时强刷 WinINET PAC 缓存
+#[cfg(windows)]
+pub fn update_pac_timestamp() -> Result<(), String> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey_with_flags(INTERNET_SETTINGS, KEY_SET_VALUE | KEY_QUERY_VALUE)
+        .map_err(|e| e.to_string())?;
+
+    let cur: Option<String> = key.get_value("AutoConfigURL").ok();
+    if let Some(url) = cur {
+        if url.starts_with(PAC_URL) {
+            let new_url = current_pac_url();
+            key.set_value("AutoConfigURL", &new_url).map_err(|e| e.to_string())?;
+            flush_wininet_cache();
+            broadcast_change();
+            log::info!("updated WinINET AutoConfigURL with new timestamp: {new_url}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn update_pac_timestamp() -> Result<(), String> {
+    Ok(())
+}
+
 /// 启用系统代理。返回启用前快照（供 disable 还原），并落盘持久化。
 #[cfg(windows)]
 pub fn enable(mode: Mode) -> Result<Snapshot, String> {
@@ -115,7 +167,8 @@ pub fn enable(mode: Mode) -> Result<Snapshot, String> {
 
     match mode {
         Mode::Pac => {
-            key.set_value("AutoConfigURL", &PAC_URL)
+            let pac_url = current_pac_url();
+            key.set_value("AutoConfigURL", &pac_url)
                 .map_err(|e| e.to_string())?;
             key.delete_value("ProxyEnable").ok();
         }
@@ -129,16 +182,18 @@ pub fn enable(mode: Mode) -> Result<Snapshot, String> {
             key.delete_value("AutoConfigURL").ok();
         }
     }
+    flush_wininet_cache();
     let bc_ok = broadcast_change();
     if !bc_ok {
         log::warn!("broadcast_change SendMessageTimeoutA returned 0 (timeout/failed)");
     }
-    // 二次校验：PAC URL 需 starts_with PAC 兼容 ?v= 指纹，回读校验并重试广播
+    // 二次校验：PAC URL 需 starts_with PAC 兼容 ?t= 指纹，回读校验并重试广播
     if mode == Mode::Pac {
         match key.get_value::<String, _>("AutoConfigURL") {
             Ok(v) if v.starts_with(PAC_URL) => {},
             Ok(v) => {
                 log::warn!("PAC url mismatch after set: {v}, retrying broadcast");
+                flush_wininet_cache();
                 let _ = broadcast_change();
                 // second read
                 if let Ok(v2) = key.get_value::<String, _>("AutoConfigURL") {
@@ -197,6 +252,7 @@ pub fn disable(snapshot: &Snapshot) -> Result<(), String> {
             key.delete_value("AutoConfigURL").ok();
         }
     }
+    flush_wininet_cache();
     let ok = broadcast_change();
     if !ok {
         log::warn!("broadcast_change after disable returned failure");

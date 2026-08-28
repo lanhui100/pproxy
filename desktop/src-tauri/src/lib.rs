@@ -56,12 +56,15 @@ pub fn run() {
       // T3 重排：cleanup_stale(持久化还原) → init_watch_from_file → (engine.bind 成功后才 sysproxy::enable 在 proxy_enable 内) → broadcast → emit proxy-ready
       proxy::sysproxy::cleanup_stale();
       init_watch_from_file();
+      let current_mode = load_proxy_mode_from_file();
       let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
       let toggle = CheckMenuItem::with_id(app, "proxy_toggle", "系统代理: 已启用", true, ENGINE_ON.load(AOrd::SeqCst), None::<&str>)?;
+      let mode_wl = CheckMenuItem::with_id(app, "mode_whitelist", "  白名单模式 (智能分流)", true, current_mode == proxy::pac::ProxyMode::Whitelist, None::<&str>)?;
+      let mode_gb = CheckMenuItem::with_id(app, "mode_global", "  全局模式 (全部流量)", true, current_mode == proxy::pac::ProxyMode::Global, None::<&str>)?;
       let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
       let sep1 = PredefinedMenuItem::separator(app)?;
       let sep2 = PredefinedMenuItem::separator(app)?;
-      let menu = Menu::with_items(app, &[&show, &sep1, &toggle, &sep2, &quit])?;
+      let menu = Menu::with_items(app, &[&show, &sep1, &toggle, &mode_wl, &mode_gb, &sep2, &quit])?;
       TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Pony Proxy")
@@ -76,6 +79,12 @@ pub fn run() {
             let on = ENGINE_ON.load(AOrd::SeqCst);
             let res = if on { proxy_disable_inner(app.clone()) } else { proxy_enable_inner(app.clone()) };
             if let Err(e) = res { log::warn!("proxy_toggle failed: {e}"); }
+          }
+          "mode_whitelist" => {
+            let _ = proxy_mode_set(app.clone(), "whitelist".into());
+          }
+          "mode_global" => {
+            let _ = proxy_mode_set(app.clone(), "global".into());
           }
           "quit" => {
             if let Err(e) = proxy_disable_inner(app.clone()) { log::warn!("proxy_disable on quit failed: {e}"); }
@@ -98,7 +107,7 @@ pub fn run() {
         app.handle().plugin(tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build())?;
       }
       let handle = app.handle().clone();
-      let _ = handle.emit("proxy-ready", serde_json::json!({"ready": true}));
+      let _ = handle.emit("proxy-ready", serde_json::json!({"ready": true, "mode": match current_mode { proxy::pac::ProxyMode::Whitelist => "whitelist", proxy::pac::ProxyMode::Global => "global" }}));
       Ok(())
     })
     .on_window_event(|window, event| {
@@ -120,7 +129,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
       credential_get, credential_set, credential_delete,
-      proxy_whitelist_get, proxy_whitelist_set,
+      proxy_whitelist_get, proxy_whitelist_set, proxy_mode_get, proxy_mode_set,
       proxy_enable, proxy_disable, proxy_pac, proxy_status, proxy_test_sites,
       proxy_tunnel_get, proxy_tunnel_set_url, tunnel_token_save, tunnel_token_clear,
       proxy_auto_config_get, proxy_auto_config_set, app_config_get, app_config_set,
@@ -184,6 +193,7 @@ fn credential_delete() -> Result<(), String> { cred_delete_impl(CREDENTIAL_USER)
 
 // ---- M6 + T1 watch 通道 ----
 static WHITELIST_TX: OnceLock<watch::Sender<Vec<String>>> = OnceLock::new();
+static PROXY_MODE_TX: OnceLock<watch::Sender<proxy::pac::ProxyMode>> = OnceLock::new();
 // 契约：所有读方必须 clone 后立即 drop guard，再做 matches/generate_pac，不持锁跨 await
 // 已通过 tokio::sync::watch 实现 clone-then-drop；编译期 lint: #[deny(clippy::await_holding_lock)] 在 engine.rs
 
@@ -200,16 +210,37 @@ fn whitelist_file_path() -> std::path::PathBuf { data_dir().join("whitelist.json
 fn load_whitelist_from_file() -> Vec<String> {
     std::fs::read_to_string(whitelist_file_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(seed)
 }
+fn load_proxy_mode_from_file() -> proxy::pac::ProxyMode {
+    let cfg = app_config_get();
+    if let Some(m) = cfg.get("proxy_mode").and_then(|v| v.as_str()) {
+        m.parse().unwrap_or(proxy::pac::ProxyMode::Whitelist)
+    } else {
+        proxy::pac::ProxyMode::Whitelist
+    }
+}
 fn init_watch_from_file() {
-    if WHITELIST_TX.get().is_some() { return; }
-    let wl = load_whitelist_from_file();
-    let (tx, _rx) = watch::channel(wl);
-    let _ = WHITELIST_TX.set(tx);
+    if WHITELIST_TX.get().is_none() {
+        let wl = load_whitelist_from_file();
+        let (tx, _rx) = watch::channel(wl);
+        let _ = WHITELIST_TX.set(tx);
+    }
+    if PROXY_MODE_TX.get().is_none() {
+        let mode = load_proxy_mode_from_file();
+        let (tx, _rx) = watch::channel(mode);
+        let _ = PROXY_MODE_TX.set(tx);
+    }
 }
 fn ensure_watch() -> &'static watch::Sender<Vec<String>> {
     WHITELIST_TX.get_or_init(|| {
         let wl = load_whitelist_from_file();
         let (tx, _rx) = watch::channel(wl);
+        tx
+    })
+}
+fn ensure_mode_watch() -> &'static watch::Sender<proxy::pac::ProxyMode> {
+    PROXY_MODE_TX.get_or_init(|| {
+        let mode = load_proxy_mode_from_file();
+        let (tx, _rx) = watch::channel(mode);
         tx
     })
 }
@@ -220,6 +251,32 @@ fn proxy_whitelist_get() -> Vec<String> {
         return snapshot;
     }
     load_whitelist_from_file()
+}
+#[tauri::command]
+fn proxy_mode_get() -> String {
+    let mode = if let Some(tx) = PROXY_MODE_TX.get() {
+        *tx.borrow()
+    } else {
+        load_proxy_mode_from_file()
+    };
+    match mode {
+        proxy::pac::ProxyMode::Whitelist => "whitelist".into(),
+        proxy::pac::ProxyMode::Global => "global".into(),
+    }
+}
+#[tauri::command]
+fn proxy_mode_set(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+    let parsed_mode: proxy::pac::ProxyMode = mode.parse()?;
+    let tx = ensure_mode_watch();
+    let _ = tx.send(parsed_mode);
+    let _ = app_config_set(serde_json::json!({ "proxy_mode": mode }));
+    if ENGINE_ON.load(AOrd::SeqCst) {
+        let _ = proxy::sysproxy::update_pac_timestamp();
+    }
+    sync_tray_and_emit(&app, ENGINE_ON.load(AOrd::SeqCst));
+    use tauri::Emitter;
+    let _ = app.emit("proxy-mode-changed", serde_json::json!({ "mode": mode }));
+    Ok(())
 }
 fn is_valid_domain(e: &str) -> bool {
     if e.is_empty() || e.len() > 253 { return false; }
@@ -292,8 +349,12 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
     std::fs::rename(&tmp, dir.join("whitelist.json")).map_err(|e| e.to_string())?;
     let tx = ensure_watch();
     let _ = tx.send(minimal.clone());
-    let ok = proxy::sysproxy::broadcast_change();
-    if !ok { log::warn!("broadcast_change after whitelist set failed"); }
+    if ENGINE_ON.load(AOrd::SeqCst) {
+        let _ = proxy::sysproxy::update_pac_timestamp();
+    } else {
+        let ok = proxy::sysproxy::broadcast_change();
+        if !ok { log::warn!("broadcast_change after whitelist set failed"); }
+    }
     Ok(())
 }
 
@@ -335,18 +396,22 @@ static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync
 static ENGINE_TASK: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = std::sync::Mutex::new(None);
 fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
   use tauri::Emitter;
-  let _ = app.emit("proxy-status-changed", serde_json::json!({"on": on}));
-  let _ = app.emit("proxy-ready", serde_json::json!({"ready": true, "on": on}));
+  let current_mode = if let Some(tx) = PROXY_MODE_TX.get() { *tx.borrow() } else { load_proxy_mode_from_file() };
+  let mode_str = match current_mode { proxy::pac::ProxyMode::Whitelist => "whitelist", proxy::pac::ProxyMode::Global => "global" };
+  let _ = app.emit("proxy-status-changed", serde_json::json!({"on": on, "mode": mode_str}));
+  let _ = app.emit("proxy-ready", serde_json::json!({"ready": true, "on": on, "mode": mode_str}));
   if let Some(tray) = app.tray_by_id("main") {
     use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
     let app_handle = app.clone();
     let _ = (|| -> tauri::Result<()> {
       let show = MenuItem::with_id(&app_handle, "show", "显示主窗口", true, None::<&str>)?;
       let toggle = CheckMenuItem::with_id(&app_handle, "proxy_toggle", "系统代理: 已启用", true, on, None::<&str>)?;
+      let mode_wl = CheckMenuItem::with_id(&app_handle, "mode_whitelist", "  白名单模式 (智能分流)", true, current_mode == proxy::pac::ProxyMode::Whitelist, None::<&str>)?;
+      let mode_gb = CheckMenuItem::with_id(&app_handle, "mode_global", "  全局模式 (全部流量)", true, current_mode == proxy::pac::ProxyMode::Global, None::<&str>)?;
       let quit = MenuItem::with_id(&app_handle, "quit", "退出", true, None::<&str>)?;
       let sep1 = PredefinedMenuItem::separator(&app_handle)?;
       let sep2 = PredefinedMenuItem::separator(&app_handle)?;
-      let menu = Menu::with_items(&app_handle, &[&show, &sep1, &toggle, &sep2, &quit])?;
+      let menu = Menu::with_items(&app_handle, &[&show, &sep1, &toggle, &mode_wl, &mode_gb, &sep2, &quit])?;
       tray.set_menu(Some(menu))?;
       Ok(())
     })();
@@ -371,10 +436,17 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     };
     if !already_running {
         let rx = ensure_watch().subscribe();
+        let rx_mode = ensure_mode_watch().subscribe();
         let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
         let rx_clone = rx.clone();
         let handle = tauri::async_runtime::spawn(async move {
-            let cfg = proxy::engine::EngineConfig { listen_addr: "127.0.0.1:18900".into(), whitelist: rx_clone, tunnel_url, tunnel_token };
+            let cfg = proxy::engine::EngineConfig {
+                listen_addr: "127.0.0.1:18900".into(),
+                whitelist: rx_clone,
+                mode: rx_mode,
+                tunnel_url,
+                tunnel_token,
+            };
             if let Err(e) = proxy::engine::run(cfg, stats).await { log::warn!("proxy engine exited: {e}"); }
         });
         *ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
@@ -423,7 +495,13 @@ fn proxy_enable(app: tauri::AppHandle) -> Result<(), String> { proxy_enable_inne
 #[tauri::command]
 fn proxy_disable(app: tauri::AppHandle) -> Result<(), String> { proxy_disable_inner(app) }
 #[tauri::command]
-fn proxy_status() -> serde_json::Value { serde_json::json!({"engine_running": ENGINE_ON.load(AOrd::SeqCst)}) }
+fn proxy_status() -> serde_json::Value {
+    let mode = if let Some(tx) = PROXY_MODE_TX.get() { *tx.borrow() } else { load_proxy_mode_from_file() };
+    serde_json::json!({
+        "engine_running": ENGINE_ON.load(AOrd::SeqCst),
+        "mode": match mode { proxy::pac::ProxyMode::Whitelist => "whitelist", proxy::pac::ProxyMode::Global => "global" }
+    })
+}
 async fn dial_via_proxy(proxy_addr: &str, host: &str, port: u16) -> std::io::Result<()> {
     let mut s = tokio::net::TcpStream::connect(proxy_addr).await?;
     let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
@@ -459,7 +537,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 #[tauri::command]
 fn proxy_pac() -> String {
     let entries = { if let Some(tx)=WHITELIST_TX.get(){ let g=tx.borrow(); g.clone() } else { load_whitelist_from_file() } };
-    proxy::pac::generate_pac(&entries)
+    let mode = { if let Some(tx)=PROXY_MODE_TX.get(){ *tx.borrow() } else { load_proxy_mode_from_file() } };
+    proxy::pac::generate_pac(&entries, mode)
 }
 #[tauri::command]
 async fn api_bypass_fetch(method: String, url: String, headers: Option<std::collections::HashMap<String,String>>, body: Option<String>) -> Result<serde_json::Value, String> {

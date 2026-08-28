@@ -50,7 +50,9 @@ async function tauri<T>(cmd: string, args?: Record<string, unknown>): Promise<T>
 const whitelistEntries = ref<string[]>([])
 const newWhitelistEntry = ref('')
 const proxyEnabled = ref(false)
+const proxyMode = ref<'whitelist' | 'global'>('whitelist')
 const togglingProxy = ref(false)
+const switchingMode = ref(false)
 const proxyError = ref('')
 
 interface SiteResult { site: string; ok: boolean; ms: number; error: string }
@@ -60,15 +62,38 @@ const testingSites = ref(false)
 async function refreshProxy(): Promise<void> {
   try {
     if (!isTauri()) return
-    const [wl, st] = await Promise.all([
+    const [wl, st, mode] = await Promise.all([
       tauri<string[]>('proxy_whitelist_get'),
-      tauri<{ engine_running: boolean }>('proxy_status'),
+      tauri<{ engine_running: boolean; mode?: 'whitelist' | 'global' }>('proxy_status'),
+      tauri<string>('proxy_mode_get').catch(() => 'whitelist'),
     ])
     whitelistEntries.value = wl
     proxyEnabled.value = st.engine_running
+    proxyMode.value = (mode as 'whitelist' | 'global') || st.mode || 'whitelist'
     proxyError.value = ''
   } catch (e) {
     proxyError.value = String(e)
+  }
+}
+
+async function setProxyMode(mode: 'whitelist' | 'global'): Promise<void> {
+  if (proxyMode.value === mode || switchingMode.value) return
+  switchingMode.value = true
+  try {
+    if (isTauri()) {
+      await tauri('proxy_mode_set', { mode })
+    }
+    proxyMode.value = mode
+    toast.success(
+      mode === 'global' ? '已切换至「全局模式」' : '已切换至「白名单模式」',
+      mode === 'global'
+        ? '除局域网外所有流量均走加速通道'
+        : '内置海外常用站点并加速自定义域名名单',
+    )
+  } catch (e) {
+    toast.error('切换模式失败', String(e))
+  } finally {
+    switchingMode.value = false
   }
 }
 
@@ -118,8 +143,9 @@ async function toggleProxy(on: boolean): Promise<void> {
       }
     }
     await tauri(on ? 'proxy_enable' : 'proxy_disable')
-    const st = await tauri<{ engine_running: boolean }>('proxy_status')
+    const st = await tauri<{ engine_running: boolean; mode?: 'whitelist' | 'global' }>('proxy_status')
     proxyEnabled.value = st.engine_running
+    if (st.mode) proxyMode.value = st.mode
     if (on && proxyEnabled.value) toast.success('Windows 系统代理已开启')
   } catch (e) {
     const msg = String(e).replace(/^"|"$/g, '')
@@ -424,6 +450,21 @@ onMounted(async () => {
   await refreshProxy()
   await refreshRoutes()
   start30MinPoll()
+
+  if (isTauri()) {
+    try {
+      const { listen } = await import('@tauri-apps/api/event')
+      await listen<{ mode: 'whitelist' | 'global' }>('proxy-mode-changed', (event) => {
+        if (event.payload?.mode) proxyMode.value = event.payload.mode
+      })
+      await listen<{ on: boolean; mode?: 'whitelist' | 'global' }>('proxy-status-changed', (event) => {
+        if (typeof event.payload?.on === 'boolean') proxyEnabled.value = event.payload.on
+        if (event.payload?.mode) proxyMode.value = event.payload.mode
+      })
+    } catch {
+      /* 忽略非 Tauri 报错 */
+    }
+  }
 })
 </script>
 
@@ -460,6 +501,47 @@ onMounted(async () => {
       <p v-if="proxyError" class="rounded-lg bg-bad-soft px-3 py-2 text-xs text-bad break-all">
         {{ proxyError }}
       </p>
+
+      <!-- 模式切换与总控 -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
+        <div class="inline-flex rounded-lg bg-muted/60 p-1 text-xs font-medium self-start">
+          <button
+            type="button"
+            class="rounded-md px-3 py-1.5 transition cursor-pointer flex items-center gap-1.5"
+            :class="proxyMode === 'whitelist' ? 'bg-background text-foreground shadow-xs font-semibold' : 'text-muted-foreground hover:text-foreground'"
+            :disabled="switchingMode"
+            @click="setProxyMode('whitelist')"
+          >
+            <span>白名单模式</span>
+            <span class="text-[10px] opacity-75 font-normal">（智能分流）</span>
+          </button>
+          <button
+            type="button"
+            class="rounded-md px-3 py-1.5 transition cursor-pointer flex items-center gap-1.5"
+            :class="proxyMode === 'global' ? 'bg-background text-foreground shadow-xs font-semibold' : 'text-muted-foreground hover:text-foreground'"
+            :disabled="switchingMode"
+            @click="setProxyMode('global')"
+          >
+            <span>全局模式</span>
+            <span class="text-[10px] opacity-75 font-normal">（全量流量）</span>
+          </button>
+        </div>
+
+        <p class="text-[11px] text-muted-foreground sm:text-right">
+          <template v-if="proxyMode === 'whitelist'">
+            内置海外常用封锁站点底库，自定义名单即加即热生效。
+          </template>
+          <template v-else>
+            除局域网及私有 IP 外，所有公网 HTTP/HTTPS 流量均经由隧道加速。
+          </template>
+        </p>
+      </div>
+
+      <!-- 全局模式生效提示卡片 -->
+      <div v-if="proxyMode === 'global'" class="rounded-lg bg-primary/10 border border-primary/20 p-2.5 text-xs text-foreground flex items-center gap-2">
+        <Zap class="size-4 text-primary shrink-0" />
+        <span>当前处于<strong>全局透明加速模式</strong>：全部公网网络请求将全量走隧道代理。</span>
+      </div>
 
       <!-- 连通性体检（微网格卡片矩阵） -->
       <div class="rounded-lg bg-muted/40 p-3 space-y-2.5">
@@ -504,15 +586,15 @@ onMounted(async () => {
         </p>
       </div>
 
-      <!-- 加速域名名单（折叠，大号三角指示器） -->
-      <details class="group rounded-lg bg-muted/40 p-3">
+      <!-- 加速域名名单（折叠，仅白名单模式下重点配置） -->
+      <details :open="proxyMode === 'whitelist'" class="group rounded-lg bg-muted/40 p-3">
         <summary class="flex cursor-pointer items-center justify-between font-medium text-xs text-muted-foreground select-none list-none">
           <div class="flex items-center gap-1.5">
-            <span>加速域名名单</span>
+            <span>自定义加速域名名单</span>
             <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground font-mono">
-              {{ whitelistEntries.length }} 个
+              {{ whitelistEntries.length }} 个自定义
             </span>
-            <InfoTip text="添加主域名（如 google.com）将自动加速其全部子域名 (*.google.com)，修改即时热生效。" />
+            <InfoTip text="添加主域名（如 google.com）将自动覆盖全部子域名 (*.google.com) 与地区域名 (google.com.hk 等)；常用海外网站已默认内置，无需手动重复录入。" />
           </div>
           <ChevronDown class="size-4 text-muted-foreground transition-transform duration-200 group-open:rotate-180" />
         </summary>

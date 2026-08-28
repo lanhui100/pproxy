@@ -13,6 +13,30 @@ pub fn normalize_host(host: &str) -> String {
     h
 }
 
+/// 内置常用 GFW/海外基础加速名单（白名单模式下默认生效，不污染用户自定义列表）
+pub const BUILTIN_GFW_DOMAINS: &[&str] = &[
+    // Google 系
+    "google.com", "googleapis.com", "gstatic.com", "googleusercontent.com",
+    "googlevideo.com", "youtube.com", "ytimg.com", "ggpht.com", "gmail.com", "android.com",
+    // AI 与大模型
+    "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
+    "anthropic.com", "claude.ai", "deepmind.google", "huggingface.co",
+    "cohere.com", "groq.com", "mistral.ai", "x.ai", "openrouter.ai",
+    // 开发者与代码生态
+    "github.com", "githubassets.com", "githubusercontent.com", "gitlab.com",
+    "docker.com", "docker.io", "npmjs.org", "npmjs.com", "yarnpkg.com",
+    "crates.io", "golang.org", "rust-lang.org", "v2ex.com",
+    // 社交与知识社区
+    "x.com", "twitter.com", "twimg.com", "t.co", "telegram.org", "t.me",
+    "discord.com", "discord.gg", "discordapp.com", "reddit.com", "redd.it",
+    "medium.com", "notion.so", "notion.site", "wikipedia.org", "wikimedia.org",
+];
+
+#[allow(dead_code)]
+pub fn builtin_gfw_list() -> &'static [&'static str] {
+    BUILTIN_GFW_DOMAINS
+}
+
 /// 区域别名表：base -> 地区域名
 /// 为满足“google.com 自动覆盖 google.com.hk/.ph 等”需求，维护 google 系别名。
 /// 其余 .com 域名通过通用 `*.com.xx` 规则在 alias_match 中兜底，无需枚举。
@@ -47,7 +71,6 @@ const GOOGLE_ALIASES: &[&str] = &[
 fn aliases_for(entry: &str) -> &'static [&'static str] {
     match entry {
         "google.com" => GOOGLE_ALIASES,
-        // 未来可扩展：youtube.com / googleapis.com 等如有地区站可在此追加
         _ => &[],
     }
 }
@@ -61,12 +84,8 @@ fn alias_match(host: &str, entry: &str) -> bool {
         }
     }
     // 通用规则：entry 以 .com 结尾时，host 以 entry + ".<2-3小写字母>" 结尾即视为地区变体
-    // 例如 google.com -> google.com.hk / google.com.ph（含子域 www.google.com.hk）
-    // 覆盖用户“不同地区国家域名自动加入”诉求，对任意 .com 域名生效，副作用为更宽覆盖（可接受）
+    // 例如 google.com -> google.com.hk / google.com.ph（含子域 www.google.com.hk、accounts.google.com.hk）
     if entry.ends_with(".com") {
-        // host == entry + ".xx" 或 host ends_with ".entry.xx"
-        // 构造 host 与 entry 的区域变体后缀判断
-        // 遍历 host 可能的 ".xx" 后缀：只需判断 host 去掉最后 ".xx" 后是否 suffix_match entry
         if let Some(dot) = host.rfind('.') {
             let suffix = &host[dot + 1..];
             if suffix.len() >= 2 && suffix.len() <= 3 && suffix.chars().all(|c| c.is_ascii_lowercase()) {
@@ -80,10 +99,26 @@ fn alias_match(host: &str, entry: &str) -> bool {
     false
 }
 
-/// 计算 entry 在 PAC/匹配时展开的所有形态（自身 + 别名）
+/// 计算 entry 在 PAC/匹配时展开的所有形态（自身 + 别名 + 内置名单）
 pub fn expand_entries(entries: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+
+    // 1. 先置入内置名单
+    for b in BUILTIN_GFW_DOMAINS {
+        let norm = normalize_host(b);
+        if seen.insert(norm.clone()) {
+            out.push(norm.clone());
+        }
+        for alias in aliases_for(&norm) {
+            let a = normalize_host(alias);
+            if seen.insert(a.clone()) {
+                out.push(a);
+            }
+        }
+    }
+
+    // 2. 追加用户自定义条目
     for e in entries {
         let norm = normalize_host(e);
         if seen.insert(norm.clone()) {
@@ -95,17 +130,24 @@ pub fn expand_entries(entries: &[String]) -> Vec<String> {
                 out.push(a);
             }
         }
-        // 通用 .com.xx 展开不在此处显式枚举，由 alias_match 运行时兜底，避免爆炸
     }
     out
 }
 
-/// host 是否命中白名单（任一条目后缀匹配即命中，含区域别名）。
+/// host 是否命中白名单（任一条目后缀匹配即命中，含内置名单与区域别名）。
 pub fn matches(host: &str, entries: &[String]) -> bool {
     let h = normalize_host(host);
     if h.is_empty() {
         return false;
     }
+    // 1. 检查内置常用名单
+    if BUILTIN_GFW_DOMAINS.iter().any(|b| {
+        let nb = normalize_host(b);
+        suffix_match(&h, &nb) || alias_match(&h, &nb)
+    }) {
+        return true;
+    }
+    // 2. 检查用户自定义条目
     entries.iter().any(|e| {
         let ne = normalize_host(e);
         suffix_match(&h, &ne) || alias_match(&h, &ne)
@@ -161,7 +203,7 @@ mod tests {
     #[test]
     fn multiple_entries_any_hit() {
         let e = entries(&["google.com", "github.com", "googlevideo.com"]);
-        assert!(matches("upload.youtube.com", &e) == false);
+        assert!(matches("upload.bilibili.com", &e) == false);
         assert!(matches("www.googlevideo.com", &e));
         assert!(matches("gist.github.com", &e));
     }

@@ -21,6 +21,7 @@ use super::whitelist;
 pub struct EngineConfig {
     pub listen_addr: String,
     pub whitelist: watch::Receiver<Vec<String>>,
+    pub mode: watch::Receiver<pac::ProxyMode>,
     /// 隧道端点（wss://…），None 时白名单流量直接报错关闭（无静默回落）
     pub tunnel_url: Option<String>,
     pub tunnel_token: Option<String>,
@@ -28,11 +29,13 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        // 创建一个空 watch channel 供测试使用
+        // 创建空 watch channel 供测试使用
         let (_tx, rx) = watch::channel(Vec::new());
+        let (_mtx, mrx) = watch::channel(pac::ProxyMode::Whitelist);
         EngineConfig {
             listen_addr: "127.0.0.1:18900".into(),
             whitelist: rx,
+            mode: mrx,
             tunnel_url: None,
             tunnel_token: None,
         }
@@ -78,13 +81,20 @@ enum Route {
     Direct,
 }
 
-/// 分流判定（纯函数）：CONNECT 目标或 Host 头命中白名单 → 隧道。
-// 契约：调用方需先 clone watch 数据，drop 守卫后再调用此函数，避免持锁跨 await
-fn decide(host: &str, whitelist_snapshot: &[String], tunnel_url: &Option<String>) -> Route {
-    if whitelist::matches(host, whitelist_snapshot) && tunnel_url.is_some() {
-        Route::Tunnel
-    } else {
-        Route::Direct
+/// 分流判定（纯函数）：根据工作模式（白名单/全局）与隧道配置决定路由。
+fn decide(host: &str, whitelist_snapshot: &[String], tunnel_url: &Option<String>, mode: pac::ProxyMode) -> Route {
+    if tunnel_url.is_none() {
+        return Route::Direct;
+    }
+    match mode {
+        pac::ProxyMode::Global => Route::Tunnel,
+        pac::ProxyMode::Whitelist => {
+            if whitelist::matches(host, whitelist_snapshot) {
+                Route::Tunnel
+            } else {
+                Route::Direct
+            }
+        }
     }
 }
 
@@ -153,20 +163,24 @@ async fn handle_conn(
     }
     let head = String::from_utf8_lossy(&buf);
 
-    // 引擎自身的控制面：PAC 脚本（仅 absolute-form GET /pac 可达）
-    // T1 契约：clone 后立即 drop，再 generate_pac，不持锁跨 await
-    if head.starts_with("GET http://127.0.0.1:18900/pac ")
-        || head.starts_with("GET /pac ")
-    {
+    // 引擎自身的控制面：PAC 脚本（放行带 ?v= 时间戳与参数的请求）
+    let is_pac_req = if let Some(first) = head.lines().next() {
+        first.starts_with("GET /pac")
+            || first.starts_with("GET http://127.0.0.1:18900/pac")
+            || first.starts_with("GET http://localhost:18900/pac")
+    } else {
+        false
+    };
+
+    if is_pac_req {
         let wl_snapshot = {
             let guard = cfg.whitelist.borrow();
-            let cloned = guard.clone();
-            // guard drop here
-            cloned
+            guard.clone()
         };
-        let body = pac::generate_pac(&wl_snapshot);
+        let mode_snapshot = *cfg.mode.borrow();
+        let body = pac::generate_pac(&wl_snapshot, mode_snapshot);
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nCache-Control: no-cache, no-store, must-revalidate\r\nPragma: no-cache\r\nExpires: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
@@ -179,12 +193,13 @@ async fn handle_conn(
             .await;
     };
 
-    // T1: decide 前先 clone whitelist snapshot 并 drop
+    // T1: decide 前先 clone whitelist & mode snapshot 并 drop
     let wl_snapshot = {
         let g = cfg.whitelist.borrow();
         g.clone()
     };
-    let route = decide(&parsed.host, &wl_snapshot, &cfg.tunnel_url);
+    let mode_snapshot = *cfg.mode.borrow();
+    let route = decide(&parsed.host, &wl_snapshot, &cfg.tunnel_url, mode_snapshot);
     match route {
         Route::Direct => {
             stats.direct.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -294,15 +309,24 @@ mod tests {
     fn decide_whitelist_with_tunnel() {
         let cfg = cfg_with_whitelist(vec!["youtube.com".into()], Some("wss://gate/ws".into()));
         let snap = cfg.whitelist.borrow().clone();
-        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url), Route::Tunnel);
-        assert_eq!(decide("baidu.com", &snap, &cfg.tunnel_url), Route::Direct);
+        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Whitelist), Route::Tunnel);
+        assert_eq!(decide("baidu.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Whitelist), Route::Direct);
+    }
+
+    #[test]
+    fn decide_global_mode_tunnels_all() {
+        let cfg = cfg_with_whitelist(vec![], Some("wss://gate/ws".into()));
+        let snap = cfg.whitelist.borrow().clone();
+        assert_eq!(decide("baidu.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Global), Route::Tunnel);
+        assert_eq!(decide("google.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Global), Route::Tunnel);
     }
 
     #[test]
     fn decide_no_tunnel_url_never_tunnels() {
         let cfg = cfg_with_whitelist(vec!["youtube.com".into()], None);
         let snap = cfg.whitelist.borrow().clone();
-        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url), Route::Direct);
+        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Whitelist), Route::Direct);
+        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url, pac::ProxyMode::Global), Route::Direct);
     }
 
     #[test]
