@@ -39,3 +39,6 @@ deploy/cf-gate-worker/node_modules/
 # 根目录与 scripts 的依赖目录
 /node_modules/
 /scripts/node_modules/
+
+# 根目录 node_modules 符号链接（git 视为文件，带斜杠的目录规则无法匹配）
+/node_modules
