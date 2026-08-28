@@ -84,24 +84,26 @@ SAVED_EOF
 esac
 "#;
 
-// ─── 路径辅助 ────────────────────────────────────────────────
+fn home_dir() -> Result<PathBuf, String> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .map_err(|_| "HOME / USERPROFILE not set".to_string())
+}
 
 /// 获取代理持久化文件路径。
 fn proxy_env_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(PathBuf::from(&home).join(".pony").join(PROXY_ENV_FILE))
+    Ok(home_dir()?.join(".pony").join(PROXY_ENV_FILE))
 }
 
 /// 获取快照文件路径。
 fn snapshot_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(PathBuf::from(&home).join(".pony").join(ENV_SNAPSHOT_FILE))
+    Ok(home_dir()?.join(".pony").join(ENV_SNAPSHOT_FILE))
 }
 
 /// 获取应急脚本默认输出路径。
 fn default_script_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    Ok(PathBuf::from(&home).join(".pony").join("mitigate.sh"))
+    Ok(home_dir()?.join(".pony").join("mitigate.sh"))
 }
 
 // ─── K8s API 地址自动探测 ────────────────────────────────────
@@ -113,9 +115,9 @@ fn detect_k8s_cluster_entries() -> Vec<String> {
         .map(PathBuf::from)
         .ok()
         .or_else(|| {
-            std::env::var("HOME")
+            home_dir()
                 .ok()
-                .map(|h| PathBuf::from(h).join(".kube").join("config"))
+                .map(|h| h.join(".kube").join("config"))
         });
     let kubeconfig_path = match kubeconfig_path {
         Some(p) if p.exists() => p,
@@ -662,6 +664,6 @@ contexts:
     #[test]
     fn default_script_path_is_under_pony_dir() {
         let path = default_script_path().unwrap();
-        assert!(path.to_string_lossy().contains(".pony/mitigate.sh"));
+        assert!(path.ends_with(std::path::Path::new(".pony").join("mitigate.sh")));
     }
 }
