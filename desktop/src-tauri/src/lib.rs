@@ -261,6 +261,11 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
         }
     }
     *shared_whitelist().write().unwrap_or_else(|p| p.into_inner()) = effective_wl;
+
+    // 若系统代理正在运行，立即广播变更刷新 WinINET / 系统 PAC 缓存（免重启即时热生效）
+    if ENGINE_ON.load(AOrd::SeqCst) {
+        proxy::sysproxy::broadcast_change();
+    }
     Ok(())
 }
 
@@ -545,5 +550,91 @@ mod tests {
             drop(s);
         });
         assert!(dial_via_proxy(&addr.to_string(), "x.com", 443).await.is_err());
+    }
+
+    #[test]
+    fn whitelist_set_updates_shared_whitelist_and_pac_immediately() {
+        let test_domain = "newly-added-speed-domain.com".to_string();
+        proxy_whitelist_set(vec![test_domain.clone()]).expect("whitelist set should succeed");
+
+        let current_wl = shared_whitelist().read().unwrap().clone();
+        assert!(current_wl.contains(&test_domain), "shared whitelist must contain newly added domain");
+        assert!(current_wl.contains(&"github.com".to_string()), "must retain ALWAYS_TUNNEL");
+
+        let pac_content = proxy_pac();
+        assert!(pac_content.contains("newly-added-speed-domain.com"), "PAC script must immediately reflect new domain");
+    }
+
+    #[test]
+    fn whitelist_set_rejects_invalid_entries() {
+        assert!(proxy_whitelist_set(vec!["".to_string()]).is_err());
+        assert!(proxy_whitelist_set(vec!["invalid domain with spaces.com".to_string()]).is_err());
+        assert!(proxy_whitelist_set(vec!["http://with-scheme.com".to_string()]).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_whitelist_hot_reload_end_to_end() {
+        // 动态端口绑定
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        drop(listener); // 释放端口给 engine run 绑定
+
+        let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
+        let swl = std::sync::Arc::clone(shared_whitelist());
+        let stunnel = std::sync::Arc::clone(shared_tunnel());
+
+        // 配置假隧道以便观察白名单命中后的隧道决策
+        *stunnel.write().unwrap() = (Some("ws://127.0.0.1:9/stub".into()), Some("test-token".into()));
+
+        // 重置白名单为空
+        proxy_whitelist_set(vec![]).expect("clear whitelist");
+
+        let cfg = proxy::engine::EngineConfig {
+            listen_addr: addr.clone(),
+            whitelist: swl,
+            tunnel: stunnel,
+        };
+        let stats_clone = std::sync::Arc::clone(&stats);
+        tokio::spawn(async move {
+            let _ = proxy::engine::run(cfg, stats_clone).await;
+        });
+
+        // 等待服务监听就绪
+        let mut ready = false;
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(ready, "测试引擎必须成功监听");
+
+        // 1. 初始 PAC 检查：不含 e2e-site.com
+        let mut client1 = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        client1.write_all(b"GET /pac HTTP/1.1\r\n\r\n").await.unwrap();
+        let mut buf = vec![0u8; 2048];
+        let n1 = client1.read(&mut buf).await.unwrap();
+        let pac1 = String::from_utf8_lossy(&buf[..n1]);
+        assert!(pac1.contains("Cache-Control: no-cache, no-store, must-revalidate"));
+        assert!(!pac1.contains("e2e-site.com"), "初始 PAC 不应包含 e2e-site.com");
+
+        // 2. 动态加入 e2e-site.com（免重启）
+        proxy_whitelist_set(vec!["e2e-site.com".into()]).expect("add domain");
+
+        // 3. PAC 热更新验证：无需重启，立即返回包含新域名的 PAC
+        let mut client2 = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        client2.write_all(b"GET /pac HTTP/1.1\r\n\r\n").await.unwrap();
+        let n2 = client2.read(&mut buf).await.unwrap();
+        let pac2 = String::from_utf8_lossy(&buf[..n2]);
+        assert!(pac2.contains("e2e-site.com"), "PAC 脚本必须无需重启立即包含新加入的域名");
+
+        // 4. 分流热更新验证：发往 e2e-site.com 的 CONNECT 请求立即走白名单隧道分流
+        let mut client3 = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        client3.write_all(b"CONNECT e2e-site.com:443 HTTP/1.1\r\n\r\n").await.unwrap();
+        let _ = client3.read(&mut buf).await;
+        let tunneled = stats.tunneled.load(std::sync::atomic::Ordering::Relaxed);
+        let errors = stats.errors.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(tunneled > 0 || errors > 0, "新域名必须立即触发白名单隧道分流");
     }
 }

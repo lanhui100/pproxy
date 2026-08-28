@@ -159,7 +159,7 @@ async fn handle_conn(
             pac::generate_pac(&wl)
         };
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nCache-Control: no-cache, no-store, must-revalidate\r\nPragma: no-cache\r\nExpires: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
@@ -382,6 +382,33 @@ mod integration {
             1,
             "direct 计数应+1"
         );
+    }
+
+    #[tokio::test]
+    async fn pac_endpoint_returns_anti_caching_headers() {
+        let cfg = EngineConfig {
+            whitelist: Arc::new(std::sync::RwLock::new(vec!["example.com".into()])),
+            ..Default::default()
+        };
+        let stats = Arc::new(EngineStats::default());
+        let (mut client, srv) = socket_pair().await;
+        let st2 = Arc::clone(&stats);
+        tokio::spawn(async move {
+            handle_conn(srv, &cfg, &st2).await.ok();
+        });
+
+        client
+            .write_all(b"GET http://127.0.0.1:18900/pac HTTP/1.1\r\nHost: 127.0.0.1:18900\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let n = client.read(&mut buf).await.unwrap();
+        let resp = String::from_utf8_lossy(&buf[..n]);
+        assert!(resp.starts_with("HTTP/1.1 200 OK"));
+        assert!(resp.contains("Cache-Control: no-cache, no-store, must-revalidate"));
+        assert!(resp.contains("Pragma: no-cache"));
+        assert!(resp.contains("Expires: 0"));
+        assert!(resp.contains("example.com"));
     }
 
     #[tokio::test]

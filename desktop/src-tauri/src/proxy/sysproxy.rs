@@ -90,7 +90,7 @@ pub fn disable(snapshot: &Snapshot) -> Result<(), String> {
 
 /// 广播设置变更（F10）：已运行应用感知代理切换。
 #[cfg(windows)]
-fn broadcast_change() {
+pub fn broadcast_change() {
     unsafe {
         use windows_sys::Win32::Networking::WinInet::{
             InternetSetOptionA, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
@@ -150,8 +150,10 @@ pub fn cleanup_stale() {
 #[cfg(not(windows))]
 pub fn cleanup_stale() {}
 
-// ---- 非 Windows 平台：no-op（开发期占位；生产目标仅 Windows）----
+#[cfg(not(windows))]
+pub fn broadcast_change() {}
 
+// ---- 非 Windows 平台：no-op（开发期占位；生产目标仅 Windows）----
 
 #[cfg(not(windows))]
 pub fn enable(_mode: Mode) -> Result<Snapshot, String> {
