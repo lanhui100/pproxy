@@ -1197,6 +1197,7 @@ dependencies = [
  "hyper-util",
  "pproxy-core",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
