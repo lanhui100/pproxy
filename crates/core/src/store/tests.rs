@@ -151,7 +151,7 @@ fn upsert_usage_accumulates() {
         bytes_in: 100,
         bytes_out: 200,
     };
-    store.upsert_usage(&[row.clone()]).unwrap();
+    store.upsert_usage(std::slice::from_ref(&row)).unwrap();
     store
         .upsert_usage(&[UsageRow { requests: 2, bytes_in: 50, bytes_out: 60, ..row }])
         .unwrap();

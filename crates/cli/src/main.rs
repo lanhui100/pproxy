@@ -244,9 +244,9 @@ fn run(cli: Cli) -> Result<i32, RunError> {
 
     // start/stop/restart 纯本机 systemd，不读管理 API 配置
     let action = match &cli.command {
-        Command::Start { .. } => Some("start"),
-        Command::Stop { .. } => Some("stop"),
-        Command::Restart { .. } => Some("restart"),
+        Command::Start => Some("start"),
+        Command::Stop => Some("stop"),
+        Command::Restart => Some("restart"),
         _ => None,
     };
     if let Some(action) = action {
@@ -333,7 +333,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Config {
             cmd: ConfigCmd::Export { service, route, token },
         } => cmd::export_cmd::run(&cfg, service, route.as_deref(), token.as_deref()),
-        Command::Init { .. } | Command::Deploy { .. } | Command::Start { .. } | Command::Stop { .. } | Command::Restart { .. } | Command::On | Command::Off { .. } | Command::Env { .. } => {
+        Command::Init { .. } | Command::Deploy { .. } | Command::Start | Command::Stop | Command::Restart | Command::On | Command::Off { .. } | Command::Env { .. } => {
             unreachable!("handled above")
         }
     };

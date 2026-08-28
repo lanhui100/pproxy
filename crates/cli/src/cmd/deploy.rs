@@ -593,8 +593,8 @@ mod tests {
         // PPROXY_DEPLOY_DIR 无效但编译期嵌入路径仍能找到真实 deploy/，
         // 所以 result 可能 Ok。仅验证 env 设置不干扰其他路径。
         // 无法在此环境中模拟"完全找不到"场景，跳过严格断言。
-        if result.is_err() {
-            assert!(result.unwrap_err().contains("无法定位"));
+        if let Err(e) = result {
+            assert!(e.contains("无法定位"));
         }
     }
 }

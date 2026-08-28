@@ -352,7 +352,7 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
     let existing = if let Some(tx) = WHITELIST_TX.get() { tx.borrow().clone() } else { load_whitelist_from_file() };
     for e in &normalized {
         if !existing.contains(e) && proxy::whitelist::matches(e, &existing) {
-            if let Some(cover) = existing.iter().find(|c| proxy::whitelist::matches(e, &vec![(*c).clone()])) {
+            if let Some(cover) = existing.iter().find(|c| proxy::whitelist::matches(e, &[(*c).clone()])) {
                 return Err(format!("{} 已包含在 {} 中，无需重复添加", e, cover));
             }
             // 通用兜底：已被别名覆盖但未找到显式 cover 文案时仍拒绝
@@ -365,7 +365,7 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
     let mut minimal: Vec<String> = Vec::new();
     for cand in sorted {
         if proxy::whitelist::matches(&cand, &minimal) { continue; }
-        minimal.retain(|ex| !proxy::whitelist::matches(ex, &[cand.clone()]));
+        minimal.retain(|ex| !proxy::whitelist::matches(ex, std::slice::from_ref(&cand)));
         minimal.push(cand);
     }
     minimal.sort_unstable();
@@ -532,8 +532,8 @@ fn proxy_disable_inner(app: tauri::AppHandle) -> Result<(), String> {
         let _ = proxy::sysproxy::disable_with_persisted_fallback(None).map_err(|e| { log::warn!("disable fallback failed: {e}"); e });
     }
     *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = None;
-    let was_on = ENGINE_ON.swap(false, AOrd::SeqCst);
-    if was_on || snap_opt.is_some() { sync_tray_and_emit(&app, false); } else { sync_tray_and_emit(&app, false); }
+    let _was_on = ENGINE_ON.swap(false, AOrd::SeqCst);
+    sync_tray_and_emit(&app, false);
     Ok(())
 }
 #[tauri::command]

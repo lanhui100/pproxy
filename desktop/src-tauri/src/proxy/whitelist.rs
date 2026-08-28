@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn multiple_entries_any_hit() {
         let e = entries(&["google.com", "github.com", "googlevideo.com"]);
-        assert!(matches("upload.bilibili.com", &e) == false);
+        assert!(!matches("upload.bilibili.com", &e));
         assert!(matches("www.googlevideo.com", &e));
         assert!(matches("gist.github.com", &e));
     }

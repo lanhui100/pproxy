@@ -102,8 +102,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 5.5 CONNECT 隧道配置（pproxy-connect-tunnel spec §3.4）：env 装配，fail-closed
     let tunnel_cfg = connect::TunnelConfig::from_env().map(Arc::new);
-    if tunnel_cfg.is_some() {
-        let allowlist = tunnel_cfg.as_ref().unwrap().allowlist.join(", ");
+    if let Some(cfg) = &tunnel_cfg {
+        let allowlist = cfg.allowlist.join(", ");
         info!(allowlist = %allowlist, "CONNECT tunnel enabled via gate worker");
     }
 

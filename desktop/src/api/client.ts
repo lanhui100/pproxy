@@ -168,6 +168,7 @@ async function rawRequest(
   void bh // 保留引用，避免未使用告警；真实 bypass 由 PAC + no_proxy 双保险保证
 
   let resp: Response
+  const payload = (method === 'GET' || body === undefined) ? undefined : JSON.stringify(body)
   if (inTauri()) {
     // 管理面请求绕过代理双保险：
     // 优先走 Rust 命令 api_bypass_fetch（内部 reqwest no_proxy），失败则回退 plugin-http
@@ -177,7 +178,7 @@ async function rawRequest(
         method,
         url,
         headers,
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: payload,
       })
       // 将 Rust 侧结果包装为 Response 兼容对象
       resp = new Response(r.text, { status: r.status, headers: { 'Content-Type': 'application/json' } })
@@ -185,10 +186,10 @@ async function rawRequest(
       // 回退：plugin-http（PAC 已旁路管理面，仍为 DIRECT）；若支持 noProxy 选项则更佳
       const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http')
       // 注释：若 tauri-plugin-http 支持 noProxy 选项，可传入 { noProxy: true }；当前 fallback 依赖 PAC 的 DIRECT 保证
-      resp = await tauriFetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+      resp = await tauriFetch(url, { method, headers, ...(payload !== undefined ? { body: payload } : {}) })
     }
   } else {
-    resp = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    resp = await fetch(url, { method, headers, ...(payload !== undefined ? { body: payload } : {}) })
   }
 
   if (resp.status === 401) {

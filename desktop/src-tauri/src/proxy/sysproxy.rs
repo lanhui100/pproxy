@@ -9,6 +9,7 @@
 //! T4 追加：快照落盘 data_dir/sysproxy_snapshot.json（持久化），崩溃后下次启动按快照还原。
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum Mode {
     Pac,
     Manual,
@@ -301,7 +302,7 @@ pub fn broadcast_change() -> bool {
             HWND_BROADCAST as HWND,
             WM_SETTINGCHANGE,
             0 as WPARAM,
-            b"InternetSettings\0".as_ptr() as LPARAM,
+            c"InternetSettings".as_ptr() as LPARAM,
             SMTO_ABORTIFHUNG,
             TIMEOUT_MS,
             &mut result as *mut usize,

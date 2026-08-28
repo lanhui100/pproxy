@@ -145,7 +145,7 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
         env_out.push_str(&format!("PPROXY_VERCEL_TOKEN={}\n", vercel_token));
     }
     if !tunnel_token.is_empty() {
-        env_out.push_str(&format!("PPROXY_TUNNEL_GATE_URL=wss://gate.ponyjob.top/ws\n"));
+        env_out.push_str("PPROXY_TUNNEL_GATE_URL=wss://gate.ponyjob.top/ws\n");
         env_out.push_str(&format!("PPROXY_TUNNEL_TOKEN={}\n", tunnel_token));
     }
     for line in env_out.lines() {

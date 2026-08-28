@@ -58,17 +58,12 @@ pub fn collect_bypass_hosts() -> BTreeSet<String> {
     set
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyMode {
+    #[default]
     Whitelist,
     Global,
-}
-
-impl Default for ProxyMode {
-    fn default() -> Self {
-        ProxyMode::Whitelist
-    }
 }
 
 impl std::str::FromStr for ProxyMode {

@@ -1,5 +1,6 @@
 //! `pproxy status / start / stop / restart`（M2 §4.2）。
 
+#[cfg(target_os = "linux")]
 use std::process::Command;
 
 use crate::client::{AdminClient, ApiError};
@@ -69,6 +70,7 @@ pub fn status(http: &AdminClient) -> Result<i32, String> {
     Ok(EXIT_OK)
 }
 
+#[cfg(target_os = "linux")]
 fn which_systemctl() -> Option<std::path::PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
@@ -83,7 +85,7 @@ pub fn systemd_action(action: &str) -> Result<i32, String> {
     {
         let _ = action;
         eprintln!("error: service start/stop/restart 仅支持本机 Linux (systemd)");
-        return Ok(EXIT_FAILURE);
+        Ok(EXIT_FAILURE)
     }
     #[cfg(target_os = "linux")]
     {
@@ -124,6 +126,6 @@ pub(crate) fn tokio_block_impl<T>(fut: impl std::future::Future<Output = T>) -> 
 #[cfg(test)]
 fn futures_lite_block<T>(fut: impl std::future::Future<Output = T>) -> T {
     // 极简 executor：本 crate 测试只用于类型检查，不做真实异步驱动
-    let _ = fut;
+    drop(fut);
     unreachable!("async tests use #[tokio::test] in client.rs directly")
 }

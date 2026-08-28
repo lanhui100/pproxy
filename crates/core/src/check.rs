@@ -40,9 +40,7 @@ async fn verify_one(p: &ProxyRecord) -> Option<ProxyRecord> {
         _ => return None,
     };
 
-    let connect_req = format!(
-        "CONNECT ipinfo.io:80 HTTP/1.1\r\nHost: ipinfo.io:80\r\n\r\n"
-    );
+    let connect_req = "CONNECT ipinfo.io:80 HTTP/1.1\r\nHost: ipinfo.io:80\r\n\r\n";
     if stream.write_all(connect_req.as_bytes()).await.is_err() {
         return None;
     }

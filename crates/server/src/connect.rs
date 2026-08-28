@@ -103,7 +103,7 @@ fn parse_allowlist(raw: Option<&str>) -> Vec<String> {
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| normalize_host(s))
+        .map(normalize_host)
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -477,6 +477,7 @@ mod tests {
 
     /// 复刻 worker.js 协议：Text 首帧 `{"host","port"}` → `{"ok":true}` / deny → Binary echo。
     /// `deny_hosts` 非空时对这些 host 回 `{"ok":false}`（模拟 worker ACL）。
+    #[allow(clippy::result_large_err, clippy::collapsible_match)]
     async fn spawn_stub_worker(deny_hosts: &'static [&'static str]) -> StubWorker {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

@@ -168,7 +168,7 @@ fn rewrite_first_line(first: &str) -> String {
         return first.to_string();
     }
     let after_scheme = parts[1].strip_prefix("http://").unwrap_or(parts[1]);
-    let path_start = after_scheme.find(|c| c == '/' || c == '?');
+    let path_start = after_scheme.find(['/', '?']);
     let path = match path_start {
         Some(i) if after_scheme.as_bytes()[i] == b'?' => {
             format!("/{}", &after_scheme[i..])

@@ -95,7 +95,7 @@ impl Counters {
 
 /// spawn_blocking 的 JoinError（阻塞任务 panic）→ StoreError。
 fn join_error(e: tokio::task::JoinError) -> StoreError {
-    StoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+    StoreError::Io(std::io::Error::other(e))
 }
 
 pub struct UsageTracker {
