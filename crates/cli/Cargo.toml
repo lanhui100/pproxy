@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "pony"
+name = "pproxy"
 path = "src/main.rs"
 
 [dependencies]
@@ -17,8 +17,11 @@ anyhow.workspace = true
 futures.workspace = true
 tokio.workspace = true
 libc = "0.2"
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
 
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
 [dev-dependencies]
 tempfile.workspace = true

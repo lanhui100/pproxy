@@ -1,4 +1,4 @@
-//! pony CLI 入口：解析 → 执行 → 退出码（M2 §2）。
+//! pproxy CLI 入口：解析 → 执行 → 退出码（M2 §2）。
 //!
 //! 本文件禁止业务逻辑：命令实现在 cmd/*，HTTP 在 client.rs，本地配置在 config.rs。
 
@@ -20,7 +20,7 @@ pub const EXIT_LOCAL_CONFIG: i32 = 2;
 pub const EXIT_UNREACHABLE: i32 = 3;
 
 #[derive(Parser)]
-#[command(name = "pony", version, about = "Pony Proxy 管理 CLI")]
+#[command(name = "pproxy", version, about = "Pony Proxy 管理 CLI")]
 struct Cli {
     /// 覆盖 admin token（优先级最高：> PONY_ADMIN_TOKEN > config.toml）
     #[arg(long, global = true)]
@@ -38,17 +38,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 写入 ~/.pony/config.toml
+    /// 写入 ~/.pony/config.toml（或 --interactive 交互式引导）
     Init {
         #[arg(long)]
-        server: String,
+        server: Option<String>,
         #[arg(long)]
         token: Option<String>,
         #[arg(long)]
         force: bool,
+        /// 交互式初始化向导（推荐新用户使用）
+        #[arg(long)]
+        interactive: bool,
     },
-    /// 服务状态（管理面 health + 本机 systemd）
+    /// 部署上游服务（CF Worker / Vercel / Gate Worker）
+    Deploy {
+        /// 部署目标: cf-worker | vercel | gate | all
+        target: String,
+    },
+    /// 服务状态（管理面 health + 本机 systemd + 环境代理）
     Status,
+    /// 开启本机环境代理（设置 http_proxy / https_proxy 环境变量）
+    On,
+    /// 关闭本机环境代理（清除 http_proxy / https_proxy 环境变量）
+    Off,
     Start,
     Stop,
     Restart,
@@ -186,9 +198,21 @@ impl From<String> for RunError {
 }
 
 fn run(cli: Cli) -> Result<i32, RunError> {
-    // init 不需要已有配置
-    if let Command::Init { server, token, force } = &cli.command {
-        return init(server, token.as_deref(), *force);
+    // init 优先：交互式或非交互式
+    if let Command::Init { server, token, force, interactive } = &cli.command {
+        if *interactive || server.is_none() {
+            return cmd::init_interactive::run_interactive(*force).map_err(RunError::Msg);
+        }
+        let server = server.clone().unwrap_or_default();
+        return init(&server, token.as_deref(), *force);
+    }
+
+    // deploy 也需要配置（但 deploy 本身会读取配置中的 token 等字段）
+    if let Command::Deploy { target } = &cli.command {
+        let cfg = config::load()?;
+        let t = cmd::deploy::Target::from_str(target)
+            .ok_or_else(|| RunError::Msg(format!("无效部署目标: {target} — 可选: cf-worker, vercel, gate, all")))?;
+        return cmd::deploy::run(t, &cfg).map_err(RunError::Msg);
     }
 
     // start/stop/restart 纯本机 systemd，不读管理 API 配置
@@ -202,12 +226,19 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         return cmd::service::systemd_action(action).map_err(RunError::Msg);
     }
 
+    // on/off 环境代理开关，不需要管理 API 配置
+    if matches!(cli.command, Command::On | Command::Off) {
+        let enable = matches!(cli.command, Command::On);
+        return cmd::proxy_env::toggle(enable).map_err(RunError::Msg);
+    }
+
     // 组装配置与 client
     let cfg = config::load()?;
     let server = cli.server.clone().unwrap_or_else(|| cfg.server.clone());
     let admin_token = cli
         .token
         .clone()
+        .or_else(|| std::env::var("PPROXY_ADMIN_TOKEN").ok())
         .or_else(|| std::env::var("PONY_ADMIN_TOKEN").ok())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| cfg.admin_token.clone());
@@ -256,7 +287,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Config {
             cmd: ConfigCmd::Export { service, route, token },
         } => cmd::export_cmd::run(&cfg, service, route.as_deref(), token.as_deref()),
-        Command::Init { .. } | Command::Start { .. } | Command::Stop { .. } | Command::Restart { .. } => {
+        Command::Init { .. } | Command::Deploy { .. } | Command::Start { .. } | Command::Stop { .. } | Command::Restart { .. } | Command::On | Command::Off => {
             unreachable!("handled above")
         }
     };
@@ -275,13 +306,18 @@ fn init(server: &str, token: Option<&str>, force: bool) -> Result<i32, RunError>
         server: server.to_string(),
         admin_token: token.unwrap_or("").to_string(),
         data_plane: None,
+        cf_token: None,
+        cf_account_tag: None,
+        vercel_token: None,
+        tunnel_token: None,
+        proxy_secret: None,
     };
     let written = config::save(&cfg)?;
     println!("config written: {}", written.display());
     if token.is_none() {
         let _ = writeln!(
             std::io::stderr(),
-            "note: admin_token 未写入 — 后续可用 PONY_ADMIN_TOKEN 环境变量或 'pony init --token <t>' 补充"
+            "note: admin_token 未写入 — 后续可用 PPROXY_ADMIN_TOKEN 环境变量或 'pproxy init --token <t>' 补充"
         );
     }
     Ok(EXIT_OK)

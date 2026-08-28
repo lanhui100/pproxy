@@ -26,7 +26,7 @@ impl fmt::Display for ApiError {
         match self {
             Self::Connection(e) => write!(
                 f,
-                "cannot reach admin api: {e} — pony-server 未运行? (systemctl status pproxy)"
+                "cannot reach admin api: {e} — pproxy-server 未运行? (systemctl status pproxy)"
             ),
             Self::Status(code, msg) => write!(f, "api error (HTTP {code}): {msg}"),
             Self::BadResponse(e) => write!(f, "unexpected response: {e}"),

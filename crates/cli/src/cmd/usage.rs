@@ -1,4 +1,4 @@
-//! `pony usage`（M2 §4.5）。
+//! `pproxy usage`（M2 §4.5）。
 
 use crate::client::AdminClient;
 use crate::cmd::route::report_err;

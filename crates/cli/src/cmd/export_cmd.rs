@@ -1,4 +1,4 @@
-//! `pony config export <service>`（M2 §4.7）。纯本地渲染 + data_plane 推导。
+//! `pproxy config export <service>`（M2 §4.7）。纯本地渲染 + data_plane 推导。
 
 use std::io::Write as _;
 

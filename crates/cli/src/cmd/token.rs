@@ -1,4 +1,4 @@
-//! `pony token ...`（M2 §4.4）。
+//! `pproxy token ...`（M2 §4.4）。
 
 use std::io::Write as _;
 

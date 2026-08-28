@@ -475,6 +475,8 @@ mod tests {
             Some(&HeaderValue::from_static("close")),
             "网关响应不得强制插入 Connection: close"
         );
+    }
+
     // ---- 回归（F-2026-08-27）：上游 target URL 必须剥离 route 名 ----
     // 缺陷现场：auth_middleware 把 route 名混入 path_query，resolve 拼出的
     // 上游 URL 恒为 https://{host}/{route}/{path}——opencode.ai/zen 与

@@ -1,4 +1,4 @@
-//! `pony doctor`（M2 §4.6）：顺序执行、失败不中断、末尾汇总。
+//! `pproxy doctor`（M2 §4.6）：顺序执行、失败不中断、末尾汇总。
 
 use crate::client::{AdminClient, ApiError};
 use crate::cmd::route::test_all_inner;

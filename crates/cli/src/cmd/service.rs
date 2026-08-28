@@ -1,13 +1,15 @@
-//! `pony status / start / stop / restart`（M2 §4.2）。
+//! `pproxy status / start / stop / restart`（M2 §4.2）。
 
 use std::process::Command;
 
 use crate::client::{AdminClient, ApiError};
+use crate::cmd::proxy_env;
 use crate::render::Table;
 use crate::{EXIT_FAILURE, EXIT_OK, EXIT_UNREACHABLE};
 
-/// status：管理面 health 渲染 + 本机 systemd 状态行。
+/// status：管理面 health 渲染 + 本机 systemd 状态行 + 环境代理状态。
 pub fn status(http: &AdminClient) -> Result<i32, String> {
+    // 服务端状态
     let runtime = tokio_block(async {
         match http.health().await {
             Ok(v) => Ok(v),
@@ -59,6 +61,11 @@ pub fn status(http: &AdminClient) -> Result<i32, String> {
             }
         }
     }
+
+    // 环境代理状态
+    println!();
+    let _ = proxy_env::status();
+
     Ok(EXIT_OK)
 }
 

@@ -1,4 +1,4 @@
-//! `pony route ...`（M2 §4.3）。
+//! `pproxy route ...`（M2 §4.3）。
 
 use std::io::Write as _;
 

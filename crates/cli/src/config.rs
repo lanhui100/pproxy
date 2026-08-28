@@ -24,7 +24,7 @@ impl fmt::Display for ConfigError {
         match self {
             Self::NotFound(p) => write!(
                 f,
-                "config not found: {} — run 'pony init --server <url> --token <admin_token>'",
+                "config not found: {} — run 'pproxy init --server <url> --token <admin_token>'",
                 p.display()
             ),
             Self::Read(e) => write!(f, "config read failed: {e}"),
@@ -43,6 +43,23 @@ pub struct PonyConfig {
     pub admin_token: String,
     #[serde(default)]
     pub data_plane: Option<String>,
+
+    // ---- 部署配置（可选，交互式 init 写入，deploy 命令读取）----
+    /// Cloudflare API Token（用于部署 CF Worker）
+    #[serde(default)]
+    pub cf_token: Option<String>,
+    /// Cloudflare Account Tag（用于 CF Worker 部署）
+    #[serde(default)]
+    pub cf_account_tag: Option<String>,
+    /// Vercel Token（用于部署 Vercel 函数）
+    #[serde(default)]
+    pub vercel_token: Option<String>,
+    /// 隧道令牌（Gate Worker 认证）
+    #[serde(default)]
+    pub tunnel_token: Option<String>,
+    /// 上游共享密钥（PROXY_SECRET，服务器与 Worker 之间）
+    #[serde(default)]
+    pub proxy_secret: Option<String>,
 }
 
 /// `$HOME/.pony/config.toml` 路径；HOME 缺失 → 错误（退出码 2）。
@@ -218,6 +235,11 @@ mod tests {
             server: server.into(),
             admin_token: "t".into(),
             data_plane: dp.map(Into::into),
+            cf_token: None,
+            cf_account_tag: None,
+            vercel_token: None,
+            tunnel_token: None,
+            proxy_secret: None,
         };
         assert_eq!(
             derive_data_plane(&mk("http://127.0.0.1:8900", None)).unwrap(),
@@ -240,5 +262,50 @@ mod tests {
             derive_from_server("http://192.168.1.2:9000").unwrap(),
             "http://192.168.1.2:8899"
         );
+    }
+
+    #[test]
+    fn pony_config_new_fields_roundtrip() {
+        let cfg = PonyConfig {
+            server: "http://127.0.0.1:8900".into(),
+            admin_token: "admin_token".into(),
+            data_plane: Some("http://10.0.0.1:8899".into()),
+            cf_token: Some("cfat_test_token".into()),
+            cf_account_tag: Some("test_account_tag".into()),
+            vercel_token: Some("vcp_test_token".into()),
+            tunnel_token: Some("gate_test_token".into()),
+            proxy_secret: Some("proxy_secret_value".into()),
+        };
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        // 验证所有字段都在序列化输出中
+        assert!(toml_str.contains("cf_token"));
+        assert!(toml_str.contains("cf_account_tag"));
+        assert!(toml_str.contains("vercel_token"));
+        assert!(toml_str.contains("tunnel_token"));
+        assert!(toml_str.contains("proxy_secret"));
+        assert!(toml_str.contains("cfat_test_token"));
+        assert!(toml_str.contains("vcp_test_token"));
+
+        // 反序列化回读
+        let parsed: PonyConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.cf_token, Some("cfat_test_token".into()));
+        assert_eq!(parsed.cf_account_tag, Some("test_account_tag".into()));
+        assert_eq!(parsed.vercel_token, Some("vcp_test_token".into()));
+        assert_eq!(parsed.tunnel_token, Some("gate_test_token".into()));
+        assert_eq!(parsed.proxy_secret, Some("proxy_secret_value".into()));
+    }
+
+    #[test]
+    fn pony_config_new_fields_optional_default_to_none() {
+        let toml_str = r#"
+server = "http://127.0.0.1:8900"
+admin_token = "admin"
+"#;
+        let cfg: PonyConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.cf_token, None);
+        assert_eq!(cfg.cf_account_tag, None);
+        assert_eq!(cfg.vercel_token, None);
+        assert_eq!(cfg.tunnel_token, None);
+        assert_eq!(cfg.proxy_secret, None);
     }
 }
