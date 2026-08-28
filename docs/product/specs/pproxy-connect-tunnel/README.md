@@ -12,17 +12,16 @@
 
 ## 0. 状态与断点（每阶段完成后必须更新本节）
 
-**状态**：`阶段 2 — doctor 隧道探针`（In Progress）
-**当前断点**：阶段 1 全部单测通过（25/25，a3805b5）；准备开始 crates/cli doctor 追加 CONNECT 探针段。
-**Next Action**：T2 —— 在 `crates/cli/src/cmd/doctor.rs` 追加零机密隧道探针段（裸 CONNECT 等 200，无需 token/env），并补单测。
-**Resume Hint**：新会话恢复时，读本节 + §4 阶段表；按"最后一个非 Done 阶段"继续；实现细节以 §3.7 为准。
-**阶段 3 前置核查（已完成，2026-08-28）**：dev `~/pproxy/.pproxy.env` 已含 `PPROXY_TUNNEL_GATE_URL` 与 `PPROXY_TUNNEL_TOKEN`（值未打印，systemd 已加载）→ T3 无需新增 env；`/etc/systemd/system/pproxy.service.d/override.conf` 存在（tailnet 管理地址，回滚时必须保留）；数据面绑定 `127.0.0.1:8899`，服务 active。
+**状态**：`阶段 3 — dev 部署与实测`（Pending，需 dev 服务器操作）
+**当前断点**：阶段 2 完成（53/53 pproxy-cli，9fa17c2）；T3 需在 dev 服务器上 cargo build + restart + AC1-5 验收。
+**Next Action**：T3 —— dev 上 `cargo build --release`、`systemctl restart pproxy`、执行 §6.2 手工清单（AC1–AC5）。
+**Resume Hint**：新会话恢复时，读本节 + §4 阶段表；实测细节以 §6.2 为准；dev env 已就绪（§0 预核查）。
 
 | 阶段 | 内容 | 状态 | 产出 / 证据 |
 |------|------|------|------------|
 | 阶段 0 | spec 编写 + 3 路对抗审核 + 修订 | **Done** | 本文档 v0.2 + §8.1 采纳记录 |
 | 阶段 1 | crates/server 移植 CONNECT/WS 隧道 + 单测 + 双代码审核 | **Done** | `crates/server/src/connect.rs`、`gateway.rs`、`main.rs`、`Cargo.toml`；cargo test 25/25（a3805b5） |
-| 阶段 2 | `pproxy doctor` 增加 CONNECT 隧道探针 | In Progress | `crates/cli/src/cmd/doctor.rs` |
+| 阶段 2 | `pproxy doctor` 增加 CONNECT 隧道探针 | **Done** | `crates/cli/src/cmd/doctor.rs`；classify_probe_result 纯函数 + 8 条单测（9fa17c2） |
 | 阶段 3 | dev 部署（cargo build + restart）+ 实测 agy 登录链路 | Pending | curl 实测输出、`agy login` 结果 |
 | 阶段 4 | 收口：DELIVERY.md、提交、push、本地同步 | Pending | commit hash |
 
