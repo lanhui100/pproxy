@@ -86,6 +86,9 @@ enum Command {
         /// 数据面抽样探测用的明文 token（缺省跳过该环节）
         #[arg(long)]
         probe_token: Option<String>,
+        /// CONNECT 隧道探针目标 host:port（缺省 oauth2.googleapis.com:443）
+        #[arg(long)]
+        tunnel_host: Option<String>,
     },
     Config {
         #[command(subcommand)]
@@ -279,10 +282,11 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Usage { hours, route, token_id } => {
             cmd::usage::report(&http, *hours, route.as_deref(), *token_id)
         }
-        Command::Doctor { probe_token } => cmd::doctor::run(
+        Command::Doctor { probe_token, tunnel_host } => cmd::doctor::run(
             &http,
             probe_token.as_deref(),
             data_plane_base,
+            tunnel_host.as_deref().unwrap_or("oauth2.googleapis.com:443"),
         ),
         Command::Config {
             cmd: ConfigCmd::Export { service, route, token },

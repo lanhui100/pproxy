@@ -4,6 +4,7 @@
 //! 6. usage 落库 interval task → 7. 数据面 + 管理面双端口 serve → 8. admin 非回环 warn。
 
 mod api;
+mod connect;
 mod dsk;
 mod gateway;
 mod monitor;
@@ -95,10 +96,28 @@ async fn main() -> anyhow::Result<()> {
     let data_listener = TcpListener::bind(&data_addr).await?;
     info!("data plane listening on {data_addr}");
 
+    // 5.5 CONNECT 隧道配置（pproxy-connect-tunnel spec §3.4）：env 装配，fail-closed
+    let tunnel_cfg = connect::TunnelConfig::from_env().map(Arc::new);
+    if tunnel_cfg.is_some() {
+        let allowlist = tunnel_cfg.as_ref().unwrap().allowlist.join(", ");
+        info!(allowlist = %allowlist, "CONNECT tunnel enabled via gate worker");
+    }
+
     // 8. 管理面绑定非回环地址时 warn（S-P2-额外 裁决：提示暴露面扩大，不阻止启动）
     let admin_host = listen_admin.rsplit_once(':').map(|(h, _)| h).unwrap_or("").to_string();
     if !is_loopback_host(&admin_host) {
         warn!(addr = %listen_admin, "admin plane bound to non-loopback address; exposure widened");
+    }
+    // S-P2-数据面（pproxy-connect-tunnel 裁决）：数据面非回环绑定且隧道已配置 → warn
+    let data_host = data_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or("").to_string();
+    if tunnel_cfg.is_some() && !is_loopback_host(&data_host) {
+        // 数据面绑定非回环时 CONNECT 隧道即为无鉴权出口（spec §3.5 S-P2-数据面），
+        // 仅 warn 不阻止——与 admin 面 S-P2-额外 一致。
+        warn!(
+            addr = %data_addr,
+            "data plane bound to non-loopback address with CONNECT tunnel enabled; \
+             tunnel hosts are reachable without authentication (S-P2-数据面)"
+        );
     }
 
     // 7b. 管理面 serve（T6 Router）
@@ -125,10 +144,10 @@ async fn main() -> anyhow::Result<()> {
         edges,
         routes,
         usage,
+        tunnel: tunnel_cfg,
     };
-    let router = gateway::data_router(gw_state);
     tokio::select! {
-        r = gateway::serve_data_plane(data_listener, router) => r?,
+        r = gateway::serve_data_plane(data_listener, gw_state) => r?,
         _ = admin_task => unreachable!("admin task never finishes"),
     }
 

@@ -16,5 +16,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 http-body-util.workspace = true
 futures.workspace = true
+# CONNECT 隧道客户端（pproxy-connect-tunnel spec §3.3）：与桌面端同版本同 feature
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["charset"] }
 tower = { version = "0.5" }

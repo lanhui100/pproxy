@@ -1,9 +1,10 @@
 //! 数据面网关（T3）：axum 化 + 路径 token 鉴权 + 转发。
 //!
-//! 架构（T3 §2.2 C-P2-14 唯一路径）：
-//! accept 循环 → Semaphore 并发上限 → peek 首行分流
-//!   ├─ CONNECT → 403 直接写回并关闭（P0-1：无 relay 路径）
-//!   └─ 其他 → hyper http1::Builder::serve_connection(数据面 Router)
+//! 架构（T3 §2.2 C-P2-14 唯一路径 + pproxy-connect-tunnel 扩展）：
+//! accept 循环 → Semaphore 并发上限 → hyper http1::Builder::serve_connection
+//!   ├─ CONNECT → RouterHyperAdapter 拦截 → connect::handle_connect
+//!   │            （allowlist 命中 → WS 隧道透传；否则 403/502 + x-pproxy-reason）
+//!   └─ 其他 → 数据面 Router（路径 token 鉴权 + 转发）
 //!
 //! hyper↔axum 桥接：axum 0.7 `Router<()>` 实现的是 tower_service::Service，
 //! hyper 1.x 需要自己的 `hyper::service::Service`，经 RouterHyperAdapter
@@ -15,7 +16,7 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -46,6 +47,8 @@ pub struct GatewayState {
     pub edges: Arc<HashMap<String, EdgeClient>>,
     pub routes: Arc<pproxy_core::RouteTable>,
     pub usage: Arc<pproxy_core::UsageTracker>,
+    /// CONNECT 隧道配置（pproxy-connect-tunnel spec §3.4）：None 时 CONNECT 全 403。
+    pub tunnel: Option<Arc<crate::connect::TunnelConfig>>,
 }
 
 /// 组装数据面 Router（main.rs 与测试共用）。
@@ -293,49 +296,32 @@ fn not_found() -> Response {
     (StatusCode::NOT_FOUND, r#"{"error":"unknown_route"}"#).into_response()
 }
 
-/// accept 循环（T3 §2.2/§2.3）：CONNECT 拦截 + Semaphore 并发上限 + http1 驱动。
-pub async fn serve_data_plane(listener: TcpListener, router: Router) -> std::io::Result<()> {
+/// accept 循环（T3 §2.2/§2.3 + CONNECT 隧道扩展）：Semaphore 并发上限 + http1 驱动。
+/// Semaphore 说明：permit 在 `hyper::serve_connection` 返回时释放。对于 CONNECT 隧道，
+/// serve_connection 在 upgrade 完成后返回（即 `hyper::upgrade::on` 被调用后），
+/// 远早于 relay 隧道结束——因此 permit 在 relay 期间已被释放，故隧道连接不会饿死
+/// 短连接配额（spec §3.5 并发配额说明）。短连接与长连接共享同一池，实际上限由 OS
+/// TCP 连接数自然构成第二道槛。
+pub async fn serve_data_plane(listener: TcpListener, state: GatewayState) -> std::io::Result<()> {
     let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let router = data_router(state.clone());
     loop {
         let (stream, _) = listener.accept().await?;
         let permit = Arc::clone(&sem).acquire_owned().await;
         let router = router.clone();
+        let state = state.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            handle_conn(stream, router).await;
+            handle_conn(stream, router, state).await;
         });
     }
 }
 
-/// 单连接处理：peek 首行分流 CONNECT 与普通 HTTP。
-async fn handle_conn(
-    mut stream: tokio::net::TcpStream,
-    router: Router,
-) {
-    
-    let mut peek_buf = [0u8; 16];
-    let n = match stream.peek(&mut peek_buf).await {
-        Ok(n) if n > 0 => n,
-        _ => return,
-    };
-    let first = &peek_buf[..n];
-    if first.len() >= 7 && first[..7].eq_ignore_ascii_case(b"CONNECT") {
-        // P0-1：CONNECT 直接禁用，写 403 后关闭
-        let body = br#"{"error":"connect_forbidden"}"#;
-        let resp = format!(
-            "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n",
-            body.len()
-        );
-        use tokio::io::AsyncWriteExt;
-        let _ = stream.write_all(resp.as_bytes()).await;
-        let _ = stream.write_all(body).await;
-        let _ = stream.flush().await;
-        return;
-    }
-    // 普通 HTTP：axum Router 经适配器作为 hyper Service 驱动（TokioIo 桥接 tokio stream）。
-    // F3：header_read_timeout 限首部读取窗口，防慢速连接占满 Semaphore 配额。
+/// 单连接处理：hyper http1 驱动（CONNECT 由 RouterHyperAdapter 拦截分流）。
+/// F3：header_read_timeout 限首部读取窗口（含 CONNECT），防慢速连接占满 Semaphore 配额。
+async fn handle_conn(stream: tokio::net::TcpStream, router: Router, state: GatewayState) {
     use hyper_util::rt::{TokioTimer, tokio::TokioExecutor};
-    let adapter = RouterHyperAdapter { router };
+    let adapter = RouterHyperAdapter { router, state };
     let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
         .http1()
         .header_read_timeout(Some(std::time::Duration::from_secs(30)))
@@ -346,11 +332,15 @@ async fn handle_conn(
 }
 
 /// hyper Service 适配器：axum `Router<()>` 实现的是 tower_service::Service
-/// （&mut self），hyper 1.x 的 Service 是 &self——每连接 clone Router 后在
+/// （&mut self），hyper 1.x 的 Service 是 &self——每连接 clone Router 与 state 后在
 /// clone 上调用（Router::clone 廉价：内部 Arc）。Request<Incoming> →
 /// Request<Body> 转换在此完成。
+///
+/// CONNECT 拦截（pproxy-connect-tunnel spec §3.2）：method == CONNECT →
+/// [`connect::handle_connect`]；其余委托 axum Router。
 struct RouterHyperAdapter {
     router: Router,
+    state: GatewayState,
 }
 
 impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for RouterHyperAdapter {
@@ -361,6 +351,13 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for RouterHy
     >;
 
     fn call(&self, req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
+        let state = self.state.clone();
+        if req.method() == axum::http::Method::CONNECT {
+            let req = req.map(Body::new);
+            return Box::pin(async move {
+                Ok(crate::connect::handle_connect(state, req).await)
+            });
+        }
         Box::pin(tower::Service::call(&mut self.router.clone(), req.map(Body::new)))
     }
 }
@@ -370,7 +367,7 @@ mod tests {
     //! 鉴权中间件回归（M4 公网入口联调发现 header 模式恒 401 的缺陷后补齐）：
     //! 路径/双模式的 token 绑定正确性——此前自动化只覆盖路径模式成功路径。
     use super::*;
-    use axum::http::Request;
+    use axum::http::{HeaderValue, Request};
     use pproxy_core::{Store, UsageTracker};
     use tower::ServiceExt;
 
@@ -392,12 +389,13 @@ mod tests {
             Arc::new(HashMap::new()),
         )
         .unwrap());
-        let router = data_router(GatewayState {
-            tokens: Arc::clone(&tokens),
-            edges: Arc::new(HashMap::new()),
-            routes,
-            usage: Arc::new(UsageTracker::new(store)),
-        });
+let router = data_router(GatewayState {
+	            tokens: Arc::clone(&tokens),
+	            edges: Arc::new(HashMap::new()),
+	            routes,
+	            usage: Arc::new(UsageTracker::new(store)),
+	            tunnel: None,
+	        });
         (router, tokens)
     }
 
@@ -580,6 +578,7 @@ mod tests {
             edges: Arc::new(edges),
             routes,
             usage: Arc::new(UsageTracker::new(store)),
+            tunnel: None,
         });
         let (_, plaintext) = tokens.create_token("urlstrip-tok", None).unwrap();
 
