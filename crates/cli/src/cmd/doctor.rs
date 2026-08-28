@@ -222,6 +222,22 @@ fn tunnel_probe(data_plane: &Option<String>, host: &str) -> TunnelProbeResult {
 
     let status = status_line.split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok());
     let sl = status_line.trim();
+    classify_probe_result(status, &headers, sl)
+}
+
+/// 纯函数：将 CONNECT 探针响应（状态码 + x-pproxy-reason 响应头）映射为结果。
+/// spec §3.7 判定矩阵：
+///   200                              → Pass
+///   403 + tunnel_not_configured      → Skip（服务端未启用，无 env）
+///   403 + port_not_allowed           → Fail（allowlist 配置问题）
+///   403（其他）                       → Fail（host 未在 allowlist）
+///   502                              → Fail（worker 链路问题）
+///   其他/无法解析                     → Fail
+pub(crate) fn classify_probe_result(
+    status: Option<u16>,
+    headers: &str,
+    status_line: &str,
+) -> TunnelProbeResult {
     match status {
         Some(200) => TunnelProbeResult::Pass,
         Some(403) => {
@@ -234,10 +250,11 @@ fn tunnel_probe(data_plane: &Option<String>, host: &str) -> TunnelProbeResult {
             }
         }
         Some(502) => TunnelProbeResult::Fail("隧道建连失败 (tunnel_failed)".into()),
-        Some(other) => TunnelProbeResult::Fail(format!("HTTP {other}: {sl}")),
-        None => TunnelProbeResult::Fail(format!("异常响应行: {sl}")),
+        Some(other) => TunnelProbeResult::Fail(format!("HTTP {other}: {status_line}")),
+        None => TunnelProbeResult::Fail(format!("异常响应行: {status_line}")),
     }
 }
+
 
 fn print_summary(passed: u32, failed: u32, skipped: u32) {
     println!("{passed} passed, {failed} failed, {skipped} skipped");
@@ -263,10 +280,102 @@ fn derive_from_base(server: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    // ---- classify_probe_result 判定矩阵（spec §6.1）----
+
+    fn is_pass(r: &TunnelProbeResult) -> bool {
+        matches!(r, TunnelProbeResult::Pass)
+    }
+    fn is_skip(r: &TunnelProbeResult) -> bool {
+        matches!(r, TunnelProbeResult::Skip(_))
+    }
+    fn is_fail(r: &TunnelProbeResult) -> bool {
+        matches!(r, TunnelProbeResult::Fail(_))
+    }
+    fn fail_text(r: &TunnelProbeResult) -> &str {
+        match r {
+            TunnelProbeResult::Fail(s) => s,
+            _ => "",
+        }
+    }
+    fn skip_text(r: &TunnelProbeResult) -> &str {
+        match r {
+            TunnelProbeResult::Skip(s) => s,
+            _ => "",
+        }
+    }
+
     #[test]
-    fn tunnel_probe_200_is_pass() {
-        // 纯函数逻辑：tunnel_probe 是 IO 函数，此处只验证判定逻辑
-        // 实际集成测试在 dev 服务器上手工执行（T3）
+    fn classify_200_is_pass() {
+        assert!(is_pass(&classify_probe_result(Some(200), "", "")));
+    }
+
+    #[test]
+    fn classify_403_not_configured_is_skip() {
+        let r = classify_probe_result(
+            Some(403),
+            "x-pproxy-reason: tunnel_not_configured\r\n",
+            "HTTP/1.1 403 Forbidden",
+        );
+        assert!(is_skip(&r), "应为 skip");
+        assert!(skip_text(&r).contains("tunnel_not_configured"));
+    }
+
+    #[test]
+    fn classify_403_port_not_allowed_is_fail() {
+        let r = classify_probe_result(
+            Some(403),
+            "x-pproxy-reason: port_not_allowed\r\n",
+            "HTTP/1.1 403 Forbidden",
+        );
+        assert!(is_fail(&r));
+        assert!(fail_text(&r).contains("port_not_allowed"));
+    }
+
+    #[test]
+    fn classify_403_no_tunnel_route_is_fail() {
+        let r = classify_probe_result(
+            Some(403),
+            "x-pproxy-reason: no_tunnel_route\r\n",
+            "HTTP/1.1 403 Forbidden",
+        );
+        assert!(is_fail(&r));
+        assert!(fail_text(&r).contains("no_tunnel_route"));
+    }
+
+    #[test]
+    fn classify_502_is_fail() {
+        let r = classify_probe_result(Some(502), "", "HTTP/1.1 502 Bad Gateway");
+        assert!(is_fail(&r));
+        assert!(fail_text(&r).contains("tunnel_failed"));
+    }
+
+    #[test]
+    fn classify_other_status_is_fail() {
+        let r = classify_probe_result(Some(500), "", "HTTP/1.1 500 Internal Server Error");
+        assert!(is_fail(&r));
+        assert!(fail_text(&r).contains("500"));
+    }
+
+    #[test]
+    fn classify_none_status_is_fail() {
+        let r = classify_probe_result(None, "", "garbage");
+        assert!(is_fail(&r));
+        assert!(fail_text(&r).contains("garbage"));
+    }
+
+    /// 安全：Fail/Skip 输出内容不含 token/Authorization（spec §3.7 最后一条）
+    #[test]
+    fn classify_output_never_contains_token() {
+        for status in [Some(403u16), Some(502), Some(500)] {
+            let r = classify_probe_result(
+                status,
+                "authorization: Bearer secret-tok\r\n",
+                "HTTP/1.1 403 Forbidden",
+            );
+            let text = fail_text(&r);
+            assert!(!text.contains("secret-tok"), "输出不应含 token: {text}");
+            assert!(!text.contains("Authorization"), "输出不应含 Authorization: {text}");
+        }
     }
 
     #[test]
