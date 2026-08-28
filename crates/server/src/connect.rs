@@ -1,8 +1,9 @@
 //! CONNECT 隧道（pproxy-connect-tunnel spec §3）：经 gate worker `/ws` 中继 TLS 密文。
 //!
-//! 数据流（D6 hyper 原生 upgrade）：`RouterHyperAdapter` 拦截 `method == CONNECT` →
-//! [`handle_connect`]：判定（配置/端口/allowlist）→ 先 establish WS（成功才回 200；
-//! R4 失败语义：绝不静默回落）→ `hyper::upgrade::on` 取升级流双向透传。
+//! 数据流：`handle_conn` peek 首行分流 → `handle_connect_raw`：
+//! 判定（配置/端口/allowlist）→ 先 establish WS（成功才回 200；
+//! R4 失败语义：绝不静默回落）→ 裸 TCP 双向透传（写 200 后直接 relay 字节，
+//! 不经过 hyper——CONNECT 隧道是 200 后裸字节流，非 HTTP 101 Upgrade）。
 //! TLS 端到端：本模块与 worker 只见密文，无解密能力、无 CA 责任面。
 //!
 //! 与桌面端 `engine_tunnel.rs` 的关系：行为一致移植（首帧协议/重试/Ping-Pong），
@@ -16,13 +17,11 @@
 use std::fmt;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::http::StatusCode;
-use axum::response::Response;
+
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
-use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
 use tokio_tungstenite::tungstenite::Message;
@@ -173,56 +172,54 @@ impl fmt::Display for EstablishError {
     }
 }
 
-/// CONNECT 处理入口（RouterHyperAdapter 拦截后调用，spec §3.2）。
+/// CONNECT 处理入口（gateway.rs::handle_conn peek 分流后调用，spec §3.2）。
 ///
-/// 接收 URI 目标（host:port）和 hyper::upgrade::OnUpgrade future（已在
-/// RouterHyperAdapter::call 中注册，此处在 200 写出后异步完成）。
+/// 接收已解析的请求头（含 CONNECT 首行 + Host 头）和原始 TCP 流。
+/// 非 hyper 环境：直接在裸 TCP 上写 200 后双向透传。
 ///
 /// 响应语义（spec §3.6，枚举固定，不携带内部细节）：
 /// 403 `tunnel_not_configured` / `port_not_allowed` / `no_tunnel_route`，
 /// 502 `tunnel_failed`（establish 失败，详情仅入日志）。
-pub async fn handle_connect(
+pub async fn handle_connect_raw(
     state: GatewayState,
-    on_upgrade: hyper::upgrade::OnUpgrade,
-    host: &str,
-    port: u16,
-) -> Response {
-    if host.is_empty() || port == 0 {
-        return deny_response(StatusCode::BAD_REQUEST, "bad_target");
-    }
+    head: &str,
+    mut stream: TcpStream,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    // 从 CONNECT 首行解析 host:port
+    let (host, port) = match parse_connect_head(head) {
+        Some(v) => v,
+        None => {
+            let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nx-pproxy-reason: bad_target\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
+            return;
+        }
+    };
     let Some(cfg) = state.tunnel.as_ref() else {
-        return deny_response(StatusCode::FORBIDDEN, "tunnel_not_configured");
+        let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: tunnel_not_configured\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
+        return;
     };
     if port != 443 {
-        // worker 端 ALLOWED_PORTS 仅 443；server 预检省一次注定失败的 WS 建连
         tracing::info!(host = %host, port, "connect denied: port not allowed");
-        return deny_response(StatusCode::FORBIDDEN, "port_not_allowed");
+        let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: port_not_allowed\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
+        return;
     }
-    if !allowlist_match(host, &cfg.allowlist) {
+    if !allowlist_match(&host, &cfg.allowlist) {
         tracing::info!(host = %host, "connect denied: no tunnel route");
-        return deny_response(StatusCode::FORBIDDEN, "no_tunnel_route");
+        let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: no_tunnel_route\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
+        return;
     }
 
-    let host = host.to_string();
     // 先 establish（R4）：写 200 前可重试；denied 不重试；绝不静默回落直连
     for attempt in 0..MAX_ATTEMPTS {
         match establish(cfg, &host, port).await {
             Ok((ws_tx, ws_rx)) => {
                 tracing::info!(host = %host, "tunnel established");
-                // OnUpgrade future 已在 RouterHyperAdapter::call 中注册，
-                // 此处 spawn 异步等待升级完成（200 写出后 hyper 完成 upgrade）。
-                tokio::spawn(async move {
-                    tracing::debug!("waiting for hyper upgrade...");
-                    match tokio::time::timeout(Duration::from_secs(10), on_upgrade).await {
-                        Ok(Ok(upgraded)) => {
-                            tracing::info!(host = %host, "tunnel upgraded, relaying");
-                            relay(TokioIo::new(upgraded), ws_tx, ws_rx).await;
-                        }
-                        Ok(Err(e)) => tracing::warn!(host = %host, error = %e, "upgrade failed"),
-                        Err(_) => tracing::warn!(host = %host, "upgrade timeout (10s): OnUpgrade never completed"),
-                    }
-                });
-                return established_response();
+                // 写 200 Connection Established（裸 TCP，非 hyper）
+                let _ = stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
+                // 直接双向透传（不经过 hyper upgrade）
+                relay(stream, ws_tx, ws_rx).await;
+                return;
             }
             Err(e) => {
                 let retryable = matches!(e, EstablishError::Network(_));
@@ -234,7 +231,30 @@ pub async fn handle_connect(
             }
         }
     }
-    deny_response(StatusCode::BAD_GATEWAY, "tunnel_failed")
+    // 所有尝试失败：写 502
+    let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nx-pproxy-reason: tunnel_failed\r\ncontent-type: application/json\r\ncontent-length: 25\r\n\r\n{\"error\":\"tunnel_failed\"}").await;
+}
+
+/// 从 CONNECT 请求头解析目标 host:port。
+fn parse_connect_head(head: &str) -> Option<(String, u16)> {
+    let first = head.lines().next()?;
+    let rest = first.strip_prefix("CONNECT ")?;
+    let target = rest.split(' ').next()?;
+    let (h, p) = split_host_port(target)?;
+    Some((h.to_string(), p))
+}
+
+fn split_host_port(authority: &str) -> Option<(String, u16)> {
+    if let Some(stripped) = authority.strip_prefix('[') {
+        // IPv6 literal: [::1]:port（CONNECT authority-form 必须含显式端口）
+        let (h, rest) = stripped.split_once(']')?;
+        let port = rest.strip_prefix(':').and_then(|p| p.parse().ok())?;
+        return Some((h.to_string(), port));
+    }
+    // 普通 host:port：无冒号 = 格式错误，返回 None（→ 400 bad_target）。
+    // RFC 7231 §4.3.6：CONNECT request-target 必须为 authority-form（host:port）。
+    let (h, p) = authority.rsplit_once(':')?;
+    Some((h.to_string(), p.parse().ok()?))
 }
 
 /// 建连（写 200 之前，可重试窗口）：WS Upgrade（Bearer token）→ Text 首帧
@@ -346,28 +366,8 @@ where
     let _ = cw.shutdown().await;
 }
 
-fn established_response() -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::empty())
-        .expect("static response parts")
-}
 
-/// 拒绝/失败响应（spec §3.6）：reason 头枚举固定，body 固定 JSON，
-/// 不携带 worker reason 原文/tungstenite 错误文本/gate URL。
-fn deny_response(status: StatusCode, reason: &'static str) -> Response {
-    let body: &str = if status == StatusCode::BAD_GATEWAY {
-        r#"{"error":"tunnel_failed"}"#
-    } else {
-        r#"{"error":"connect_forbidden"}"#
-    };
-    Response::builder()
-        .status(status)
-        .header("x-pproxy-reason", reason)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_owned()))
-        .expect("static response parts")
-}
+
 
 #[cfg(test)]
 mod tests {

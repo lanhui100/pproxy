@@ -297,11 +297,10 @@ fn not_found() -> Response {
 }
 
 /// accept 循环（T3 §2.2/§2.3 + CONNECT 隧道扩展）：Semaphore 并发上限 + http1 驱动。
-/// Semaphore 说明：permit 在 `hyper::serve_connection` 返回时释放。对于 CONNECT 隧道，
-/// serve_connection 在 upgrade 完成后返回（即 `hyper::upgrade::on` 被调用后），
-/// 远早于 relay 隧道结束——因此 permit 在 relay 期间已被释放，故隧道连接不会饿死
-/// 短连接配额（spec §3.5 并发配额说明）。短连接与长连接共享同一池，实际上限由 OS
-/// TCP 连接数自然构成第二道槛。
+/// peek 首行分流：CONNECT 不经过 hyper（hyper 不支持裸 CONNECT 隧道），
+/// 直接由 connect::handle_connect 走 WS 隧道；其余由 hyper http1 驱动（axum 路由）。
+/// Semaphore 说明：permit 在 `hyper::serve_connection` 或 tunnel 连接结束时释放。
+/// 隧道连接持 permit 至 relay 结束（长连接场景下实际上限由 OS TCP 连接数构成第二道槛）。
 pub async fn serve_data_plane(listener: TcpListener, state: GatewayState) -> std::io::Result<()> {
     let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     let router = data_router(state.clone());
@@ -317,13 +316,52 @@ pub async fn serve_data_plane(listener: TcpListener, state: GatewayState) -> std
     }
 }
 
-/// 单连接处理：hyper http1 驱动（CONNECT 由 RouterHyperAdapter 拦截分流）。
-/// F3：header_read_timeout 限首部读取窗口（含 CONNECT），防慢速连接占满 Semaphore 配额。
-///
-/// 使用 hyper::server::conn::http1::Builder（而非 hyper_util::auto::Builder），
-/// 因为 auto::Builder 不支持 CONNECT upgrade（"upgrade expected but low level API in use"）。
-async fn handle_conn(stream: tokio::net::TcpStream, router: Router, state: GatewayState) {
-    let adapter = RouterHyperAdapter { router, state };
+/// 单连接处理：peek 首行分流 CONNECT 与普通 HTTP。
+/// F3：header_read_timeout 由 hyper 覆盖（非 CONNECT 路径）；CONNECT 路径读头后
+/// 需在 30s 内完成首行接收（防慢速连接占满 Semaphore 配额）。
+async fn handle_conn(
+    mut stream: tokio::net::TcpStream,
+    router: Router,
+    state: GatewayState,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut peek_buf = [0u8; 16];
+    let n = match stream.peek(&mut peek_buf).await {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+    let first = &peek_buf[..n];
+    if first.len() >= 7 && first[..7].eq_ignore_ascii_case(b"CONNECT") {
+        // CONNECT 隧道：不经过 hyper，直接裸 TCP 处理
+        // 读全请求头至 \r\n\r\n（上限 16KB），超时 30s
+        let mut buf = Vec::with_capacity(1024);
+        let mut tmp = [0u8; 2048];
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let remaining = deadline - tokio::time::Instant::now();
+            if remaining.is_zero() {
+                // 超时，关闭连接
+                let _ = stream.shutdown().await;
+                return;
+            }
+            match tokio::time::timeout(remaining, stream.read(&mut tmp)).await {
+                Ok(Ok(0)) => return,
+                Ok(Ok(n)) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 16 * 1024 {
+                        break;
+                    }
+                }
+                _ => return,
+            }
+        }
+        let head = String::from_utf8_lossy(&buf);
+        let _ = crate::connect::handle_connect_raw(state, &head, stream).await;
+        return;
+    }
+    // 普通 HTTP：axum Router 经适配器作为 hyper Service 驱动（TokioIo 桥接 tokio stream）。
+    // F3：header_read_timeout 限首部读取窗口，防慢速连接占满 Semaphore 配额。
+    let adapter = RouterHyperAdapter { router };
     let _ = hyper::server::conn::http1::Builder::new()
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(Some(std::time::Duration::from_secs(30)))
@@ -336,12 +374,8 @@ async fn handle_conn(stream: tokio::net::TcpStream, router: Router, state: Gatew
 /// （&mut self），hyper 1.x 的 Service 是 &self——每连接 clone Router 与 state 后在
 /// clone 上调用（Router::clone 廉价：内部 Arc）。Request<Incoming> →
 /// Request<Body> 转换在此完成。
-///
-/// CONNECT 拦截（pproxy-connect-tunnel spec §3.2）：method == CONNECT →
-/// [`connect::handle_connect`]；其余委托 axum Router。
 struct RouterHyperAdapter {
     router: Router,
-    state: GatewayState,
 }
 
 impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for RouterHyperAdapter {
@@ -351,28 +385,7 @@ impl hyper::service::Service<hyper::Request<hyper::body::Incoming>> for RouterHy
         Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
     >;
 
-    fn call(&self, mut req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
-        let state = self.state.clone();
-        if req.method() == axum::http::Method::CONNECT {
-            let host = req.uri().host().unwrap_or("").to_string();
-            let port = req.uri().port_u16().unwrap_or(0);
-            // 非标准 CONNECT（无 target 或 port），直接返回 400，不调用 upgrade::on
-            if host.is_empty() || port == 0 {
-                return Box::pin(async {
-                    Ok(Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .header("x-pproxy-reason", "bad_target")
-                        .header("content-type", "application/json")
-                        .body(Body::from(r#"{"error":"connect_forbidden"}"#))
-                        .expect("static response"))
-                });
-            }
-            let on_upgrade = hyper::upgrade::on(&mut req);
-            let host2 = host.clone();
-            return Box::pin(async move {
-                Ok(crate::connect::handle_connect(state, on_upgrade, &host2, port).await)
-            });
-        }
+    fn call(&self, req: hyper::Request<hyper::body::Incoming>) -> Self::Future {
         Box::pin(tower::Service::call(&mut self.router.clone(), req.map(Body::new)))
     }
 }
