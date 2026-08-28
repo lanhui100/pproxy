@@ -146,3 +146,28 @@ export async function clearTunnelToken(): Promise<boolean> {
   localStorage.removeItem('pony-dev-tunnel-token')
   return true
 }
+
+// ---- auto_proxy 首次询问（Fix4 v0.2）：默认 false，缺字段时弹窗询问 ----
+export interface AutoProxyConfig { auto_proxy?: boolean; dont_ask?: boolean }
+
+export async function loadAutoProxyConfig(): Promise<AutoProxyConfig> {
+  if (isTauri()) {
+    try {
+      const cfg = await invoke<AutoProxyConfig>('app_config_get')
+      return cfg ?? {}
+    } catch { return {} }
+  }
+  if (typeof localStorage !== 'undefined') {
+    try { return JSON.parse(localStorage.getItem('pony-app-config') ?? '{}') as AutoProxyConfig } catch { return {} }
+  }
+  return {}
+}
+
+export async function saveAutoProxyConfig(patch: AutoProxyConfig): Promise<void> {
+  if (isTauri()) {
+    await invoke('app_config_set', { patch })
+  } else if (typeof localStorage !== 'undefined') {
+    const cur = await loadAutoProxyConfig()
+    localStorage.setItem('pony-app-config', JSON.stringify({ ...cur, ...patch }))
+  }
+}

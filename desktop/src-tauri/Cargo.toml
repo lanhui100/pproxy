@@ -28,10 +28,11 @@ tauri-plugin-http = "2"
 keyring = { version = "3", features = ["windows-native"] }
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "time", "sync"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # 独立构建图：不吸收进 pproxy workspace（M5 spec §3 约束）
 [workspace]

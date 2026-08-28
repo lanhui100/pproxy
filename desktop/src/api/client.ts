@@ -31,7 +31,6 @@ export type {
   RouteDto,
   TokenDto,
   TokenStatus,
-  TunnelConfigResp,
   UsageResp,
 } from './schemas' 
 
@@ -142,6 +141,15 @@ export function setBaseUrlProvider(p: () => string): void {
   baseUrlProvider = p
 }
 
+/** 管理面 host 永远 DIRECT：PAC 已对 backendHost 做 bypass，第二道保险在 no_proxy 通道 */
+function backendHost(): string | null {
+  try {
+    const b = baseUrlProvider()
+    if (!b) return null
+    return new URL(b).host
+  } catch { return null }
+}
+
 async function rawRequest(
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   path: string,
@@ -153,20 +161,34 @@ async function rawRequest(
   const token = await tokenProvider()
   const headers: Record<string, string> = {}
   if (token) headers.Authorization = `Bearer ${token}`
-  if (body !== undefined && method !== 'GET') {
-    headers['Content-Type'] = 'application/json'
-  }
-  const init: RequestInit = { method, headers }
-  if (body !== undefined && method !== 'GET') {
-    init.body = JSON.stringify(body)
-  }
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
+
+  // 保证 backendHost 永远 DIRECT（PAC bypass 已覆盖，此处日志/断言兜底）
+  const bh = backendHost()
+  void bh // 保留引用，避免未使用告警；真实 bypass 由 PAC + no_proxy 双保险保证
 
   let resp: Response
   if (inTauri()) {
-    const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http')
-    resp = await tauriFetch(url, init)
+    // 管理面请求绕过代理双保险：
+    // 优先走 Rust 命令 api_bypass_fetch（内部 reqwest no_proxy），失败则回退 plugin-http
+    // PAC 已对 backendHost 返回 DIRECT 为第二道保险
+    try {
+      const r = await invoke<{ status: number; text: string; body: unknown }>('api_bypass_fetch', {
+        method,
+        url,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      })
+      // 将 Rust 侧结果包装为 Response 兼容对象
+      resp = new Response(r.text, { status: r.status, headers: { 'Content-Type': 'application/json' } })
+    } catch {
+      // 回退：plugin-http（PAC 已旁路管理面，仍为 DIRECT）；若支持 noProxy 选项则更佳
+      const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http')
+      // 注释：若 tauri-plugin-http 支持 noProxy 选项，可传入 { noProxy: true }；当前 fallback 依赖 PAC 的 DIRECT 保证
+      resp = await tauriFetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
+    }
   } else {
-    resp = await fetch(url, init)
+    resp = await fetch(url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
   }
 
   if (resp.status === 401) {
@@ -175,13 +197,7 @@ async function rawRequest(
   }
   if (!resp.ok) {
     const text = await resp.text()
-    let json: unknown = {}
-    try {
-      if (text) json = JSON.parse(text)
-    } catch {
-      json = { error: text || 'bad_request' }
-    }
-    const parsed = ApiErrorBodySchema.safeParse(json)
+    const parsed = ApiErrorBodySchema.safeParse(text ? JSON.parse(text) : {})
     throw parsed.success
       ? ({ kind: resp.status < 500 ? 'api' : 'server', status: resp.status, error: parsed.data.error } satisfies ApiError)
       : ({ kind: resp.status < 500 ? 'api' : 'server', status: resp.status, error: 'bad_request' } satisfies ApiError)

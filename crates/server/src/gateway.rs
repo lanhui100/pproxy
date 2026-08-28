@@ -114,7 +114,16 @@ pub async fn auth_middleware(
     if route_path.is_empty() {
         return unauthorized();
     }
-    let path_query = format!("/{route_path}{query}");
+    // F-2026-08-27：route 名必须从业务路径剥离——T3 §4.1 语义为
+    // /{token}/{route}/{path} → https://{target_host}/{path}。
+    // 此前 path_query 携带完整剩余路径（含 route 名），resolve 拼出的上游
+    // URL 恒为 https://{host}/{route}/{path}，实测 opencode.ai/zen 与
+    // api.anthropic.com 均 404（2026-08-27 zen 回归定位）。
+    let (route_name, rest_path) = split_first_segment(&route_path);
+    if route_name.is_empty() {
+        return unauthorized();
+    }
+    let path_query = format!("/{rest_path}{query}");
 
     // verify 三种失败（NotFound/Revoked/Expired）同 401 同体，防枚举（T3 §4.1 第 4 步）
     // 纯内存无阻塞鉴权：消除 spawn_blocking 线程池调度开销
@@ -127,11 +136,9 @@ pub async fn auth_middleware(
         }
     };
 
-    // 剥离后的 {route}/{path}?{query} 放入 extensions（T3 §4.1 第 5 步）
-    let route_name = route_path.split('/').next().unwrap_or("").to_string();
-    if route_name.is_empty() {
-        return unauthorized();
-    }
+    // 剥离后的 {route}/{path}?{query} 放入 extensions（T3 §4.1 第 5 步）。
+    // route_name/path_query 已在上方派生（F-2026-08-27：route 名不入 path_query）
+    let route_name = route_name.to_string();
     // S-P1-1：进入转发前删除 x-pony-token（路径模式下为 no-op，header 模式下必须删）
     req.headers_mut().remove(X_PONY_TOKEN);
     req.extensions_mut().insert(AuthContext {
@@ -468,5 +475,128 @@ mod tests {
             Some(&HeaderValue::from_static("close")),
             "网关响应不得强制插入 Connection: close"
         );
+    // ---- 回归（F-2026-08-27）：上游 target URL 必须剥离 route 名 ----
+    // 缺陷现场：auth_middleware 把 route 名混入 path_query，resolve 拼出的
+    // 上游 URL 恒为 https://{host}/{route}/{path}——opencode.ai/zen 与
+    // api.anthropic.com 均以 404 应答。既有单测只覆盖 resolve（入参本就是
+    // 干净 path_query），未覆盖网关侧的派生，此处经本地 stub「上游边缘」
+    // 端到端断言 EdgeClient 实际收到的 target。
+
+    fn pct_decode(s: &str) -> String {
+        fn hex_val(b: u8) -> Option<u8> {
+            match b {
+                b'0'..=b'9' => Some(b - b'0'),
+                b'a'..=b'f' => Some(b - b'a' + 10),
+                b'A'..=b'F' => Some(b - b'A' + 10),
+                _ => None,
+            }
+        }
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = hex_val(bytes[i + 1]);
+                let lo = hex_val(bytes[i + 2]);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push(hi * 16 + lo);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// 本地 stub「上游边缘」：模拟 vedge/api/proxy——解析 ?url= 并把解码后的
+    /// target 回传为响应体（线程返回捕获值供断言）。
+    fn spawn_url_echo_stub() -> (String, std::thread::JoinHandle<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader, Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            let mut content_len = 0usize;
+            loop {
+                let mut h = String::new();
+                let n = reader.read_line(&mut h).unwrap();
+                if n == 0 || h.trim().is_empty() {
+                    break;
+                }
+                if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            // 读尽 body，避免 reqwest 写侧中断（内容不使用）
+            let mut sink = vec![0u8; content_len];
+            let _ = reader.read_exact(&mut sink);
+            let target = request_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|p| p.split_once("url="))
+                .map(|(_, raw)| pct_decode(raw))
+                .unwrap_or_default();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                target.len()
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+            stream.write_all(target.as_bytes()).unwrap();
+            target
+        });
+        (format!("http://{addr}/api/proxy"), handle)
+    }
+
+    #[tokio::test]
+    async fn forwarded_url_strips_route_name() {
+        let (stub_url, stub_handle) = spawn_url_echo_stub();
+        let store = temp_store("urlstrip");
+        let tokens = Arc::new(TokenService::new(Arc::clone(&store)).unwrap());
+        let mut edges = HashMap::new();
+        edges.insert(
+            "vercel".to_string(),
+            EdgeClient::new(&stub_url, "stub-secret").unwrap(),
+        );
+        let routes = Arc::new(
+            pproxy_core::RouteTable::new(Arc::clone(&store), Arc::new(HashMap::new())).unwrap(),
+        );
+        // opencode 属 VERCEL_HOSTS 主机规则，无 override 也解析到 vercel 上游
+        routes
+            .create_route(&pproxy_core::store::NewRoute {
+                name: "opencode".into(),
+                target_host: "opencode.ai".into(),
+                override_upstream: None,
+            })
+            .unwrap();
+        let router = data_router(GatewayState {
+            tokens: Arc::clone(&tokens),
+            edges: Arc::new(edges),
+            routes,
+            usage: Arc::new(UsageTracker::new(store)),
+        });
+        let (_, plaintext) = tokens.create_token("urlstrip-tok", None).unwrap();
+
+        // 路径模式 POST：/{token}/opencode/zen/go/v1/responses
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/{plaintext}/opencode/zen/go/v1/responses"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer sk-test")
+                    .body(Body::from(r#"{"model":"muse-spark-1.2-contributor"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let want = "https://opencode.ai/zen/go/v1/responses";
+        assert_eq!(body_string(resp).await, want, "stub 回显 target");
+        assert_eq!(stub_handle.join().unwrap(), want, "上游实际收到的 target");
     }
 }

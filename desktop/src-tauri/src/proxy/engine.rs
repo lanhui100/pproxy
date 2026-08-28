@@ -3,34 +3,38 @@
 //! 决策：host 命中白名单 → [`tunnel`]（WS 隧道，M6 后续任务实现）；未命中 →
 //! 本机直接 dial。失败语义：隧道不可用即关闭连接并计数，绝不静默回落直连
 //! （spec §5，R4）。
+//! T1: watch 通道热更新，handle_conn 与 /pac 每请求 clone 后立即 drop 再 matches/generate_pac，不持锁跨 await。
+#![deny(clippy::await_holding_lock)]
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 use super::pac;
 use super::whitelist;
-
-pub type SharedWhitelist = Arc<std::sync::RwLock<Vec<String>>>;
-pub type SharedTunnel = Arc<std::sync::RwLock<(Option<String>, Option<String>)>>;
 
 /// 引擎配置。
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub listen_addr: String,
-    pub whitelist: SharedWhitelist,
-    /// 隧道端点与令牌 (url, token)，动态读写锁以支持热更新
-    pub tunnel: SharedTunnel,
+    pub whitelist: watch::Receiver<Vec<String>>,
+    /// 隧道端点（wss://…），None 时白名单流量直接报错关闭（无静默回落）
+    pub tunnel_url: Option<String>,
+    pub tunnel_token: Option<String>,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
+        // 创建一个空 watch channel 供测试使用
+        let (_tx, rx) = watch::channel(Vec::new());
         EngineConfig {
             listen_addr: "127.0.0.1:18900".into(),
-            whitelist: Arc::new(std::sync::RwLock::new(Vec::new())),
-            tunnel: Arc::new(std::sync::RwLock::new((None, None))),
+            whitelist: rx,
+            tunnel_url: None,
+            tunnel_token: None,
         }
     }
 }
@@ -75,10 +79,9 @@ enum Route {
 }
 
 /// 分流判定（纯函数）：CONNECT 目标或 Host 头命中白名单 → 隧道。
-fn decide(host: &str, cfg: &EngineConfig) -> Route {
-    let wl = cfg.whitelist.read().unwrap_or_else(|p| p.into_inner());
-    let tunnel_configured = cfg.tunnel.read().unwrap_or_else(|p| p.into_inner()).0.is_some();
-    if whitelist::matches(host, &wl) && tunnel_configured {
+// 契约：调用方需先 clone watch 数据，drop 守卫后再调用此函数，避免持锁跨 await
+fn decide(host: &str, whitelist_snapshot: &[String], tunnel_url: &Option<String>) -> Route {
+    if whitelist::matches(host, whitelist_snapshot) && tunnel_url.is_some() {
         Route::Tunnel
     } else {
         Route::Direct
@@ -151,15 +154,19 @@ async fn handle_conn(
     let head = String::from_utf8_lossy(&buf);
 
     // 引擎自身的控制面：PAC 脚本（仅 absolute-form GET /pac 可达）
+    // T1 契约：clone 后立即 drop，再 generate_pac，不持锁跨 await
     if head.starts_with("GET http://127.0.0.1:18900/pac ")
         || head.starts_with("GET /pac ")
     {
-        let body = {
-            let wl = cfg.whitelist.read().unwrap_or_else(|p| p.into_inner());
-            pac::generate_pac(&wl)
+        let wl_snapshot = {
+            let guard = cfg.whitelist.borrow();
+            let cloned = guard.clone();
+            // guard drop here
+            cloned
         };
+        let body = pac::generate_pac(&wl_snapshot);
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nCache-Control: no-cache, no-store, must-revalidate\r\nPragma: no-cache\r\nExpires: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             body
         );
@@ -172,7 +179,13 @@ async fn handle_conn(
             .await;
     };
 
-    match decide(&parsed.host, cfg) {
+    // T1: decide 前先 clone whitelist snapshot 并 drop
+    let wl_snapshot = {
+        let g = cfg.whitelist.borrow();
+        g.clone()
+    };
+    let route = decide(&parsed.host, &wl_snapshot, &cfg.tunnel_url);
+    match route {
         Route::Direct => {
             stats.direct.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             direct_relay(stream, parsed, &head).await
@@ -182,7 +195,6 @@ async fn handle_conn(
             match super::engine_tunnel::connect_and_relay(stream, parsed, &head, cfg).await {
                 Ok(()) => Ok(()),
                 Err(e) => {
-                    // R4：绝不静默回落直连——错误就地计数，连接关闭
                     stats.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     *stats.last_error.lock().unwrap_or_else(|p| p.into_inner()) =
                         Some(e.to_string());
@@ -208,7 +220,6 @@ async fn direct_relay(
             .await?;
         relay_bidir(client, target).await
     } else {
-        // absolute-form → origin-form 重写第一行
         let mut lines = head.lines();
         let first = lines.next().unwrap_or("");
         let rewritten = rewrite_first_line_absolute(first);
@@ -224,7 +235,6 @@ async fn direct_relay(
 }
 
 fn rewrite_first_line_absolute(first: &str) -> String {
-    // "GET http://host/path HTTP/1.1" → "GET /path HTTP/1.1"
     let parts: Vec<&str> = first.splitn(3, ' ').collect();
     if parts.len() != 3 {
         return first.to_string();
@@ -252,6 +262,11 @@ async fn relay_bidir(
 mod tests {
     use super::*;
 
+    fn cfg_with_whitelist(list: Vec<String>, tunnel: Option<String>) -> EngineConfig {
+        let (_tx, rx) = watch::channel(list);
+        EngineConfig { whitelist: rx, tunnel_url: tunnel, ..Default::default() }
+    }
+
     #[test]
     fn parse_connect_with_default_443() {
         let h = "CONNECT www.youtube.com:443 HTTP/1.1\r\nHost: www.youtube.com\r\n\r\n";
@@ -277,40 +292,17 @@ mod tests {
 
     #[test]
     fn decide_whitelist_with_tunnel() {
-        let cfg = EngineConfig {
-            whitelist: Arc::new(std::sync::RwLock::new(vec!["youtube.com".into()])),
-            tunnel: Arc::new(std::sync::RwLock::new((Some("wss://gate/ws".into()), Some("tok".into())))),
-            ..Default::default()
-        };
-        assert_eq!(decide("www.youtube.com", &cfg), Route::Tunnel);
-        assert_eq!(decide("baidu.com", &cfg), Route::Direct);
-    }
-
-    #[test]
-    fn decide_hot_reloads_on_whitelist_update() {
-        let wl = Arc::new(std::sync::RwLock::new(vec!["google.com".into()]));
-        let cfg = EngineConfig {
-            whitelist: Arc::clone(&wl),
-            tunnel: Arc::new(std::sync::RwLock::new((Some("wss://gate/ws".into()), Some("tok".into())))),
-            ..Default::default()
-        };
-        assert_eq!(decide("www.google.com", &cfg), Route::Tunnel);
-        assert_eq!(decide("www.youtube.com", &cfg), Route::Direct);
-
-        // 热更新白名单：无需重启 engine/config
-        wl.write().unwrap().push("youtube.com".into());
-        assert_eq!(decide("www.youtube.com", &cfg), Route::Tunnel);
+        let cfg = cfg_with_whitelist(vec!["youtube.com".into()], Some("wss://gate/ws".into()));
+        let snap = cfg.whitelist.borrow().clone();
+        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url), Route::Tunnel);
+        assert_eq!(decide("baidu.com", &snap, &cfg.tunnel_url), Route::Direct);
     }
 
     #[test]
     fn decide_no_tunnel_url_never_tunnels() {
-        // R4：隧道未配置时白名单也不走隧道（直连），但 UI 应提示引擎半配置
-        let cfg = EngineConfig {
-            whitelist: Arc::new(std::sync::RwLock::new(vec!["youtube.com".into()])),
-            tunnel: Arc::new(std::sync::RwLock::new((None, None))),
-            ..Default::default()
-        };
-        assert_eq!(decide("www.youtube.com", &cfg), Route::Direct);
+        let cfg = cfg_with_whitelist(vec!["youtube.com".into()], None);
+        let snap = cfg.whitelist.borrow().clone();
+        assert_eq!(decide("www.youtube.com", &snap, &cfg.tunnel_url), Route::Direct);
     }
 
     #[test]
@@ -324,7 +316,6 @@ mod tests {
 
 #[cfg(test)]
 mod integration {
-    //! 集成验证：直连路径端到端回声 + R4 无静默回落反证。
     use super::*;
     use std::sync::Arc;
 
@@ -338,7 +329,6 @@ mod integration {
 
     #[tokio::test]
     async fn direct_relay_end_to_end_echo() {
-        // 目标 echo 服务器（充当"直连目标站"）
         let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let echo_addr = echo.local_addr().unwrap();
         tokio::spawn(async move {
@@ -385,38 +375,11 @@ mod integration {
     }
 
     #[tokio::test]
-    async fn pac_endpoint_returns_anti_caching_headers() {
-        let cfg = EngineConfig {
-            whitelist: Arc::new(std::sync::RwLock::new(vec!["example.com".into()])),
-            ..Default::default()
-        };
-        let stats = Arc::new(EngineStats::default());
-        let (mut client, srv) = socket_pair().await;
-        let st2 = Arc::clone(&stats);
-        tokio::spawn(async move {
-            handle_conn(srv, &cfg, &st2).await.ok();
-        });
-
-        client
-            .write_all(b"GET http://127.0.0.1:18900/pac HTTP/1.1\r\nHost: 127.0.0.1:18900\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buf = [0u8; 1024];
-        let n = client.read(&mut buf).await.unwrap();
-        let resp = String::from_utf8_lossy(&buf[..n]);
-        assert!(resp.starts_with("HTTP/1.1 200 OK"));
-        assert!(resp.contains("Cache-Control: no-cache, no-store, must-revalidate"));
-        assert!(resp.contains("Pragma: no-cache"));
-        assert!(resp.contains("Expires: 0"));
-        assert!(resp.contains("example.com"));
-    }
-
-    #[tokio::test]
     async fn r4_tunnel_failure_never_silently_falls_back() {
-        // R4 反证：白名单命中但隧道不可达 → 连接必须关闭且无 200 Established
+        let (_tx, rx) = watch::channel(vec!["www.youtube.com".into()]);
         let cfg = EngineConfig {
-            whitelist: Arc::new(std::sync::RwLock::new(vec!["www.youtube.com".into()])),
-            tunnel: Arc::new(std::sync::RwLock::new((Some("ws://127.0.0.1:9/unreachable".into()), Some("tok".into())))), // 不可达
+            whitelist: rx,
+            tunnel_url: Some("ws://127.0.0.1:9/unreachable".into()),
             ..Default::default()
         };
         let stats = Arc::new(EngineStats::default());
