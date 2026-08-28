@@ -61,11 +61,12 @@ impl Pool {
     }
 
     pub async fn next(&self) -> Option<String> {
-        // 1. static upstream first
+        // 1. static upstream first: load balance across available static nodes
         {
             let inner = self.inner.read().await;
             if !inner.static_upstreams.is_empty() {
-                return Some(inner.static_upstreams[0].clone());
+                let idx = rand_index(inner.static_upstreams.len());
+                return Some(inner.static_upstreams[idx].clone());
             }
         }
 
@@ -159,10 +160,48 @@ fn now_secs() -> u64 {
 
 #[inline]
 fn rand_index(n: usize) -> usize {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let s = RandomState::new();
-    let mut h = s.build_hasher();
-    h.write_u64(now_secs());
-    (h.finish() as usize) % n
+    if n == 0 {
+        return 0;
+    }
+    rand::random::<usize>() % n
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rand_index_has_uniform_distribution_without_same_seed_collision() {
+        let n = 10;
+        let mut counts = vec![0usize; n];
+        for _ in 0..10_000 {
+            let idx = rand_index(n);
+            assert!(idx < n);
+            counts[idx] += 1;
+        }
+        // 每个槽位应当都在 600..1400 之间（期望 1000）
+        for (i, &c) in counts.iter().enumerate() {
+            assert!(c > 500 && c < 1500, "槽位 {i} 计数 {c} 偏离过大，未达到均匀分布");
+        }
+    }
+
+    #[tokio::test]
+    async fn static_upstreams_load_balanced() {
+        let config = PoolConfig {
+            static_upstreams: vec![
+                "http://1.1.1.1:8080".into(),
+                "http://2.2.2.2:8080".into(),
+                "http://3.3.3.3:8080".into(),
+            ],
+            ..Default::default()
+        };
+        let pool = Pool::new(config).await;
+        let mut set = std::collections::HashSet::new();
+        for _ in 0..100 {
+            if let Some(up) = pool.next().await {
+                set.insert(up);
+            }
+        }
+        assert_eq!(set.len(), 3, "静态上游必须被均衡访问，而不是永远只访问第一个");
+    }
 }

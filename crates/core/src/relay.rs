@@ -1,13 +1,14 @@
+use anyhow::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use std::time::Duration;
 use tracing::debug;
 
-pub async fn http_connect(
+pub async fn http_connect_ext(
     upstream_addr: &str,
     target_host: &str,
     target_port: u16,
-) -> anyhow::Result<TcpStream> {
+) -> anyhow::Result<(TcpStream, Vec<u8>)> {
     let mut stream = tokio::time::timeout(
         Duration::from_secs(5),
         TcpStream::connect(upstream_addr),
@@ -19,18 +20,58 @@ pub async fn http_connect(
     );
     stream.write_all(req.as_bytes()).await?;
 
-    let mut buf = [0u8; 4096];
-    let n = tokio::time::timeout(Duration::from_secs(8), stream.read(&mut buf))
-        .await?
+    let mut header_buf = Vec::with_capacity(1024);
+    let mut temp = [0u8; 512];
+    let delimiter = b"\r\n\r\n";
+
+    // 循环读满完整的 HTTP 响应头，杜绝分包导致握手失败
+    let end = loop {
+        let n = tokio::time::timeout(Duration::from_secs(8), stream.read(&mut temp))
+            .await?
+            .context("upstream closed connection during CONNECT handshake")?;
+        if n == 0 {
+            anyhow::bail!("unexpected EOF during CONNECT handshake");
+        }
+        header_buf.extend_from_slice(&temp[..n]);
+
+        if let Some(pos) = header_buf.windows(4).position(|w| w == delimiter) {
+            break pos + 4;
+        }
+
+        if header_buf.len() > 16 * 1024 {
+            anyhow::bail!("CONNECT response header too large");
+        }
+    };
+
+    let header_bytes = &header_buf[..end];
+    let leftover = header_buf[end..].to_vec();
+
+    let header_str = String::from_utf8_lossy(header_bytes);
+    let first_line = header_str.lines().next().unwrap_or("");
+
+    // 精确解析状态码（200..=299），杜绝子串 200 误判
+    let mut parts = first_line.split_whitespace();
+    let _proto = parts.next();
+    let status_code: u16 = parts
+        .next()
+        .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
-    let resp = String::from_utf8_lossy(&buf[..n]);
-    if resp.contains("200") {
-        debug!("http_connect ok: {}:{} via {}", target_host, target_port, upstream_addr);
-        Ok(stream)
+    if (200..=299).contains(&status_code) {
+        debug!("http_connect ok: {}:{} via {} (status {})", target_host, target_port, upstream_addr, status_code);
+        Ok((stream, leftover))
     } else {
-        anyhow::bail!("connect failed: {}", resp.lines().next().unwrap_or(""))
+        anyhow::bail!("connect failed: {}", first_line);
     }
+}
+
+pub async fn http_connect(
+    upstream_addr: &str,
+    target_host: &str,
+    target_port: u16,
+) -> anyhow::Result<TcpStream> {
+    let (stream, _) = http_connect_ext(upstream_addr, target_host, target_port).await?;
+    Ok(stream)
 }
 
 pub async fn socks5_connect(
@@ -66,6 +107,17 @@ pub async fn socks5_connect(
 
     debug!("socks5_connect ok: {}:{} via {}", target_host, target_port, upstream_addr);
     Ok(stream)
+}
+
+pub async fn relay_with_leftover(mut client: TcpStream, upstream: TcpStream, leftover: Vec<u8>) {
+    // 将握手粘包多读的 Early Data 在全双工中继前单次 flush 给下游，保证数据零丢失零封装开销
+    if !leftover.is_empty() {
+        if let Err(e) = client.write_all(&leftover).await {
+            debug!("failed to flush leftover bytes to client: {e}");
+            return;
+        }
+    }
+    relay(client, upstream).await;
 }
 
 pub async fn relay(client: TcpStream, upstream: TcpStream) {

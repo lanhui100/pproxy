@@ -268,8 +268,16 @@ impl TokenService {
             }
         };
         if should_touch {
-            // 观测字段，非安全字段：写库失败仅告警，不影响校验结果
-            if let Err(e) = self.store.touch_token(row.id, now) {
+            // 观测字段，非安全字段：异步化解耦，避免阻塞数据面 Tokio 线程
+            let store = Arc::clone(&self.store);
+            let token_id = row.id;
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn_blocking(move || {
+                    if let Err(e) = store.touch_token(token_id, now) {
+                        tracing::warn!(token_id, error = %e, "last_used_at 写库失败（忽略）");
+                    }
+                });
+            } else if let Err(e) = self.store.touch_token(row.id, now) {
                 tracing::warn!(token_id = row.id, error = %e, "last_used_at 写库失败（忽略）");
             }
         }

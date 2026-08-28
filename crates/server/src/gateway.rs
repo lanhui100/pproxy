@@ -117,19 +117,13 @@ pub async fn auth_middleware(
     let path_query = format!("/{route_path}{query}");
 
     // verify 三种失败（NotFound/Revoked/Expired）同 401 同体，防枚举（T3 §4.1 第 4 步）
-    let tokens = Arc::clone(&state.tokens);
-    let plaintext = token_plaintext.to_string();
-    let verified = tokio::task::spawn_blocking(move || tokens.verify(&plaintext)).await;
-    let row = match verified {
-        Ok(Ok(row)) => row,
-        Ok(Err(reason)) => {
+    // 纯内存无阻塞鉴权：消除 spawn_blocking 线程池调度开销
+    let row = match state.tokens.verify(&token_plaintext) {
+        Ok(row) => row,
+        Err(reason) => {
             // 仅 info 记录原因类别，不打 token 明文（T3 §4.1）
             tracing::info!(reason = %reason, "token verify failed");
             return unauthorized();
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "verify spawn_blocking panic");
-            return internal_error();
         }
     };
 
@@ -183,20 +177,12 @@ async fn forward_handler(State(state): State<GatewayState>, req: Request) -> Res
     let body = req.into_body();
 
     // 第 2 步：resolve（UnknownRoute/Disabled 同 404 同体，防路由枚举）
-    let routes = Arc::clone(&state.routes);
-    let route_name = ctx.route.clone();
-    let path_query = ctx.path_query.clone();
-    let resolve = tokio::task::spawn_blocking(move || routes.resolve(&route_name, &path_query))
-        .await;
-    let (target_url, upstream) = match resolve {
-        Ok(Ok(v)) => v,
-        Ok(Err(_)) => {
+    // 纯内存无阻塞查询：消除 spawn_blocking 线程池调度开销
+    let (target_url, upstream) = match state.routes.resolve(&ctx.route, &ctx.path_query) {
+        Ok(v) => v,
+        Err(_) => {
             // UnknownRoute / Disabled 均映射 404 {"error":"unknown_route"}（T3 §4.2 第 2 步）
             return not_found();
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "resolve spawn_blocking panic");
-            return internal_error();
         }
     };
 
@@ -268,10 +254,6 @@ async fn forward_handler(State(state): State<GatewayState>, req: Request) -> Res
         }
         out_headers.insert(k.clone(), v.clone());
     }
-    out_headers.insert(
-        axum::http::header::CONNECTION,
-        HeaderValue::from_static("close"),
-    );
 
     let route_name = ctx.route.clone();
     let token_id = ctx.token_id;
@@ -350,6 +332,7 @@ async fn handle_conn(
     let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
         .http1()
         .header_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .keep_alive(true)
         .timer(TokioTimer::new())
         .serve_connection(hyper_util::rt::TokioIo::new(stream), adapter)
         .await;
@@ -472,5 +455,18 @@ mod tests {
         let resp = router.oneshot(req_get("/", None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_string(resp).await.contains("service"));
+    }
+
+    // ---- 长连接支持：响应头不含强制 Connection: close ----
+
+    #[tokio::test]
+    async fn response_does_not_force_connection_close() {
+        let (router, _tokens) = build_router("keepalive");
+        let resp = router.oneshot(req_get("/", None)).await.unwrap();
+        assert_ne!(
+            resp.headers().get(axum::http::header::CONNECTION),
+            Some(&HeaderValue::from_static("close")),
+            "网关响应不得强制插入 Connection: close"
+        );
     }
 }
