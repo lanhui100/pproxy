@@ -1,0 +1,11 @@
+{
+  "name": "pproxy-root",
+  "private": true,
+  "scripts": {
+    "dev:tauri": "pnpm --prefix desktop tauri dev",
+    "dev:web": "pnpm --prefix desktop dev",
+    "build:desktop": "pnpm --prefix desktop build",
+    "lint:desktop": "pnpm --prefix desktop lint",
+    "test:desktop": "pnpm --prefix desktop test"
+  }
+}
