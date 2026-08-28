@@ -315,10 +315,7 @@ pub fn broadcast_change() -> bool {
     }
 }
 
-#[cfg(not(windows))]
-pub fn broadcast_change() -> bool {
-    true
-}
+
 
 /// 启动自愈：优先按持久化快照还原；否则回落旧逻辑：若 AutoConfigURL 或 ProxyServer 指向本应用，则清除。
 #[cfg(windows)]
@@ -395,6 +392,11 @@ pub fn cleanup_stale() {}
 // ---- 非 Windows 平台：no-op（开发期占位；生产目标仅 Windows）----
 
 #[cfg(not(windows))]
+pub fn broadcast_change() -> bool {
+    true
+}
+
+#[cfg(not(windows))]
 pub fn enable(_mode: Mode) -> Result<Snapshot, String> {
     Err("system proxy not supported on this platform".into())
 }
@@ -408,3 +410,15 @@ pub fn disable(_: &Snapshot) -> Result<(), String> {
 pub fn disable_with_persisted_fallback(_: Option<Snapshot>) -> Result<(), String> {
     Err("system proxy not supported on this platform".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_broadcast_change() {
+        let ok = broadcast_change();
+        println!("broadcast_change returned: {}", ok);
+    }
+}
+

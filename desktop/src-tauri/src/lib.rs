@@ -439,22 +439,24 @@ fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
   let mode_str = match current_mode { proxy::pac::ProxyMode::Whitelist => "whitelist", proxy::pac::ProxyMode::Global => "global" };
   let _ = app.emit("proxy-status-changed", serde_json::json!({"on": on, "mode": mode_str}));
   let _ = app.emit("proxy-ready", serde_json::json!({"ready": true, "on": on, "mode": mode_str}));
-  if let Some(tray) = app.tray_by_id("main") {
-    use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-    let app_handle = app.clone();
-    let _ = (|| -> tauri::Result<()> {
-      let show = MenuItem::with_id(&app_handle, "show", "显示主窗口", true, None::<&str>)?;
-      let toggle = CheckMenuItem::with_id(&app_handle, "proxy_toggle", if on { "系统代理: 已启用" } else { "系统代理: 已停用" }, true, on, None::<&str>)?;
-      let mode_wl = CheckMenuItem::with_id(&app_handle, "mode_whitelist", "  白名单模式 (智能分流)", true, current_mode == proxy::pac::ProxyMode::Whitelist, None::<&str>)?;
-      let mode_gb = CheckMenuItem::with_id(&app_handle, "mode_global", "  全局模式 (全部流量)", true, current_mode == proxy::pac::ProxyMode::Global, None::<&str>)?;
-      let quit = MenuItem::with_id(&app_handle, "quit", "退出", true, None::<&str>)?;
-      let sep1 = PredefinedMenuItem::separator(&app_handle)?;
-      let sep2 = PredefinedMenuItem::separator(&app_handle)?;
-      let menu = Menu::with_items(&app_handle, &[&show, &sep1, &toggle, &mode_wl, &mode_gb, &sep2, &quit])?;
-      tray.set_menu(Some(menu))?;
-      Ok(())
-    })();
-  }
+  let app_handle = app.clone();
+  let _ = app.run_on_main_thread(move || {
+    if let Some(tray) = app_handle.tray_by_id("main") {
+      use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+      let _ = (|| -> tauri::Result<()> {
+        let show = MenuItem::with_id(&app_handle, "show", "显示主窗口", true, None::<&str>)?;
+        let toggle = CheckMenuItem::with_id(&app_handle, "proxy_toggle", if on { "系统代理: 已启用" } else { "系统代理: 已停用" }, true, on, None::<&str>)?;
+        let mode_wl = CheckMenuItem::with_id(&app_handle, "mode_whitelist", "  白名单模式 (智能分流)", true, current_mode == proxy::pac::ProxyMode::Whitelist, None::<&str>)?;
+        let mode_gb = CheckMenuItem::with_id(&app_handle, "mode_global", "  全局模式 (全部流量)", true, current_mode == proxy::pac::ProxyMode::Global, None::<&str>)?;
+        let quit = MenuItem::with_id(&app_handle, "quit", "退出", true, None::<&str>)?;
+        let sep1 = PredefinedMenuItem::separator(&app_handle)?;
+        let sep2 = PredefinedMenuItem::separator(&app_handle)?;
+        let menu = Menu::with_items(&app_handle, &[&show, &sep1, &toggle, &mode_wl, &mode_gb, &sep2, &quit])?;
+        tray.set_menu(Some(menu))?;
+        Ok(())
+      })();
+    }
+  });
 }
 fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { sync_tray_and_emit(&app, true); return Ok(()); }
@@ -650,5 +652,17 @@ mod tests {
         let addr = l.local_addr().unwrap();
         tokio::spawn(async move { let (s,_)=l.accept().await.unwrap(); drop(s); });
         assert!(dial_via_proxy(&addr.to_string(), "x.com", 443).await.is_err());
+    }
+    #[test]
+    fn test_app_config_set_and_get() {
+        let res = app_config_set(serde_json::json!({"auto_proxy": true, "dont_ask": true}));
+        assert!(res.is_ok());
+        let got = app_config_get();
+        assert_eq!(got["auto_proxy"], true);
+    }
+    #[test]
+    fn test_cred_get() {
+        let res = cred_get_impl(CREDENTIAL_USER_TUNNEL);
+        println!("cred_get_impl tunnel_token: {:?}", res);
     }
 }
