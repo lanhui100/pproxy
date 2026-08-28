@@ -60,7 +60,16 @@ enum Command {
     /// 开启本机环境代理（设置 http_proxy / https_proxy 环境变量）
     On,
     /// 关闭本机环境代理（清除 http_proxy / https_proxy 环境变量）
-    Off,
+    Off {
+        /// 就地清除当前 shell 代理环境变量（无需 source）
+        #[arg(long)]
+        hard: bool,
+    },
+    /// 代理环境挂起/恢复/脚本生成（eval 模式，不依赖 source）
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
+    },
     Start,
     Stop,
     Restart,
@@ -93,6 +102,21 @@ enum Command {
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
+    },
+}
+
+/// 代理环境挂起/恢复子命令（eval 模式）。
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// 保存当前代理环境变量快照，输出清除代码（eval 使用）
+    Suspend,
+    /// 从快照恢复代理环境变量，输出恢复代码（eval 使用）
+    Resume,
+    /// 生成兄弟项目代理隔离应急脚本（不依赖 Rust CLI）
+    GenerateScript {
+        /// 输出路径（默认 ~/.pony/mitigate.sh）
+        #[arg(long)]
+        output: Option<String>,
     },
 }
 
@@ -229,10 +253,28 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         return cmd::service::systemd_action(action).map_err(RunError::Msg);
     }
 
-    // on/off 环境代理开关，不需要管理 API 配置
-    if matches!(cli.command, Command::On | Command::Off) {
-        let enable = matches!(cli.command, Command::On);
-        return cmd::proxy_env::toggle(enable).map_err(RunError::Msg);
+    // on/off/env 环境代理开关，不需要管理 API 配置
+    match &cli.command {
+        Command::On => {
+            return cmd::proxy_env::toggle(true).map_err(RunError::Msg);
+        }
+        Command::Off { hard: true } => {
+            return cmd::proxy_env::toggle_hard(false).map_err(RunError::Msg);
+        }
+        Command::Off { hard: false } => {
+            return cmd::proxy_env::toggle(false).map_err(RunError::Msg);
+        }
+        Command::Env { cmd } => {
+            return match cmd {
+                EnvCmd::Suspend => cmd::proxy_env::env_suspend().map_err(RunError::Msg),
+                EnvCmd::Resume => cmd::proxy_env::env_resume().map_err(RunError::Msg),
+                EnvCmd::GenerateScript { output } => {
+                    let out_path = output.as_deref().map(std::path::Path::new);
+                    cmd::proxy_env::env_generate_script(out_path).map_err(RunError::Msg)
+                }
+            };
+        }
+        _ => {}
     }
 
     // 组装配置与 client
@@ -291,7 +333,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Config {
             cmd: ConfigCmd::Export { service, route, token },
         } => cmd::export_cmd::run(&cfg, service, route.as_deref(), token.as_deref()),
-        Command::Init { .. } | Command::Deploy { .. } | Command::Start { .. } | Command::Stop { .. } | Command::Restart { .. } | Command::On | Command::Off => {
+        Command::Init { .. } | Command::Deploy { .. } | Command::Start { .. } | Command::Stop { .. } | Command::Restart { .. } | Command::On | Command::Off { .. } | Command::Env { .. } => {
             unreachable!("handled above")
         }
     };

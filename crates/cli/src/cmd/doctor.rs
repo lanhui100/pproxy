@@ -221,7 +221,6 @@ fn tunnel_probe(data_plane: &Option<String>, host: &str) -> TunnelProbeResult {
     }
 
     let status = status_line.split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok());
-    let status = status_line.split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok());
     let sl = status_line.trim();
     match status {
         Some(200) => TunnelProbeResult::Pass,
