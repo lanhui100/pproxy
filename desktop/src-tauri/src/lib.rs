@@ -4,12 +4,19 @@ use std::sync::atomic::{AtomicBool, Ordering as AOrd};
 use std::sync::OnceLock;
 use tokio::sync::watch;
 
+static TRAY_TOGGLE_ITEM: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
+static TRAY_MODE_WL_ITEM: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
+static TRAY_MODE_GB_ITEM: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   // ---- 单实例保护（严格基于 PID 存活性，严禁基于运行时间自毁锁文件）----
   {
     let lock_path = data_dir().join("instance.lock");
-    if std::fs::create_dir_all(lock_path.parent().unwrap()).is_ok() {
+    if let Some(parent) = lock_path.parent() {
+      let _ = std::fs::create_dir_all(parent);
+    }
+    {
       let is_stale = match std::fs::metadata(&lock_path) {
         Ok(_) => {
           let pid_alive = std::fs::read_to_string(&lock_path)
@@ -81,8 +88,13 @@ pub fn run() {
       let sep1 = PredefinedMenuItem::separator(app)?;
       let sep2 = PredefinedMenuItem::separator(app)?;
       let menu = Menu::with_items(app, &[&show, &sep1, &toggle, &mode_wl, &mode_gb, &sep2, &quit])?;
+      let _ = TRAY_TOGGLE_ITEM.set(toggle.clone());
+      let _ = TRAY_MODE_WL_ITEM.set(mode_wl.clone());
+      let _ = TRAY_MODE_GB_ITEM.set(mode_gb.clone());
+
+      let icon = app.default_window_icon().cloned().expect("window icon");
       TrayIconBuilder::with_id("main")
-        .icon(app.default_window_icon().unwrap().clone())
+        .icon(icon)
         .tooltip("Pony Proxy")
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -439,24 +451,16 @@ fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
   let mode_str = match current_mode { proxy::pac::ProxyMode::Whitelist => "whitelist", proxy::pac::ProxyMode::Global => "global" };
   let _ = app.emit("proxy-status-changed", serde_json::json!({"on": on, "mode": mode_str}));
   let _ = app.emit("proxy-ready", serde_json::json!({"ready": true, "on": on, "mode": mode_str}));
-  let app_handle = app.clone();
-  let _ = app.run_on_main_thread(move || {
-    if let Some(tray) = app_handle.tray_by_id("main") {
-      use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-      let _ = (|| -> tauri::Result<()> {
-        let show = MenuItem::with_id(&app_handle, "show", "显示主窗口", true, None::<&str>)?;
-        let toggle = CheckMenuItem::with_id(&app_handle, "proxy_toggle", if on { "系统代理: 已启用" } else { "系统代理: 已停用" }, true, on, None::<&str>)?;
-        let mode_wl = CheckMenuItem::with_id(&app_handle, "mode_whitelist", "  白名单模式 (智能分流)", true, current_mode == proxy::pac::ProxyMode::Whitelist, None::<&str>)?;
-        let mode_gb = CheckMenuItem::with_id(&app_handle, "mode_global", "  全局模式 (全部流量)", true, current_mode == proxy::pac::ProxyMode::Global, None::<&str>)?;
-        let quit = MenuItem::with_id(&app_handle, "quit", "退出", true, None::<&str>)?;
-        let sep1 = PredefinedMenuItem::separator(&app_handle)?;
-        let sep2 = PredefinedMenuItem::separator(&app_handle)?;
-        let menu = Menu::with_items(&app_handle, &[&show, &sep1, &toggle, &mode_wl, &mode_gb, &sep2, &quit])?;
-        tray.set_menu(Some(menu))?;
-        Ok(())
-      })();
-    }
-  });
+  if let Some(toggle) = TRAY_TOGGLE_ITEM.get() {
+    let _ = toggle.set_checked(on);
+    let _ = toggle.set_text(if on { "系统代理: 已启用" } else { "系统代理: 已停用" });
+  }
+  if let Some(mode_wl) = TRAY_MODE_WL_ITEM.get() {
+    let _ = mode_wl.set_checked(current_mode == proxy::pac::ProxyMode::Whitelist);
+  }
+  if let Some(mode_gb) = TRAY_MODE_GB_ITEM.get() {
+    let _ = mode_gb.set_checked(current_mode == proxy::pac::ProxyMode::Global);
+  }
 }
 fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { sync_tray_and_emit(&app, true); return Ok(()); }
