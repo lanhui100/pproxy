@@ -319,14 +319,15 @@ pub async fn serve_data_plane(listener: TcpListener, state: GatewayState) -> std
 
 /// 单连接处理：hyper http1 驱动（CONNECT 由 RouterHyperAdapter 拦截分流）。
 /// F3：header_read_timeout 限首部读取窗口（含 CONNECT），防慢速连接占满 Semaphore 配额。
+///
+/// 使用 hyper::server::conn::http1::Builder（而非 hyper_util::auto::Builder），
+/// 因为 auto::Builder 不支持 CONNECT upgrade（"upgrade expected but low level API in use"）。
 async fn handle_conn(stream: tokio::net::TcpStream, router: Router, state: GatewayState) {
-    use hyper_util::rt::{TokioTimer, tokio::TokioExecutor};
     let adapter = RouterHyperAdapter { router, state };
-    let _ = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
-        .http1()
+    let _ = hyper::server::conn::http1::Builder::new()
+        .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(Some(std::time::Duration::from_secs(30)))
         .keep_alive(true)
-        .timer(TokioTimer::new())
         .serve_connection(hyper_util::rt::TokioIo::new(stream), adapter)
         .await;
 }
