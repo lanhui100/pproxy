@@ -15,15 +15,42 @@ pub struct TunnelProvision {
 }
 
 impl TunnelProvision {
-    /// 从环境变量装配：任一缺失/为空 → None（fail-closed，不猜默认）。
+    /// 从环境变量装配：任一缺失/为空 → 兜底从 PoolConfig 推导。
+    #[allow(dead_code)]
     pub fn from_env() -> Option<Self> {
-        let url = std::env::var("PPROXY_TUNNEL_GATE_URL").ok()?;
-        let token = std::env::var("PPROXY_TUNNEL_TOKEN").ok()?;
+        Self::from_pool_config_and_env(&pproxy_core::PoolConfig::default())
+    }
+
+    /// 智能推导装配：优先读取环境变量，缺省由 PoolConfig 自动派生。
+    pub fn from_pool_config_and_env(pool_config: &pproxy_core::PoolConfig) -> Option<Self> {
+        let url = std::env::var("PPROXY_TUNNEL_GATE_URL")
+            .ok()
+            .or_else(|| pool_config.worker_url.as_deref().and_then(crate::connect::derive_gate_url_from_worker))?;
+        let token = std::env::var("PPROXY_TUNNEL_TOKEN")
+            .ok()
+            .or_else(|| pool_config.worker_secret.clone())?;
         let url = url.trim().to_string();
         let token = token.trim().to_string();
-        if url.is_empty() || token.is_empty() || !url.starts_with("wss://") && !url.starts_with("ws://") {
+        if url.is_empty() || token.is_empty() || (!url.starts_with("wss://") && !url.starts_with("ws://")) {
             return None;
         }
         Some(Self { url, token })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tunnel_provision_from_pool_config() {
+        let pool_cfg = pproxy_core::PoolConfig {
+            worker_url: Some("https://edge.ponyjob.top".into()),
+            worker_secret: Some("sec123".into()),
+            ..Default::default()
+        };
+        let p = TunnelProvision::from_pool_config_and_env(&pool_cfg).unwrap();
+        assert_eq!(p.url, "wss://edge.ponyjob.top/ws");
+        assert_eq!(p.token, "sec123");
     }
 }

@@ -338,7 +338,7 @@ async fn handle_conn(
         let mut tmp = [0u8; 2048];
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            let remaining = deadline - tokio::time::Instant::now();
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 // 超时，关闭连接
                 let _ = stream.shutdown().await;
@@ -355,8 +355,13 @@ async fn handle_conn(
                 _ => return,
             }
         }
-        let head = String::from_utf8_lossy(&buf);
-        let _ = crate::connect::handle_connect_raw(state, &head, stream).await;
+        let split_pos = buf.windows(4).position(|w| w == b"\r\n\r\n");
+        let (head_bytes, leftover) = match split_pos {
+            Some(pos) => (&buf[..pos + 4], buf[pos + 4..].to_vec()),
+            None => (&buf[..], Vec::new()),
+        };
+        let head = String::from_utf8_lossy(head_bytes);
+        let _ = crate::connect::handle_connect_raw(state, &head, leftover, stream).await;
         return;
     }
     // 普通 HTTP：axum Router 经适配器作为 hyper Service 驱动（TokioIo 桥接 tokio stream）。

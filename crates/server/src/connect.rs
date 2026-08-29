@@ -39,7 +39,61 @@ type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type WsTx = SplitSink<WsStream, Message>;
 type WsRx = SplitStream<WsStream>;
 
-/// 数据面隧道配置（spec §3.4）：env 装配，fail-closed。
+/// 默认开箱即用的白名单（覆盖主流 AI 模型 API、OAuth 认证和代码平台）。
+pub const DEFAULT_ALLOWLIST: &[&str] = &[
+    "google.com",
+    "googleapis.com",
+    "gstatic.com",
+    "googleusercontent.com",
+    "accounts.google.com",
+    "openai.com",
+    "chatgpt.com",
+    "oaistatic.com",
+    "oaiusercontent.com",
+    "anthropic.com",
+    "claude.ai",
+    "github.com",
+    "githubusercontent.com",
+];
+
+/// 从 worker_url 推导 gate_url（将 http/https 转换为 ws/wss 并确保以 /ws 结尾）。
+pub fn derive_gate_url_from_worker(worker_url: &str) -> Option<String> {
+    let mut trimmed = worker_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // 剥离 query 和 fragment
+    if let Some((base, _)) = trimmed.split_once('?') {
+        trimmed = base;
+    }
+    if let Some((base, _)) = trimmed.split_once('#') {
+        trimmed = base;
+    }
+    let trimmed = trimmed.trim_end_matches('/');
+
+    let (scheme, host_port_path) = if let Some(rest) = trimmed.strip_prefix("https://") {
+        ("wss", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        ("ws", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("wss://") {
+        ("wss", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("ws://") {
+        ("ws", rest)
+    } else if !trimmed.contains("://") {
+        ("wss", trimmed)
+    } else {
+        // 拒绝 ftp://, file:// 等异常 scheme
+        return None;
+    };
+
+    let host_port = host_port_path.trim_end_matches("/ws").trim_end_matches('/');
+    if host_port.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{host_port}/ws"))
+}
+
+/// 数据面隧道配置（spec §3.4）：env 装配 / PoolConfig 智能推导，fail-closed。
 #[derive(Debug, Clone)]
 pub struct TunnelConfig {
     pub gate_url: String,
@@ -48,26 +102,48 @@ pub struct TunnelConfig {
 }
 
 impl TunnelConfig {
-    /// env 装配：三变量齐备且 gate_url 为 wss:// 才成功；只配其一 → None + warn。
+    /// env 装配（向后兼容）：优先读环境变量，兜底从默认 PoolConfig 推导。
+    #[allow(dead_code)]
     pub fn from_env() -> Option<Self> {
-        let url = std::env::var("PPROXY_TUNNEL_GATE_URL").ok();
-        let token = std::env::var("PPROXY_TUNNEL_TOKEN").ok();
-        let allowlist = std::env::var("PPROXY_TUNNEL_ALLOWLIST").ok();
-        Self::build(url.as_deref(), token.as_deref(), allowlist.as_deref())
+        Self::from_pool_config_and_env(&pproxy_core::PoolConfig::default())
     }
 
-    /// 纯装配逻辑（from_env 的可测内核）：None 输入按缺失处理。
+    /// 智能推导装配（PoolConfig + 环境变量覆盖）：
+    /// 1. gate_url: PPROXY_TUNNEL_GATE_URL 优先；缺省时由 pool_config.worker_url 自动推导
+    /// 2. token: PPROXY_TUNNEL_TOKEN 优先；缺省时继承 pool_config.worker_secret
+    /// 3. allowlist: PPROXY_TUNNEL_ALLOWLIST 追加到 DEFAULT_ALLOWLIST
+    pub fn from_pool_config_and_env(pool_config: &pproxy_core::PoolConfig) -> Option<Self> {
+        let env_url = std::env::var("PPROXY_TUNNEL_GATE_URL").ok();
+        let env_token = std::env::var("PPROXY_TUNNEL_TOKEN").ok();
+        let env_allowlist = std::env::var("PPROXY_TUNNEL_ALLOWLIST").ok();
+
+        let derived_url = env_url.or_else(|| {
+            pool_config
+                .worker_url
+                .as_deref()
+                .and_then(derive_gate_url_from_worker)
+        });
+        let derived_token = env_token.or_else(|| pool_config.worker_secret.clone());
+
+        Self::build(
+            derived_url.as_deref(),
+            derived_token.as_deref(),
+            env_allowlist.as_deref(),
+        )
+    }
+
+    /// 纯装配逻辑（from_env / from_pool_config 的可测内核）：None 输入按缺失处理。
     fn build(url: Option<&str>, token: Option<&str>, allowlist: Option<&str>) -> Option<Self> {
         let url_n = url.map(str::trim).filter(|s| !s.is_empty());
         let token_n = token.map(str::trim).filter(|s| !s.is_empty());
         let (url_n, token_n) = match (url_n, token_n) {
             (Some(u), Some(t)) => (u, t),
             _ => {
-                // 部分配置（只配其一）显式 warn，避免静默失效难排查（spec §6.1 组合语义）
+                // 部分配置（只配其一）显式 warn，避免静默失效难排查
                 if url_n.is_some() || token_n.is_some() {
                     tracing::warn!(
-                        "tunnel partially configured: PPROXY_TUNNEL_GATE_URL and \
-                         PPROXY_TUNNEL_TOKEN must both be set; tunnel disabled"
+                        "tunnel partially configured: gate_url and \
+                         token must both be set; tunnel disabled"
                     );
                 }
                 return None;
@@ -77,18 +153,11 @@ impl TunnelConfig {
             // 数据面强制 wss://（D7）：Bearer token 直上该 URL，明文 ws:// 不可接受。
             // 偏离管理面 tunnel.rs 的宽松校验——管理面下发后由桌面端自行校验，
             // 数据面则直连该 URL，必须加密。
-            tracing::warn!("PPROXY_TUNNEL_GATE_URL must use wss:// (data plane); tunnel disabled");
+            tracing::warn!("tunnel gate_url must use wss:// (data plane); tunnel disabled");
             return None;
         }
         let allowlist = parse_allowlist(allowlist);
-        if allowlist.is_empty() {
-            // 空 allowlist = 全 403（默认拒绝），允许启动但提示，便于排障
-            tracing::warn!(
-                "PPROXY_TUNNEL_ALLOWLIST empty or unset: all CONNECT will be denied (no_tunnel_route)"
-            );
-        } else {
-            warn_suspicious_entries(&allowlist);
-        }
+        warn_suspicious_entries(&allowlist);
         Some(Self {
             gate_url: url_n.to_string(),
             token: token_n.to_string(),
@@ -97,15 +166,23 @@ impl TunnelConfig {
     }
 }
 
-/// allowlist 解析：逗号分隔，trim，空段丢弃，规范化（小写、去尾点）。
+/// allowlist 解析：以 DEFAULT_ALLOWLIST 为基底，追加并去重自定义列表，trim 并规范化。
 fn parse_allowlist(raw: Option<&str>) -> Vec<String> {
-    raw.unwrap_or("")
-        .split(',')
-        .map(str::trim)
+    let mut entries: Vec<String> = DEFAULT_ALLOWLIST
+        .iter()
+        .map(|s| normalize_host(s))
         .filter(|s| !s.is_empty())
-        .map(normalize_host)
-        .filter(|s| !s.is_empty())
-        .collect()
+        .collect();
+
+    if let Some(custom) = raw {
+        for item in custom.split(',') {
+            let normalized = normalize_host(item);
+            if !normalized.is_empty() && !entries.contains(&normalized) {
+                entries.push(normalized);
+            }
+        }
+    }
+    entries
 }
 
 /// 可疑条目 warn（spec §3.3）：scheme/端口/前导点/通配/过宽单标签 → 静默永不命中，
@@ -136,9 +213,11 @@ pub(crate) fn allowlist_match(host: &str, entries: &[String]) -> bool {
     entries.iter().any(|e| suffix_match(&h, &normalize_host(e)))
 }
 
-/// 规范化 host：小写化 + 剥离末尾点（沿桌面端 whitelist.rs）。
+/// 规范化 host：小写化 + 剥离前导通配符和点 + 剥离末尾点。
 fn normalize_host(host: &str) -> String {
-    let mut h = host.trim().to_ascii_lowercase();
+    let h = host.trim().to_ascii_lowercase();
+    let h = h.trim_start_matches('*').trim_start_matches('.');
+    let mut h = h.to_string();
     while h.ends_with('.') {
         h.pop();
     }
@@ -174,7 +253,7 @@ impl fmt::Display for EstablishError {
 
 /// CONNECT 处理入口（gateway.rs::handle_conn peek 分流后调用，spec §3.2）。
 ///
-/// 接收已解析的请求头（含 CONNECT 首行 + Host 头）和原始 TCP 流。
+/// 接收已解析的请求头（含 CONNECT 首行 + Host 头）、管道化多余字节和原始 TCP 流。
 /// 非 hyper 环境：直接在裸 TCP 上写 200 后双向透传。
 ///
 /// 响应语义（spec §3.6，枚举固定，不携带内部细节）：
@@ -183,6 +262,7 @@ impl fmt::Display for EstablishError {
 pub async fn handle_connect_raw(
     state: GatewayState,
     head: &str,
+    leftover: Vec<u8>,
     mut stream: TcpStream,
 ) {
     use tokio::io::AsyncWriteExt;
@@ -218,7 +298,7 @@ pub async fn handle_connect_raw(
                 // 写 200 Connection Established（裸 TCP，非 hyper）
                 let _ = stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
                 // 直接双向透传（不经过 hyper upgrade）
-                relay(stream, ws_tx, ws_rx).await;
+                relay(stream, leftover, ws_tx, ws_rx).await;
                 return;
             }
             Err(e) => {
@@ -311,13 +391,24 @@ async fn establish(cfg: &TunnelConfig, host: &str, port: u16) -> Result<(WsTx, W
 
 /// 双向透传（行为沿桌面端 relay，泛化 IO）：客户端读 ↔ WS 读 select 驱动，
 /// 应答 WS Ping/Pong（CF 空闲判定不误杀）；任一端关闭即结束。
-async fn relay<S>(client: S, mut ws_tx: WsTx, mut ws_rx: WsRx)
+async fn relay<S>(client: S, leftover: Vec<u8>, mut ws_tx: WsTx, mut ws_rx: WsRx)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
     let (mut cr, mut cw) = tokio::io::split(client);
     let mut buf = vec![0u8; 8192];
     tracing::debug!("relay: starting bidirectional relay");
+
+    // 优先将握手前随包到达的管道化数据（如 TLS ClientHello 前缀）送入 WS
+    if !leftover.is_empty() {
+        tracing::debug!("relay: sending {} leftover bytes to ws", leftover.len());
+        if ws_tx.send(Message::Binary(leftover)).await.is_err() {
+            tracing::debug!("relay: ws send error for leftover");
+            let _ = cw.shutdown().await;
+            return;
+        }
+    }
+
     loop {
         tokio::select! {
             n = cr.read(&mut buf) => match n {
@@ -418,7 +509,60 @@ mod tests {
         assert!(!allowlist_match("", &entries(&["googleapis.com"])));
     }
 
-    // ---- TunnelConfig::build（from_env 可测内核）----
+    // ---- derive_gate_url_from_worker ----
+
+    #[test]
+    fn derive_gate_url_handles_schemes_and_paths() {
+        assert_eq!(
+            derive_gate_url_from_worker("https://edge.ponyjob.top"),
+            Some("wss://edge.ponyjob.top/ws".to_string())
+        );
+        assert_eq!(
+            derive_gate_url_from_worker("https://edge.ponyjob.top/"),
+            Some("wss://edge.ponyjob.top/ws".to_string())
+        );
+        // 重复 /ws 幂等
+        assert_eq!(
+            derive_gate_url_from_worker("https://edge.ponyjob.top/ws"),
+            Some("wss://edge.ponyjob.top/ws".to_string())
+        );
+        assert_eq!(
+            derive_gate_url_from_worker("https://edge.ponyjob.top/ws/"),
+            Some("wss://edge.ponyjob.top/ws".to_string())
+        );
+        // 剥离 query 与 fragment
+        assert_eq!(
+            derive_gate_url_from_worker("https://edge.ponyjob.top/?env=prod"),
+            Some("wss://edge.ponyjob.top/ws".to_string())
+        );
+        assert_eq!(
+            derive_gate_url_from_worker("https://edge.ponyjob.top#tag"),
+            Some("wss://edge.ponyjob.top/ws".to_string())
+        );
+        // http 转换为 ws
+        assert_eq!(
+            derive_gate_url_from_worker("http://127.0.0.1:8787"),
+            Some("ws://127.0.0.1:8787/ws".to_string())
+        );
+        assert_eq!(
+            derive_gate_url_from_worker("wss://gate.example.com/ws"),
+            Some("wss://gate.example.com/ws".to_string())
+        );
+        // 非法 scheme 返回 None
+        assert_eq!(derive_gate_url_from_worker("ftp://bad.example.com"), None);
+        assert_eq!(derive_gate_url_from_worker(""), None);
+    }
+
+    #[test]
+    fn allowlist_leading_dot_and_wildcard_normalized() {
+        let e = entries(&[".company.com", "*.openai-custom.com"]);
+        assert!(allowlist_match("api.company.com", &e));
+        assert!(allowlist_match("company.com", &e));
+        assert!(allowlist_match("api.openai-custom.com", &e));
+        assert!(allowlist_match("openai-custom.com", &e));
+    }
+
+    // ---- TunnelConfig::build（from_env / from_pool_config 可测内核）----
 
     #[test]
     fn build_wss_only_and_fail_closed() {
@@ -438,30 +582,64 @@ mod tests {
     }
 
     #[test]
-    fn build_allowlist_parse_and_normalize() {
-        let c = TunnelConfig::build(Some("wss://g.example/ws"), Some("t"), Some(" A.COM , ,b.com. ")).unwrap();
-        assert_eq!(c.allowlist, vec!["a.com", "b.com"]);
-        let c2 = TunnelConfig::build(Some("wss://g.example/ws"), Some("t"), None).unwrap();
-        assert!(c2.allowlist.is_empty());
+    fn build_allowlist_defaults_and_custom_merge() {
+        // None 缺省自动包含默认白名单（Google / OpenAI / Anthropic / GitHub）
+        let c = TunnelConfig::build(Some("wss://g.example/ws"), Some("t"), None).unwrap();
+        assert!(c.allowlist.contains(&"googleapis.com".to_string()));
+        assert!(c.allowlist.contains(&"accounts.google.com".to_string()));
+        assert!(c.allowlist.contains(&"openai.com".to_string()));
+        assert!(allowlist_match("oauth2.googleapis.com", &c.allowlist));
+
+        // 自定义追加合并且去重
+        let c2 = TunnelConfig::build(Some("wss://g.example/ws"), Some("t"), Some(" custom.example.com , Googleapis.com ")).unwrap();
+        assert!(c2.allowlist.contains(&"custom.example.com".to_string()));
+        assert!(c2.allowlist.contains(&"googleapis.com".to_string()));
     }
 
-    // ---- TunnelConfig::from_env（进程 env：全部场景串行在单测内）----
+    // ---- TunnelConfig::from_pool_config_and_env ----
 
     #[test]
-    fn from_env_reads_and_validates() {
+    fn from_pool_config_derives_zero_config_tunnel() {
+        std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
+        std::env::remove_var("PPROXY_TUNNEL_TOKEN");
+        std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
+
+        let pool_cfg = pproxy_core::PoolConfig {
+            worker_url: Some("https://edge.ponyjob.top".into()),
+            worker_secret: Some("sec-secret-123".into()),
+            ..Default::default()
+        };
+
+        let c = TunnelConfig::from_pool_config_and_env(&pool_cfg).unwrap();
+        assert_eq!(c.gate_url, "wss://edge.ponyjob.top/ws");
+        assert_eq!(c.token, "sec-secret-123");
+        assert!(allowlist_match("oauth2.googleapis.com", &c.allowlist));
+        assert!(allowlist_match("api.openai.com", &c.allowlist));
+    }
+
+    #[test]
+    fn from_env_reads_and_overrides_pool_config() {
         std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
         std::env::remove_var("PPROXY_TUNNEL_TOKEN");
         std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
         assert!(TunnelConfig::from_env().is_none());
-        std::env::set_var("PPROXY_TUNNEL_GATE_URL", "wss://gate.example/ws");
-        assert!(TunnelConfig::from_env().is_none(), "只配 url 应 None");
-        std::env::set_var("PPROXY_TUNNEL_TOKEN", "tok");
-        std::env::set_var("PPROXY_TUNNEL_ALLOWLIST", "googleapis.com,accounts.google.com");
-        let c = TunnelConfig::from_env().unwrap();
-        assert_eq!(c.gate_url, "wss://gate.example/ws");
-        assert_eq!(c.allowlist, vec!["googleapis.com", "accounts.google.com"]);
-        std::env::set_var("PPROXY_TUNNEL_GATE_URL", "ws://gate.example/ws");
-        assert!(TunnelConfig::from_env().is_none(), "wss 强制");
+
+        let pool_cfg = pproxy_core::PoolConfig {
+            worker_url: Some("https://edge.ponyjob.top".into()),
+            worker_secret: Some("sec-secret-123".into()),
+            ..Default::default()
+        };
+
+        std::env::set_var("PPROXY_TUNNEL_GATE_URL", "wss://custom-gate.example/ws");
+        std::env::set_var("PPROXY_TUNNEL_TOKEN", "tok-override");
+        std::env::set_var("PPROXY_TUNNEL_ALLOWLIST", "extra.domain.com");
+
+        let c = TunnelConfig::from_pool_config_and_env(&pool_cfg).unwrap();
+        assert_eq!(c.gate_url, "wss://custom-gate.example/ws");
+        assert_eq!(c.token, "tok-override");
+        assert!(c.allowlist.contains(&"extra.domain.com".to_string()));
+        assert!(c.allowlist.contains(&"googleapis.com".to_string()));
+
         std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
         std::env::remove_var("PPROXY_TUNNEL_TOKEN");
         std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");

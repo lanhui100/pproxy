@@ -100,11 +100,11 @@ async fn main() -> anyhow::Result<()> {
     let data_listener = TcpListener::bind(&data_addr).await?;
     info!("data plane listening on {data_addr}");
 
-    // 5.5 CONNECT 隧道配置（pproxy-connect-tunnel spec §3.4）：env 装配，fail-closed
-    let tunnel_cfg = connect::TunnelConfig::from_env().map(Arc::new);
+    // 5.5 CONNECT 隧道配置（pproxy-connect-tunnel spec §3.4）：PoolConfig 智能推导 + env 覆盖，fail-closed
+    let tunnel_cfg = connect::TunnelConfig::from_pool_config_and_env(&config).map(Arc::new);
     if let Some(cfg) = &tunnel_cfg {
         let allowlist = cfg.allowlist.join(", ");
-        info!(allowlist = %allowlist, "CONNECT tunnel enabled via gate worker");
+        info!(gate_url = %cfg.gate_url, allowlist = %allowlist, "CONNECT tunnel enabled via gate worker");
     }
 
     // 8. 管理面绑定非回环地址时 warn（S-P2-额外 裁决：提示暴露面扩大，不阻止启动）
@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
         usage: Arc::clone(&usage),
         store: Arc::clone(&store),
         monitor,
-        tunnel: tunnel::TunnelProvision::from_env(),
+        tunnel: tunnel::TunnelProvision::from_pool_config_and_env(&config),
     };
     let admin_router = api::admin_router(admin_state);
     let admin_listener = TcpListener::bind(&listen_admin).await?;
@@ -159,10 +159,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 回环判定（第 8 步）：host 为 127.* / localhost / ::1 / [::1] 视为回环。
+/// 回环判定（第 8 步）：host 为 127.* / localhost / ::1 / [::1] 视为回环；空 host（如 :8899）代表全网卡绑定，非回环。
 fn is_loopback_host(host: &str) -> bool {
-    if host == "localhost" || host == "[::1]" || host == "::1" || host.is_empty() {
+    if host == "localhost" || host == "[::1]" || host == "::1" {
         return true;
+    }
+    if host.is_empty() {
+        return false;
     }
     host.parse::<std::net::IpAddr>()
         .map(|ip| ip.is_loopback())
