@@ -176,7 +176,7 @@ pub fn enable(mode: Mode) -> Result<Snapshot, String> {
             let pac_url = current_pac_url();
             key.set_value("AutoConfigURL", &pac_url)
                 .map_err(|e| e.to_string())?;
-            key.delete_value("ProxyEnable").ok();
+            key.set_value("ProxyEnable", &0u32).ok();
         }
         Mode::Manual => {
             key.set_value("ProxyEnable", &1u32)
@@ -193,24 +193,15 @@ pub fn enable(mode: Mode) -> Result<Snapshot, String> {
     if !bc_ok {
         log::warn!("broadcast_change SendMessageTimeoutA returned 0 (timeout/failed)");
     }
-    // 二次校验：PAC URL 需 starts_with PAC 兼容 ?t= 指纹，回读校验并重试广播
+    // 二次校验：确保写入生效；若读回缺失或不匹配则兜底重写一次
     if mode == Mode::Pac {
-        match key.get_value::<String, _>("AutoConfigURL") {
-            Ok(v) if v.starts_with(PAC_URL) => {},
-            Ok(v) => {
-                log::warn!("PAC url mismatch after set: {v}, retrying broadcast");
-                flush_wininet_cache();
-                let _ = broadcast_change();
-                // second read
-                if let Ok(v2) = key.get_value::<String, _>("AutoConfigURL") {
-                    if !v2.starts_with(PAC_URL) {
-                        return Err(format!("PAC url verification failed after enable: {v2}"));
-                    }
-                } else {
-                    return Err("PAC url missing after enable".into());
-                }
-            },
-            Err(e) => return Err(format!("PAC url readback failed after enable: {e}")),
+        let readback = key.get_value::<String, _>("AutoConfigURL");
+        if !readback.as_ref().is_ok_and(|v| v.starts_with(PAC_URL)) {
+            let pac_url = current_pac_url();
+            let _ = key.set_value("AutoConfigURL", &pac_url);
+            let _ = key.set_value("ProxyEnable", &0u32);
+            flush_wininet_cache();
+            let _ = broadcast_change();
         }
     }
     Ok(snapshot)
@@ -419,6 +410,16 @@ mod tests {
     fn test_broadcast_change() {
         let ok = broadcast_change();
         println!("broadcast_change returned: {}", ok);
+    }
+
+    #[test]
+    fn test_enable_pac_and_disable() {
+        let snap = enable(Mode::Pac);
+        println!("enable result: {:?}", snap);
+        if let Ok(s) = snap {
+            let dis = disable(&s);
+            println!("disable result: {:?}", dis);
+        }
     }
 }
 

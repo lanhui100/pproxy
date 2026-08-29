@@ -27,25 +27,18 @@ const FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 /// 建连阶段（写 200 之前）：WS Upgrade + 首帧 + 等 {"ok":true}。
 /// 返回分裂后的 sink/stream，供 relay 使用。
-async fn establish(
-    cfg: &EngineConfig,
-    parsed: &ReqHead,
-) -> Result<
-    (
-        futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>,
-        futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>,
-    ),
-    std::io::Error,
-> {
-    let (url, token) = {
-        let (u, t) = cfg.tunnel.borrow().clone();
-        (
-            u.ok_or_else(|| io("tunnel_url not configured"))?,
-            t.ok_or_else(|| io("tunnel token missing"))?,
-        )
-    };
+type WsPair = (
+    futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>,
+    futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>,
+);
 
-    let mut req = url
+/// 单端点尝试建连（WS Upgrade + 首帧 + 等 {"ok":true}）
+async fn try_establish_url(
+    url_str: &str,
+    token: &str,
+    parsed: &ReqHead,
+) -> Result<WsPair, std::io::Error> {
+    let mut req = url_str
         .into_client_request()
         .map_err(|e| io(format!("bad tunnel url: {e}")))?;
     req.headers_mut().insert(
@@ -81,6 +74,39 @@ async fn establish(
             _ => {}
         }
     }
+}
+
+/// 建连阶段：支持多中继端点自动切换（CF 节点不可达/被拒时无缝回退备用 Vercel/Node 节点）。
+async fn establish(
+    cfg: &EngineConfig,
+    parsed: &ReqHead,
+) -> Result<WsPair, std::io::Error> {
+    let (url_raw, token) = {
+        let (u, t) = cfg.tunnel.borrow().clone();
+        (
+            u.ok_or_else(|| io("tunnel_url not configured"))?,
+            t.ok_or_else(|| io("tunnel token missing"))?,
+        )
+    };
+
+    let urls: Vec<&str> = url_raw
+        .split([',', ';', '\n'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut last_err = None;
+    for u in &urls {
+        match try_establish_url(u, &token, parsed).await {
+            Ok(pair) => return Ok(pair),
+            Err(e) => {
+                log::warn!("tunnel establish on {u} for {} failed: {e}", parsed.host);
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| io("no valid tunnel urls configured")))
 }
 
 pub async fn connect_and_relay(
@@ -127,7 +153,15 @@ pub async fn connect_and_relay(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| io("tunnel establish failed")))
+    let err = last_err.unwrap_or_else(|| io("tunnel establish failed"));
+    let msg = format!("502 Bad Gateway: tunnel failed for {}: {}", parsed.host, err);
+    let resp = format!(
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        msg.len(),
+        msg
+    );
+    let _ = client.write_all(resp.as_bytes()).await;
+    Err(err)
 }
 
 /// 双向透传（单任务 select 驱动）：客户端读 ↔ WS 读任一事件即处理，

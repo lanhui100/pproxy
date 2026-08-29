@@ -240,7 +240,19 @@ async fn direct_relay(
     parsed: ReqHead,
     head: &str,
 ) -> std::io::Result<()> {
-    let target = TcpStream::connect((parsed.host.as_str(), parsed.port)).await?;
+    let target = match TcpStream::connect((parsed.host.as_str(), parsed.port)).await {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = format!("502 Bad Gateway: direct dial {} failed: {}", parsed.host, e);
+            let resp = format!(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                msg.len(),
+                msg
+            );
+            let _ = client.write_all(resp.as_bytes()).await;
+            return Err(e);
+        }
+    };
     let mut target = target;
     if parsed.kind == Kind::Connect {
         client

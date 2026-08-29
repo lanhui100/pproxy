@@ -401,8 +401,13 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
 // ---- 隧道中继配置 ----
 const TUNNEL_FILE: &str = "tunnel.json";
 fn validate_tunnel_url(url: &str) -> Result<(), String> {
-  if url.is_empty() || url.len() > 200 || url.contains(char::is_whitespace) { return Err("invalid tunnel url".into()); }
-  if !url.starts_with("wss://") && !url.starts_with("ws://") { return Err("tunnel url must start with wss:// or ws://".into()); }
+  let urls: Vec<&str> = url.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+  if urls.is_empty() { return Err("tunnel url cannot be empty".into()); }
+  for u in urls {
+    if !u.starts_with("wss://") && !u.starts_with("ws://") {
+      return Err(format!("tunnel url '{u}' must start with wss:// or ws://"));
+    }
+  }
   Ok(())
 }
 #[tauri::command]
@@ -444,7 +449,7 @@ fn tunnel_config_load() -> (Option<String>, Option<String>) {
 }
 static ENGINE_ON: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync::Mutex::new(None);
-static ENGINE_TASK: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> = std::sync::Mutex::new(None);
+static ENGINE_TASK: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = std::sync::Mutex::new(None);
 fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
   use tauri::Emitter;
   let current_mode = if let Some(tx) = PROXY_MODE_TX.get() { *tx.borrow() } else { load_proxy_mode_from_file() };
@@ -464,7 +469,7 @@ fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
 }
 fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { sync_tray_and_emit(&app, true); return Ok(()); }
-    let mut wl = { if let Some(tx)=WHITELIST_TX.get(){tx.borrow().clone()} else { init_watch_from_file(); WHITELIST_TX.get().unwrap().borrow().clone() } };
+    let mut wl = { if let Some(tx)=WHITELIST_TX.get(){tx.borrow().clone()} else { init_watch_from_file(); WHITELIST_TX.get().map(|tx| tx.borrow().clone()).unwrap_or_else(load_whitelist_from_file) } };
     for h in ALWAYS_TUNNEL { if !wl.iter().any(|w| w==h) { wl.push(h.to_string()); } }
     let (tunnel_url, tunnel_token) = tunnel_config_load();
     if !wl.is_empty() && (tunnel_url.is_none() || tunnel_token.is_none()) {
@@ -476,23 +481,14 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
         let _ = ensure_tunnel_watch().send((tunnel_url, tunnel_token));
     }
     // Engine singleton: reuse existing task if alive (热更新 via watch, 不重复 bind)
-    let already_running = {
-        let mut guard = ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner());
-        match guard.as_ref() {
-            Some(h) if !h.is_finished() => true,
-            _ => {
-                *guard = None;
-                false
-            }
-        }
-    };
+    let already_running = ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner()).is_some();
     if !already_running {
         let rx = ensure_watch().subscribe();
         let rx_mode = ensure_mode_watch().subscribe();
         let rx_tunnel = ensure_tunnel_watch().subscribe();
         let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
         let rx_clone = rx.clone();
-        let handle = tokio::spawn(async move {
+        let handle = tauri::async_runtime::spawn(async move {
             let cfg = proxy::engine::EngineConfig {
                 listen_addr: "127.0.0.1:18900".into(),
                 whitelist: rx_clone,
@@ -573,7 +569,7 @@ async fn dial_via_proxy(proxy_addr: &str, host: &str, port: u16) -> std::io::Res
 async fn proxy_test_sites() -> Result<Vec<serde_json::Value>, String> {
     if !ENGINE_ON.load(AOrd::SeqCst) { return Err("代理未启用：请先打开系统代理总开关".into()); }
     const PROXY_ADDR: &str = "127.0.0.1:18900";
-    let sites = ["www.google.com", "www.youtube.com", "openai.com", "github.com"];
+    let sites = ["google.com", "x.com", "openai.com", "anthropic.com", "github.com"];
     let mut out = Vec::new();
     for site in sites {
         let started = std::time::Instant::now();
@@ -663,10 +659,5 @@ mod tests {
         assert!(res.is_ok());
         let got = app_config_get();
         assert_eq!(got["auto_proxy"], true);
-    }
-    #[test]
-    fn test_cred_get() {
-        let res = cred_get_impl(CREDENTIAL_USER_TUNNEL);
-        println!("cred_get_impl tunnel_token: {:?}", res);
     }
 }

@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   Plus,
   RefreshCw,
+  ShieldCheck,
   Trash2,
   Zap,
 } from '@lucide/vue'
@@ -58,6 +59,18 @@ const proxyError = ref('')
 interface SiteResult { site: string; ok: boolean; ms: number; error: string }
 const siteResults = ref<SiteResult[]>([])
 const testingSites = ref(false)
+
+function formatSiteName(site: string): string {
+  const map: Record<string, string> = {
+    'google.com': 'Google',
+    'www.google.com': 'Google',
+    'x.com': 'X (Twitter)',
+    'openai.com': 'OpenAI',
+    'anthropic.com': 'Anthropic',
+    'github.com': 'GitHub',
+  }
+  return map[site.toLowerCase()] || site
+}
 
 async function refreshProxy(): Promise<void> {
   try {
@@ -484,17 +497,25 @@ onMounted(async () => {
             Windows 系统代理加速
           </h2>
           <p class="text-xs text-muted-foreground">
-            开启后名单内的网站自动走加速通道，免配置浏览器与终端。
+            开启后常用海外网站及名单内域名自动走高速通道，免配置浏览器与终端。
           </p>
         </div>
-        <div class="flex items-center gap-2">
-          <Switch
-            :model-value="proxyEnabled"
-            :disabled="togglingProxy"
-            @update:model-value="toggleProxy"
-          />
-          <span v-if="togglingProxy"><Loader2 class="size-4 animate-spin text-muted-foreground" /></span>
-          <span v-else class="text-xs font-medium">{{ proxyEnabled ? '已接管' : '未开启' }}</span>
+        <div class="flex items-center gap-3">
+          <span
+            class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors"
+            :class="proxyEnabled ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25' : 'bg-muted/80 text-muted-foreground border border-border/40'"
+          >
+            <span class="size-1.5 rounded-full" :class="proxyEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-muted-foreground/50'" />
+            {{ proxyEnabled ? '系统已接管' : '未开启' }}
+          </span>
+          <div class="flex items-center gap-1.5">
+            <Switch
+              :model-value="proxyEnabled"
+              :disabled="togglingProxy"
+              @update:model-value="toggleProxy"
+            />
+            <Loader2 v-if="togglingProxy" class="size-4 animate-spin text-muted-foreground" />
+          </div>
         </div>
       </div>
 
@@ -502,54 +523,54 @@ onMounted(async () => {
         {{ proxyError }}
       </p>
 
-      <!-- 模式切换与总控 -->
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-        <div class="inline-flex rounded-lg bg-muted/60 p-1 text-xs font-medium self-start">
+      <!-- 模式切换与总控（彩色与柔和协调 Tab） -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-0.5">
+        <div class="inline-flex rounded-lg bg-muted/60 p-1 text-xs font-medium self-start border border-border/40 gap-1">
           <button
             type="button"
-            class="rounded-md px-3 py-1.5 transition cursor-pointer flex items-center gap-1.5"
-            :class="proxyMode === 'whitelist' ? 'bg-background text-foreground shadow-xs font-semibold' : 'text-muted-foreground hover:text-foreground'"
+            class="rounded-md px-3 py-1.5 transition cursor-pointer flex items-center gap-1.5 border border-transparent"
+            :class="proxyMode === 'whitelist'
+              ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 shadow-xs font-semibold'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/40'"
             :disabled="switchingMode"
             @click="setProxyMode('whitelist')"
           >
+            <ShieldCheck class="size-3.5 text-emerald-600 dark:text-emerald-400" />
             <span>白名单模式</span>
-            <span class="text-[10px] opacity-75 font-normal">（智能分流）</span>
+            <span class="text-[10px] opacity-80 font-normal">（智能分流）</span>
           </button>
           <button
             type="button"
-            class="rounded-md px-3 py-1.5 transition cursor-pointer flex items-center gap-1.5"
-            :class="proxyMode === 'global' ? 'bg-background text-foreground shadow-xs font-semibold' : 'text-muted-foreground hover:text-foreground'"
+            class="rounded-md px-3 py-1.5 transition cursor-pointer flex items-center gap-1.5 border border-transparent"
+            :class="proxyMode === 'global'
+              ? 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-500/30 shadow-xs font-semibold'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/40'"
             :disabled="switchingMode"
             @click="setProxyMode('global')"
           >
+            <Zap class="size-3.5 text-indigo-600 dark:text-indigo-400" />
             <span>全局模式</span>
-            <span class="text-[10px] opacity-75 font-normal">（全量流量）</span>
+            <span class="text-[10px] opacity-80 font-normal">（全量流量）</span>
           </button>
         </div>
 
         <p class="text-[11px] text-muted-foreground sm:text-right">
           <template v-if="proxyMode === 'whitelist'">
-            内置海外常用封锁站点底库，自定义名单即加即热生效。
+            海外常用站点走加速通道，直连服务与国内流量极速直出。
           </template>
           <template v-else>
-            除局域网及私有 IP 外，所有公网 HTTP/HTTPS 流量均经由隧道加速。
+            除局域网外，所有公网 HTTP/HTTPS 流量均全量经由隧道转发。
           </template>
         </p>
       </div>
 
-      <!-- 全局模式生效提示卡片 -->
-      <div v-if="proxyMode === 'global'" class="rounded-lg bg-primary/10 border border-primary/20 p-2.5 text-xs text-foreground flex items-center gap-2">
-        <Zap class="size-4 text-primary shrink-0" />
-        <span>当前处于<strong>全局透明加速模式</strong>：全部公网网络请求将全量走隧道代理。</span>
-      </div>
-
-      <!-- 连通性体检（微网格卡片矩阵） -->
+      <!-- 网页访问检测（5 站点微卡片矩阵） -->
       <div class="rounded-lg bg-muted/40 p-3 space-y-2.5">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-            <Activity class="size-3.5" />
-            <span>网络连通性体检</span>
-            <InfoTip text="通过本机代理探测常用全球站点的连接畅通度与延迟" />
+            <Activity class="size-3.5 text-primary" />
+            <span class="text-foreground font-semibold">网页访问检测</span>
+            <InfoTip text="通过本机代理探测 Google、X/Twitter、OpenAI、Anthropic、GitHub 等主流官网的实际连接畅通度与延迟" />
           </div>
           <Button
             variant="outline"
@@ -559,30 +580,33 @@ onMounted(async () => {
             @click="testSites"
           >
             <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': testingSites }" />
-            {{ testingSites ? '测速中…' : '测速体检' }}
+            {{ testingSites ? '检测中…' : '开始检测' }}
           </Button>
         </div>
 
-        <div v-if="siteResults.length" class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
+        <div v-if="siteResults.length" class="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-0.5">
           <div
             v-for="r in siteResults"
             :key="r.site"
-            class="flex items-center justify-between p-2 rounded-md bg-background text-xs shadow-xs"
+            class="flex flex-col justify-between p-2.5 rounded-lg bg-background text-xs border border-border/50 shadow-xs gap-1.5"
           >
-            <div class="flex items-center gap-1.5 min-w-0">
-              <StatusDot :tone="r.ok ? 'ok' : 'error'" size="md" />
-              <span class="font-medium truncate">{{ r.site.replace(/\.(com|org|net|ai|io|cn|top)$/i, '') }}</span>
+            <div class="flex items-center justify-between min-w-0">
+              <span class="font-medium text-foreground truncate text-xs">{{ formatSiteName(r.site) }}</span>
+              <StatusDot :tone="r.ok ? 'ok' : 'error'" size="sm" />
             </div>
-            <span v-if="r.ok" class="font-mono text-[11px] font-medium text-foreground tabular-nums">
-              {{ r.ms }}ms
-            </span>
-            <span v-else class="text-[11px] text-bad font-medium truncate max-w-16" :title="r.error">
-              {{ r.error || '超时' }}
-            </span>
+            <div class="flex items-center justify-between text-[11px]">
+              <span class="text-muted-foreground text-[10px] truncate max-w-[65px]" :title="r.site">{{ r.site }}</span>
+              <span v-if="r.ok" class="font-mono font-medium text-emerald-600 dark:text-emerald-400 tabular-nums">
+                {{ r.ms }}ms
+              </span>
+              <span v-else class="text-bad font-medium truncate max-w-[65px]" :title="r.error">
+                {{ r.error || '失败' }}
+              </span>
+            </div>
           </div>
         </div>
         <p v-else class="text-xs text-muted-foreground py-0.5">
-          {{ proxyEnabled ? '点击右上角「测速体检」测试常用站点延迟' : '开启系统代理后可进行连通性测速体检' }}
+          {{ proxyEnabled ? '点击右上角「开始检测」测试 Google、X、OpenAI、Anthropic、GitHub 等官网连通性' : '开启系统代理后可进行网页访问连通性检测' }}
         </p>
       </div>
 
