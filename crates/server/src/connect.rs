@@ -46,6 +46,8 @@ pub const DEFAULT_ALLOWLIST: &[&str] = &[
     "gstatic.com",
     "googleusercontent.com",
     "accounts.google.com",
+    "goog",
+    "g.co",
     "openai.com",
     "chatgpt.com",
     "oaistatic.com",

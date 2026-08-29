@@ -188,7 +188,18 @@ fn tunnel_probe(data_plane: &Option<String>, host: &str) -> TunnelProbeResult {
 
     let mut stream = match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(5)) {
         Ok(s) => s,
-        Err(e) => return TunnelProbeResult::Fail(format!("TCP 连接失败: {e}")),
+        Err(e) => {
+            let loopback: std::net::SocketAddr = "127.0.0.1:8899".parse().unwrap();
+            if sock_addr != loopback {
+                if let Ok(s) = TcpStream::connect_timeout(&loopback, Duration::from_secs(5)) {
+                    s
+                } else {
+                    return TunnelProbeResult::Fail(format!("TCP 连接失败: {e}"));
+                }
+            } else {
+                return TunnelProbeResult::Fail(format!("TCP 连接失败: {e}"));
+            }
+        }
     };
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
