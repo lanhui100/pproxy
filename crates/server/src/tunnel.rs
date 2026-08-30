@@ -50,7 +50,7 @@ mod tests {
             ..Default::default()
         };
         let p = TunnelProvision::from_pool_config_and_env(&pool_cfg).unwrap();
-        assert_eq!(p.url, "wss://edge.ponyjob.top/ws");
+        assert_eq!(p.url, "wss://gate.ponyjob.top/ws");
         assert_eq!(p.token, "sec123");
     }
 }

@@ -17,6 +17,10 @@
 use std::fmt;
 use std::time::Duration;
 
+/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
+/// 与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
+const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+
 
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
@@ -92,7 +96,13 @@ pub fn derive_gate_url_from_worker(worker_url: &str) -> Option<String> {
     if host_port.is_empty() {
         return None;
     }
-    Some(format!("{scheme}://{host_port}/ws"))
+    let derived = format!("{scheme}://{host_port}/ws");
+    // 产品默认 HTTP 网关（edge.ponyjob.top，cf-worker）不是 WS gate——迁移到正确的 gate 端点
+    // （gate.ponyjob.top/ws，见 deploy/cf-gate-worker/wrangler.toml）。曾用 edge 推导导致隧道拨测超时。
+    if derived.starts_with("wss://edge.ponyjob.top") || derived.starts_with("ws://edge.ponyjob.top") {
+        return Some(GATE_WS_URL.to_string());
+    }
+    Some(derived)
 }
 
 /// 数据面隧道配置（spec §3.4）：env 装配 / PoolConfig 智能推导，fail-closed。
@@ -517,29 +527,29 @@ mod tests {
     fn derive_gate_url_handles_schemes_and_paths() {
         assert_eq!(
             derive_gate_url_from_worker("https://edge.ponyjob.top"),
-            Some("wss://edge.ponyjob.top/ws".to_string())
+            Some("wss://gate.ponyjob.top/ws".to_string())
         );
         assert_eq!(
             derive_gate_url_from_worker("https://edge.ponyjob.top/"),
-            Some("wss://edge.ponyjob.top/ws".to_string())
+            Some("wss://gate.ponyjob.top/ws".to_string())
         );
         // 重复 /ws 幂等
         assert_eq!(
             derive_gate_url_from_worker("https://edge.ponyjob.top/ws"),
-            Some("wss://edge.ponyjob.top/ws".to_string())
+            Some("wss://gate.ponyjob.top/ws".to_string())
         );
         assert_eq!(
             derive_gate_url_from_worker("https://edge.ponyjob.top/ws/"),
-            Some("wss://edge.ponyjob.top/ws".to_string())
+            Some("wss://gate.ponyjob.top/ws".to_string())
         );
         // 剥离 query 与 fragment
         assert_eq!(
             derive_gate_url_from_worker("https://edge.ponyjob.top/?env=prod"),
-            Some("wss://edge.ponyjob.top/ws".to_string())
+            Some("wss://gate.ponyjob.top/ws".to_string())
         );
         assert_eq!(
             derive_gate_url_from_worker("https://edge.ponyjob.top#tag"),
-            Some("wss://edge.ponyjob.top/ws".to_string())
+            Some("wss://gate.ponyjob.top/ws".to_string())
         );
         // http 转换为 ws
         assert_eq!(
