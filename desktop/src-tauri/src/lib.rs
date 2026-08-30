@@ -483,68 +483,6 @@ fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
     let _ = mode_gb.set_checked(current_mode == proxy::pac::ProxyMode::Global);
   }
 }
-/// 从白名单派生出网拨测目标：取第一个形如 `example.com` 的条目原样使用。
-/// 白名单匹配是后缀匹配，条目本身（如 `google.com`）必命中 `Route::Tunnel`；
-/// 不再叠加 `www.` 前缀——若条目已含 `www.`，`www.www.` 会因 DNS 解析失败误判拨测失败（对抗审核发现）。
-fn derive_probe_host(wl: &[String]) -> Option<String> {
-    wl.iter()
-        .find(|e| e.split('.').count() >= 2)
-        .cloned()
-}
-
-/// 出网拨测：经本地引擎对探测目标发 CONNECT，验证出网通道（WS 隧道 / 远端上游）真实可达。
-///
-/// 同步实现——`proxy_enable_inner` 是同步 Tauri 命令，不用 `tauri::async_runtime::block_on`
-/// （存在运行时上下文风险）。读写超时由调用方给定。
-fn probe_egress_via_engine(
-    engine_addr: &str,
-    probe_host: &str,
-    timeout: std::time::Duration,
-) -> Result<(), String> {
-    use std::io::{Read, Write};
-    let mut s = std::net::TcpStream::connect(engine_addr)
-        .map_err(|e| format!("引擎未就绪（{engine_addr}）: {e}"))?;
-    s.set_read_timeout(Some(timeout))
-        .map_err(|e| format!("设置读超时失败: {e}"))?;
-    s.set_write_timeout(Some(timeout))
-        .map_err(|e| format!("设置写超时失败: {e}"))?;
-    let req = format!("CONNECT {probe_host}:443 HTTP/1.1\r\nHost: {probe_host}:443\r\n\r\n");
-    s.write_all(req.as_bytes())
-        .map_err(|e| format!("出网拨测写入失败: {e}"))?;
-
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 512];
-    loop {
-        match s.read(&mut tmp) {
-            Ok(0) => return Err("出网拨测：引擎在建连前关闭了连接（隧道/上游不可用）".into()),
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 8192 {
-                    break;
-                }
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                return Err(format!(
-                    "出网拨测超时：{timeout:?} 内未能建立到 {probe_host} 的出网连接"
-                ));
-            }
-            Err(e) => return Err(format!("出网拨测读失败: {e}")),
-        }
-    }
-    let head = String::from_utf8_lossy(&buf);
-    if head.starts_with("HTTP/1.1 2") || head.starts_with("HTTP/1.0 2") {
-        return Ok(());
-    }
-    // 把完整响应体带进错误（502 的 body 是引擎给的隧道失败原因，如
-    // "502 Bad Gateway: tunnel failed for openai.com: ... unauthorized"），
-    // 只取状态行会吞掉真实原因，用户无从排查。
-    let body = head.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(&head).trim();
-    Err(format!("出网拨测失败：{}", body))
-}
-
 fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { sync_tray_and_emit(&app, true); return Ok(()); }
     let mut wl = { if let Some(tx)=WHITELIST_TX.get(){tx.borrow().clone()} else { init_watch_from_file(); WHITELIST_TX.get().map(|tx| tx.borrow().clone()).unwrap_or_else(load_whitelist_from_file) } };
@@ -622,25 +560,6 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
             return Err("代理引擎启动失败：127.0.0.1:18900 未就绪，请检查端口占用后重试".into());
         }
     }
-    // 阶段二：真实出网拨测（放在启用系统代理之前，失败时无需回滚注册表）。
-    // 仅当存在需要走出网通道的流量时才拨测：全局模式 或 白名单非空；两者皆空 = 全直连，无可测。
-    let mode_now = if let Some(tx) = PROXY_MODE_TX.get() { *tx.borrow() } else { load_proxy_mode_from_file() };
-    if matches!(mode_now, proxy::pac::ProxyMode::Global) || !wl.is_empty() {
-        let probe_host = derive_probe_host(&wl).unwrap_or_else(|| "www.google.com".to_string());
-        if let Err(e) = probe_egress_via_engine(
-            "127.0.0.1:18900",
-            &probe_host,
-            std::time::Duration::from_secs(8),
-        ) {
-            // 状态位不得撒谎：撤销引擎任务并回到「已停止」
-            if let Some(h) = ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner()).take() {
-                h.abort();
-            }
-            ENGINE_ON.store(false, AOrd::SeqCst);
-            sync_tray_and_emit(&app, false);
-            return Err(format!("出网拨测失败，系统代理未启用：{e}"));
-        }
-    }
     let snap = proxy::sysproxy::enable(proxy::sysproxy::Mode::Pac)?;
     *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = Some(snap);
     ENGINE_ON.store(true, AOrd::SeqCst);
@@ -661,8 +580,8 @@ fn proxy_disable_inner(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
-/// 异步化：proxy_enable_inner 内含出网拨测（最长 ~10s），同步命令跑在主线程会冻结 UI。
-/// spawn_blocking 让拨测在阻塞线程池执行，前端 invoke 调用方式不变。
+/// 异步化：proxy_enable_inner 含文件 IO 与系统代理注册表操作，同步命令跑在主线程会冻结 UI。
+/// spawn_blocking 让其在阻塞线程池执行，前端 invoke 调用方式不变。
 async fn proxy_enable(app: tauri::AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || proxy_enable_inner(app))
         .await
@@ -701,13 +620,15 @@ async fn dial_via_proxy(proxy_addr: &str, host: &str, port: u16) -> std::io::Res
 async fn proxy_test_sites() -> Result<Vec<serde_json::Value>, String> {
     if !ENGINE_ON.load(AOrd::SeqCst) { return Err("代理未启用：请先打开系统代理总开关".into()); }
     const PROXY_ADDR: &str = "127.0.0.1:18900";
-    let sites = ["chatgpt.com", "claude.ai", "gemini.google.com", "github.com", "google.com"];
+    let sites = ["google.com", "github.com", "x.com", "openai.com", "anthropic.com"];
 
     let mut tasks = Vec::new();
     for site in sites {
         tasks.push(async move {
             let started = std::time::Instant::now();
-            let r = tokio::time::timeout(std::time::Duration::from_secs(4), dial_via_proxy(PROXY_ADDR, site, 443)).await;
+            // 单站 10s：CF 托管目标（openai/anthropic）须先吃一次 CF gate 拒绝再 failover
+            // 到非 CF 出口，实测全程 ~5.5s 起，4s 预算必然误报超时；测试并行执行，互不拖累。
+            let r = tokio::time::timeout(std::time::Duration::from_secs(10), dial_via_proxy(PROXY_ADDR, site, 443)).await;
             let ok = matches!(r, Ok(Ok(())));
             let ms = started.elapsed().as_millis() as u64;
             let error = match &r {
@@ -982,66 +903,6 @@ mod tests {
         let addr = l.local_addr().unwrap();
         tokio::spawn(async move { let (s,_)=l.accept().await.unwrap(); drop(s); });
         assert!(dial_via_proxy(&addr.to_string(), "x.com", 443).await.is_err());
-    }
-    /// 同步假引擎：accept 后按 script 应答；script 为 None 时永不回包（模拟半死连接）。
-    fn fake_engine_sync(script: Option<&'static str>) -> String {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        std::thread::spawn(move || {
-            while let Ok((mut s, _)) = l.accept() {
-                std::thread::spawn(move || {
-                    let mut buf = [0u8; 1024];
-                    use std::io::{Read, Write};
-                    let _ = s.read(&mut buf);
-                    match script {
-                        Some(resp) => { let _ = s.write_all(resp.as_bytes()); }
-                        None => std::thread::sleep(std::time::Duration::from_secs(30)),
-                    }
-                });
-            }
-        });
-        addr.to_string()
-    }
-
-    #[test]
-    fn probe_egress_ok_on_2xx() {
-        let addr = fake_engine_sync(Some("HTTP/1.1 200 Connection Established\r\n\r\n"));
-        probe_egress_via_engine(&addr, "www.github.com", std::time::Duration::from_secs(3))
-            .expect("2xx 应视为出网可达");
-    }
-
-    #[test]
-    fn probe_egress_err_on_non_2xx() {
-        // 错误信息已改为携带完整响应体（只取状态行会吞掉隧道失败的真实原因），
-        // 故 fake engine 的 502 必须带 body，断言也对齐 body 关键字
-        let addr = fake_engine_sync(Some(
-            "HTTP/1.1 502 Bad Gateway\r\n\r\n502 Bad Gateway: tunnel failed for www.github.com: denied",
-        ));
-        let e = probe_egress_via_engine(&addr, "www.github.com", std::time::Duration::from_secs(3))
-            .expect_err("非 2xx 必须判为出网失败");
-        assert!(e.contains("tunnel failed"), "错误应携带引擎失败原因: {e}");
-    }
-
-    #[test]
-    fn probe_egress_times_out_on_silent_engine() {
-        // P1-4：引擎 accept 后不回包，拨测必须超时返回，不得挂住开启流程
-        let addr = fake_engine_sync(None);
-        let started = std::time::Instant::now();
-        let e = probe_egress_via_engine(&addr, "www.github.com", std::time::Duration::from_millis(300))
-            .expect_err("半死连接必须超时");
-        assert!(e.contains("超时"), "错误应说明超时: {e}");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "不得挂起: {:?}", started.elapsed());
-    }
-
-    #[test]
-    fn probe_host_derived_from_whitelist() {
-        // 探测目标必须随白名单走，否则白名单改造后会退化成直连误判
-        assert_eq!(
-            derive_probe_host(&["github.com".into(), "youtube.com".into()]).as_deref(),
-            Some("github.com")
-        );
-        assert_eq!(derive_probe_host(&[]), None);
-        assert_eq!(derive_probe_host(&["localhost".into()]), None, "单段域名不能作为探测目标");
     }
 
     #[test]

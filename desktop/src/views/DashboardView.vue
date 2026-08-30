@@ -50,10 +50,11 @@ const isSubmitting = ref(false)
 const testResults = ref<
   Array<{ name: string; host: string; status: 'idle' | 'testing' | 'ok' | 'fail'; latency?: number }>
 >([
-  { name: 'ChatGPT / OpenAI', host: 'chatgpt.com', status: 'idle' },
-  { name: 'Claude / Anthropic', host: 'claude.ai', status: 'idle' },
-  { name: 'Google Gemini', host: 'gemini.google.com', status: 'idle' },
+  { name: 'Google', host: 'google.com', status: 'idle' },
   { name: 'GitHub', host: 'github.com', status: 'idle' },
+  { name: 'X', host: 'x.com', status: 'idle' },
+  { name: 'OpenAI', host: 'openai.com', status: 'idle' },
+  { name: 'Anthropic', host: 'anthropic.com', status: 'idle' },
 ])
 
 onMounted(async () => {
