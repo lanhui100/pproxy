@@ -1,0 +1,41 @@
+# pony-gate-node.service — WS↔TCP 隧道桥备用出口（非 CF IP，服务 OpenAI 等被 CF 平台
+# 限制的目标，ADR-002）。与 deploy/vercel-gate-worker/api/ws.js 同源代码。
+#
+# 部署（VPS /home/USER/pproxy）：
+#   1) printf 'TUNNEL_TOKEN_HASH=%s\n' "$(node -e "console.log(require('crypto').createHash('sha256').update(process.argv[1]).digest('hex'))" '<隧道令牌明文>')" \
+#        | sudo tee /home/USER/pproxy/.pony-gate.env >/dev/null && sudo chmod 600 /home/USER/pproxy/.pony-gate.env
+#      （散列须与 cf-gate-worker 的 TUNNEL_TOKEN_HASH secret 同源——同一令牌的 sha256；
+#        生成时用 printf '%s' 传令牌，避免尾部换行——见 DESKTOP-TROUBLESHOOTING 第五轮坑）
+#   2) cd /home/USER/pproxy/deploy/vercel-gate-worker && npm install --omit=dev
+#   3) sudo cp systemd/pony-gate-node.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#      sudo systemctl enable --now pony-gate-node
+#   4) cloudflared config.yml 增加 ingress：vgate2.ponyjob.top → http://localhost:3101，
+#      并在 CF DNS 加 vgate2 的 CNAME（同 access 隧道）；重启 pony-tunnel。
+#      注意：vgate.ponyjob.top 已被方案 B（Vercel pony-gate-node 项目）占用，VPS 部署须换子域。
+#   5) 桌面端「设置 → 隧道中继」端点改为逗号分隔：
+#      wss://gate.ponyjob.top/ws,wss://vgate2.ponyjob.top/ws
+#
+# node 路径按部署机实际调整（`which node`）。
+
+[Unit]
+Description=pony gate node - WS-to-TCP tunnel bridge (non-CF failover egress)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dm
+WorkingDirectory=/home/USER/pproxy/deploy/vercel-gate-worker
+# TUNNEL_TOKEN_HASH 经环境文件注入（600，不入库）
+EnvironmentFile=/home/USER/pproxy/.pony-gate.env
+Environment=PORT=3101
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
