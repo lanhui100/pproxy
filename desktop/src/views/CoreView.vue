@@ -374,3 +374,5 @@ onMounted(async () => {
         </div>
       </details>
     </div>
+  </div>
+</template>
