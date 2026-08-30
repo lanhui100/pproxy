@@ -9,6 +9,8 @@ pub mod token;
 pub mod usage;
 pub mod quota;
 pub mod alert;
+pub mod user;
+pub mod gatekeeper;
 
 pub use pool::Pool;
 pub use edge::{EdgeClient, ForwardRequest};
@@ -16,6 +18,8 @@ pub use route::RouteTable;
 pub use store::Store;
 pub use token::TokenService;
 pub use usage::UsageTracker;
+pub use user::UserService;
+pub use gatekeeper::{AuthGatekeeper, GatekeeperConfig};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

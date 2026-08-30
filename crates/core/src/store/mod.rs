@@ -13,6 +13,9 @@ mod routes;
 mod tests;
 mod tokens;
 mod usage;
+mod users;
+
+pub use users::UserRow;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -33,6 +36,16 @@ CREATE TABLE IF NOT EXISTS tokens (
   expires_at   INTEGER,
   revoked_at   INTEGER,
   last_used_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  disabled      INTEGER NOT NULL DEFAULT 0,
+  expires_at    INTEGER,
+  last_used_at  INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS routes (
@@ -74,6 +87,7 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_usage_route_ts ON usage_hourly(route, ts_hour);
 CREATE INDEX IF NOT EXISTS idx_usage_token_ts ON usage_hourly(token_id, ts_hour);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 
 -- name 唯一性（C-P1-10）：部分唯一索引仅约束未撤销行——撤销后同名可复用
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_name ON tokens(name) WHERE revoked_at IS NULL;
