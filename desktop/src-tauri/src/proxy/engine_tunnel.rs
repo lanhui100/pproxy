@@ -23,7 +23,19 @@ fn io(e: impl std::fmt::Display) -> std::io::Error {
 }
 
 const RETRY: u32 = 2; // 总尝试次数（首次 + 1 次重试）
+
+// 超时常量：测试下缩短，避免单测真等满 10 秒（对齐 engine_upstream 的做法）。
+#[cfg(not(test))]
+const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 首帧应答超时。gate "accept 后不回包/拨号静默挂死"的半死连接是常态：
+/// connect_async 自身无超时，缺拨号保护时多端点 failover 永远不会触发
+/// （首个端点挂死 → 后续端点永远轮不到 → 每个请求卡满整条建连循环）。
+#[cfg(not(test))]
 const FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(test)]
+const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+#[cfg(test)]
+const FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(600);
 
 /// 建连阶段（写 200 之前）：WS Upgrade + 首帧 + 等 {"ok":true}。
 /// 返回分裂后的 sink/stream，供 relay 使用。
@@ -45,7 +57,12 @@ async fn try_establish_url(
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {token}")).map_err(io)?,
     );
-    let (ws, _resp) = tokio_tungstenite::connect_async(req).await.map_err(io)?;
+    // 拨号 + WS Upgrade 共享 DIAL_TIMEOUT 预算：静默端点不得挂死建连循环
+    let dial_deadline = tokio::time::Instant::now() + DIAL_TIMEOUT;
+    let (ws, _resp) = tokio::time::timeout_at(dial_deadline, tokio_tungstenite::connect_async(req))
+        .await
+        .map_err(|_| io(format!("dial timeout after {DIAL_TIMEOUT:?}")))?
+        .map_err(io)?;
     let (mut ws_tx, mut ws_rx) = ws.split();
 
     let first = serde_json::json!({ "host": parsed.host, "port": parsed.port }).to_string();
@@ -127,17 +144,7 @@ pub async fn connect_and_relay(
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         .await?;
                 } else {
-                    let mut lines = head.lines();
-                    let first = lines.next().unwrap_or("");
-                    let rewritten = rewrite_first_line(first);
-                    let mut full_req = String::new();
-                    full_req.push_str(&rewritten);
-                    full_req.push_str("\r\n");
-                    for l in lines {
-                        full_req.push_str(l);
-                        full_req.push_str("\r\n");
-                    }
-                    full_req.push_str("\r\n");
+                    let full_req = rebuild_request(head);
                     ws_tx
                         .send(Message::Binary(full_req.into_bytes()))
                         .await
@@ -196,6 +203,17 @@ async fn relay(
     Ok(())
 }
 
+/// 重写明文请求：首行 absolute-form → origin-form，其余头原样保留（含结尾空行与 body）。
+///
+/// 严禁用 `head.lines()` 逐行重建：`lines()` 会把结尾的 `\r\n\r\n` 拆出一个额外空元素，
+/// 重建后变成 `...\r\n\r\n\r\n`，明文 POST 的 body 会被这 2 字节前缀破坏。
+/// 这里用 `split_once("\r\n")` 分离首行与剩余，剩余原样拼回（见 engine_upstream::rebuild_request）。
+fn rebuild_request(head: &str) -> String {
+    // 退化输入（无 CRLF）时补一个空行，保证请求头完整
+    let (first, rest) = head.split_once("\r\n").unwrap_or((head, "\r\n\r\n"));
+    format!("{}\r\n{}", rewrite_first_line(first), rest)
+}
+
 fn rewrite_first_line(first: &str) -> String {
     let parts: Vec<&str> = first.splitn(3, ' ').collect();
     if parts.len() != 3 {
@@ -211,4 +229,112 @@ fn rewrite_first_line(first: &str) -> String {
         None => "/".to_string(),
     };
     format!("{} {} {}", parts[0], path, parts[2])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::watch;
+    use tokio_tungstenite::tungstenite::Message;
+
+    /// 起一个最小 WS gate 假端点：读首帧后按 first_reply 应答（Ok(true)→{"ok":true}）。
+    async fn spawn_fake_gate(
+        first_ok: bool,
+    ) -> std::io::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Text(_) = msg {
+                    let reply = if first_ok {
+                        serde_json::json!({ "ok": true }).to_string()
+                    } else {
+                        serde_json::json!({ "ok": false, "reason": "cf blocked" }).to_string()
+                    };
+                    ws.send(Message::Text(reply)).await.unwrap();
+                    if first_ok {
+                        // 模拟 gate 侧 TCP 中继：回显后续二进制
+                        while let Some(Ok(msg)) = ws.next().await {
+                            if let Message::Binary(b) = msg {
+                                let _ = ws.send(Message::Binary(b)).await;
+                            } else if msg.is_close() {
+                                break;
+                            }
+                        }
+                    }
+                    let _ = ws.close(None).await;
+                    break;
+                }
+            }
+        });
+        Ok((addr, handle))
+    }
+
+    fn cfg_with_endpoints(urls: String) -> EngineConfig {
+        let (_ttx, trx) = watch::channel((Some(urls), Some("mock-token".into())));
+        EngineConfig { tunnel: trx, ..Default::default() }
+    }
+
+    /// 多端点 failover（R4）：首端点拒绝（模拟 CF gate 对 CF 托管目标的平台拒绝）
+    /// 必须无缝落到次端点，而不是把拒绝上抛给浏览器。
+    #[tokio::test]
+    async fn establish_falls_over_to_second_endpoint_on_denied() {
+        let (a_addr, a_handle) = spawn_fake_gate(false).await.unwrap();
+        let (b_addr, b_handle) = spawn_fake_gate(true).await.unwrap();
+        let cfg = cfg_with_endpoints(format!("ws://{a_addr},ws://{b_addr}"));
+        let parsed = ReqHead { kind: Kind::Connect, host: "openai.com".into(), port: 443 };
+
+        let result = establish(&cfg, &parsed).await;
+        assert!(result.is_ok(), "次端点应接住首端点的拒绝: {result:?}");
+
+        // 落在次端点后中继应双向可用：发 PING 收 PING（次端点回显）
+        let (mut ws_tx, mut ws_rx) = result.unwrap();
+        ws_tx.send(Message::Binary(b"PING".to_vec())).await.unwrap();
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(3), ws_rx.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.into_data(), b"PING");
+
+        a_handle.abort();
+        b_handle.abort();
+    }
+
+    /// 端点拨号静默挂死同样触发 failover：connect_async 无内建超时，
+    /// 缺 DIAL_TIMEOUT 保护时首个挂死端点会卡死整条建连循环。
+    #[tokio::test]
+    async fn establish_falls_over_on_silent_endpoint() {
+        // 静默端点：只 accept TCP，从不响应（模拟被墙/半死的边缘节点）
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        let (b_addr, b_handle) = spawn_fake_gate(true).await.unwrap();
+        let cfg = cfg_with_endpoints(format!("ws://{dead_addr},ws://{b_addr}"));
+        let parsed = ReqHead { kind: Kind::Connect, host: "www.youtube.com".into(), port: 443 };
+
+        let result = establish(&cfg, &parsed).await;
+        assert!(result.is_ok(), "静默端点后应落到次端点: {result:?}");
+        b_handle.abort();
+    }
+
+    #[test]
+    fn rebuild_request_keeps_single_blank_line_and_body() {
+        // F2：重建后不得多出 CRLF，否则明文 POST 的 body 被 2 字节前缀破坏
+        assert_eq!(
+            rebuild_request("POST http://x/y HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nBODY"),
+            "POST /y HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nBODY"
+        );
+    }
+
+    #[test]
+    fn rebuild_request_without_body_ends_with_blank_line() {
+        assert_eq!(
+            rebuild_request("GET http://x/y HTTP/1.1\r\nHost: x\r\n\r\n"),
+            "GET /y HTTP/1.1\r\nHost: x\r\n\r\n"
+        );
+    }
 }

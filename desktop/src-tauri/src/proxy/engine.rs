@@ -16,6 +16,28 @@ use tokio::sync::watch;
 use super::pac;
 use super::whitelist;
 
+/// 远端上游代理（方案 B chained 模式）：白名单流量经该 HTTP 代理 CONNECT 出网。
+///
+/// 不派生 `Debug`：密码会以明文出现在任何 `{:?}` 里（含 panic 回溯与日志）。
+#[derive(Clone, PartialEq)]
+pub struct Upstream {
+    /// host:port（不含 scheme）
+    pub host: String,
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for Upstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Upstream")
+            .field("host", &self.host)
+            .field("username", &self.username)
+            // host/username 保留以便排障，password 一律脱敏
+            .field("password", &"***")
+            .finish()
+    }
+}
+
 /// 引擎配置。
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -24,6 +46,8 @@ pub struct EngineConfig {
     pub mode: watch::Receiver<pac::ProxyMode>,
     /// 隧道凭据热更新通道 (url, token)
     pub tunnel: watch::Receiver<(Option<String>, Option<String>)>,
+    /// 远端上游代理热更新通道（chained 模式；Some 时优先于 WS gate）
+    pub upstream: watch::Receiver<Option<Upstream>>,
 }
 
 impl Default for EngineConfig {
@@ -32,11 +56,13 @@ impl Default for EngineConfig {
         let (_tx, rx) = watch::channel(Vec::new());
         let (_mtx, mrx) = watch::channel(pac::ProxyMode::Whitelist);
         let (_ttx, trx) = watch::channel((None, None));
+        let (_utx, urx) = watch::channel(None);
         EngineConfig {
             listen_addr: "127.0.0.1:18900".into(),
             whitelist: rx,
             mode: mrx,
             tunnel: trx,
+            upstream: urx,
         }
     }
 }
@@ -220,7 +246,12 @@ async fn handle_conn(
         }
         Route::Tunnel => {
             stats.tunneled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            match super::engine_tunnel::connect_and_relay(stream, parsed, &head, cfg).await {
+            let upstream = cfg.upstream.borrow().clone();
+            let result = match upstream {
+                Some(u) => super::engine_upstream::connect_and_relay(stream, parsed, &head, &u).await,
+                None => super::engine_tunnel::connect_and_relay(stream, parsed, &head, cfg).await,
+            };
+            match result {
                 Ok(()) => Ok(()),
                 Err(e) => {
                     stats.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -260,18 +291,21 @@ async fn direct_relay(
             .await?;
         relay_bidir(client, target).await
     } else {
-        let mut lines = head.lines();
-        let first = lines.next().unwrap_or("");
-        let rewritten = rewrite_first_line_absolute(first);
-        let mut rest = String::new();
-        for l in lines {
-            rest.push_str(l);
-            rest.push_str("\r\n");
-        }
-        let forwarded = format!("{}\r\n{}\r\n", rewritten, rest);
+        let forwarded = rebuild_request(head);
         target.write_all(forwarded.as_bytes()).await?;
         relay_bidir(client, target).await
     }
+}
+
+/// 重写明文请求：首行 absolute-form → origin-form，其余头原样保留（含结尾空行与 body）。
+///
+/// 严禁用 `head.lines()` 逐行重建：`lines()` 会把结尾的 `\r\n\r\n` 拆出一个额外空元素，
+/// 重建后变成 `...\r\n\r\n\r\n`，明文 POST 的 body 会被这 2 字节前缀破坏。
+/// 这里用 `split_once("\r\n")` 分离首行与剩余，剩余原样拼回（同 engine_upstream::rebuild_request）。
+fn rebuild_request(head: &str) -> String {
+    // 退化输入（无 CRLF）时补一个空行，保证请求头完整
+    let (first, rest) = head.split_once("\r\n").unwrap_or((head, "\r\n\r\n"));
+    format!("{}\r\n{}", rewrite_first_line_absolute(first), rest)
 }
 
 fn rewrite_first_line_absolute(first: &str) -> String {
@@ -291,15 +325,48 @@ fn rewrite_first_line_absolute(first: &str) -> String {
     format!("{} {} {}", parts[0], path, parts[2])
 }
 
-async fn relay_bidir(
-    mut a: TcpStream,
-    mut b: TcpStream,
+/// 双向透传（单循环双方向，半关闭语义正确）。
+///
+/// 设计要点（吸取两版教训）：
+/// - **禁止 `try_join!`**：一端关闭而另一端保持连接（keep-alive）时永远等不到 EOF，任务泄漏；
+/// - **禁止 `select!` 取消另一方向**：被取消的 copy 已读未写的数据会静默丢弃，响应被截断；
+/// - 正确做法：单一循环里同时监听两端读，单端 EOF 时对该方向对端写半区发 FIN（半关闭），
+///   另一端继续转发直到也 EOF，两端都 EOF 才退出。
+pub(crate) async fn relay_bidir(
+    a: TcpStream,
+    b: TcpStream,
 ) -> std::io::Result<()> {
-    let (mut ar, mut aw) = a.split();
-    let (mut br, mut bw) = b.split();
-    let r = tokio::io::copy(&mut ar, &mut bw);
-    let w = tokio::io::copy(&mut br, &mut aw);
-    tokio::try_join!(r, w)?;
+    let (mut ar, mut aw) = a.into_split();
+    let (mut br, mut bw) = b.into_split();
+    let mut a_eof = false;
+    let mut b_eof = false;
+    let mut buf_a = [0u8; 8192];
+    let mut buf_b = [0u8; 8192];
+    loop {
+        if a_eof && b_eof {
+            break;
+        }
+        tokio::select! {
+            n = ar.read(&mut buf_a), if !a_eof => {
+                let n = n?;
+                if n == 0 {
+                    a_eof = true;
+                    let _ = bw.shutdown().await;
+                } else {
+                    bw.write_all(&buf_a[..n]).await?;
+                }
+            }
+            n = br.read(&mut buf_b), if !b_eof => {
+                let n = n?;
+                if n == 0 {
+                    b_eof = true;
+                    let _ = aw.shutdown().await;
+                } else {
+                    aw.write_all(&buf_b[..n]).await?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -362,6 +429,46 @@ mod tests {
         // 本地回环与 Bypass 目标仍必须走 Direct 防自锁
         assert_eq!(decide("localhost", &snap, pac::ProxyMode::Global), Route::Direct);
         assert_eq!(decide("127.0.0.1", &snap, pac::ProxyMode::Global), Route::Direct);
+    }
+
+    #[test]
+    fn rebuild_request_keeps_single_blank_line_and_body() {
+        // F2：重建后不得多出 CRLF，否则明文 POST 的 body 被 2 字节前缀破坏
+        assert_eq!(
+            rebuild_request("POST http://x/y HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nBODY"),
+            "POST /y HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nBODY"
+        );
+        assert_eq!(
+            rebuild_request("GET http://x/y?a=1 HTTP/1.1\r\nHost: x\r\n\r\n"),
+            "GET /y?a=1 HTTP/1.1\r\nHost: x\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn upstream_debug_redacts_password() {
+        // F3：任何 {:?} 都不得输出明文密码
+        let u = Upstream {
+            host: "proxy.example.com:8899".into(),
+            username: "alice".into(),
+            password: "super-secret-pw".into(),
+        };
+        let shown = format!("{u:?}");
+        assert!(!shown.contains("super-secret-pw"), "密码泄露: {shown}");
+        assert!(shown.contains("***"), "密码位应脱敏: {shown}");
+        assert!(shown.contains("proxy.example.com:8899") && shown.contains("alice"), "host/username 应保留便于排障: {shown}");
+    }
+
+    #[test]
+    fn engine_config_debug_does_not_leak_upstream_password() {
+        // EngineConfig 派生 Debug 会委托给 Upstream 的手写实现，逐层确认不泄露
+        let (_tx, rx) = watch::channel(Some(Upstream {
+            host: "h:1".into(),
+            username: "u".into(),
+            password: "top-secret".into(),
+        }));
+        let cfg = EngineConfig { upstream: rx, ..Default::default() };
+        let shown = format!("{cfg:?}");
+        assert!(!shown.contains("top-secret"), "密码泄露: {shown}");
     }
 
     #[test]

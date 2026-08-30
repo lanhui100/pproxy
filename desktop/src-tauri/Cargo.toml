@@ -33,6 +33,13 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+pproxy-core = { path = "../../crates/core" }
+pproxy-engine = { path = "../../crates/engine" }
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
 
 # 独立构建图：不吸收进 pproxy workspace（M5 spec §3 约束）
 [workspace]

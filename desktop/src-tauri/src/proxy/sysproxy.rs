@@ -380,6 +380,35 @@ pub fn cleanup_stale() {
 #[cfg(not(windows))]
 pub fn cleanup_stale() {}
 
+/// 终极网络急救箱：一键无条件彻底清空注册表系统代理与 PAC 关联，刷新 WinINet 缓存并广播系统消息。
+#[cfg(windows)]
+pub fn rescue_network() -> Result<(), String> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey_with_flags(INTERNET_SETTINGS, KEY_SET_VALUE | KEY_QUERY_VALUE)
+        .map_err(|e| format!("打开注册表失败: {e}"))?;
+
+    let _ = key.set_value("ProxyEnable", &0u32);
+    let _ = key.delete_value("AutoConfigURL");
+    let _ = key.delete_value("ProxyServer");
+    let _ = key.delete_value("ProxyOverride");
+
+    flush_wininet_cache();
+    broadcast_change();
+    clear_snapshot();
+    log::info!("rescue_network: All WinINet proxy settings have been unconditionally reset");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn rescue_network() -> Result<(), String> {
+    clear_snapshot();
+    Ok(())
+}
+
 // ---- 非 Windows 平台：no-op（开发期占位；生产目标仅 Windows）----
 
 #[cfg(not(windows))]

@@ -162,6 +162,8 @@ pub fn run() {
       proxy_tunnel_get, proxy_tunnel_set_url, tunnel_token_save, tunnel_token_clear,
       proxy_auto_config_get, proxy_auto_config_set, app_config_get, app_config_set,
       proxy_bypass_hosts, api_bypass_fetch,
+      proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
+      open_external_url,
     ])
     .build(ctx)
     .expect("error while building tauri application");
@@ -177,6 +179,8 @@ pub fn run() {
 const CREDENTIAL_SERVICE: &str = "pony-desktop";
 const CREDENTIAL_USER: &str = "admin_token";
 const CREDENTIAL_USER_TUNNEL: &str = "tunnel_token";
+/// 方案 B（chained）远端代理密码的独立凭据槽；严禁复用 admin_token（会污染管理面鉴权）。
+const CREDENTIAL_USER_PROXY: &str = "proxy_password";
 
 fn cred_entry(user: &str) -> Result<keyring::Entry, String> {
   keyring::Entry::new(CREDENTIAL_SERVICE, user).map_err(|e| format!("keyring entry error: {e}"))
@@ -277,6 +281,13 @@ fn ensure_tunnel_watch() -> &'static watch::Sender<(Option<String>, Option<Strin
     TUNNEL_TX.get_or_init(|| {
         let (u, t) = tunnel_config_load();
         let (tx, _rx) = watch::channel((u, t));
+        tx
+    })
+}
+static UPSTREAM_TX: OnceLock<watch::Sender<Option<proxy::engine::Upstream>>> = OnceLock::new();
+fn ensure_upstream_watch() -> &'static watch::Sender<Option<proxy::engine::Upstream>> {
+    UPSTREAM_TX.get_or_init(|| {
+        let (tx, _rx) = watch::channel(None);
         tx
     })
 }
@@ -400,6 +411,19 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
 
 // ---- 隧道中继配置 ----
 const TUNNEL_FILE: &str = "tunnel.json";
+/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
+/// 注意：与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
+const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+
+/// 旧配置迁移：早期版本把 HTTP 网关域名（edge.ponyjob.top）误当作 WS gate 端点，
+/// 且曾缺 /ws 路径。读到这类值一律映射到正确的 gate 端点（防止拨测超时/隧道连接失败）。
+fn migrate_tunnel_url(url: &str) -> String {
+    let t = url.trim();
+    if t.starts_with("wss://edge.ponyjob.top") || t.starts_with("ws://edge.ponyjob.top") {
+        return GATE_WS_URL.to_string();
+    }
+    t.to_string()
+}
 fn validate_tunnel_url(url: &str) -> Result<(), String> {
   let urls: Vec<&str> = url.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
   if urls.is_empty() { return Err("tunnel url cannot be empty".into()); }
@@ -412,7 +436,7 @@ fn validate_tunnel_url(url: &str) -> Result<(), String> {
 }
 #[tauri::command]
 fn proxy_tunnel_get() -> serde_json::Value {
-  let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from)).unwrap_or_default();
+  let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(migrate_tunnel_url)).unwrap_or_default();
   let has_token = matches!(cred_get_impl(CREDENTIAL_USER_TUNNEL), Ok(Some(t)) if !t.is_empty());
   serde_json::json!({ "url": url, "has_token": has_token })
 }
@@ -443,7 +467,7 @@ fn tunnel_token_clear() -> Result<(), String> {
   Ok(())
 }
 fn tunnel_config_load() -> (Option<String>, Option<String>) {
-  let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(String::from)).filter(|u| validate_tunnel_url(u).is_ok());
+  let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(migrate_tunnel_url)).filter(|u| validate_tunnel_url(u).is_ok());
   let token = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().filter(|t| !t.is_empty());
   match (url, token) { (Some(u), Some(t)) => (Some(u), Some(t)), _ => (None, None) }
 }
@@ -467,18 +491,103 @@ fn sync_tray_and_emit(app: &tauri::AppHandle, on: bool) {
     let _ = mode_gb.set_checked(current_mode == proxy::pac::ProxyMode::Global);
   }
 }
+/// 从白名单派生出网拨测目标：取第一个形如 `example.com` 的条目原样使用。
+/// 白名单匹配是后缀匹配，条目本身（如 `google.com`）必命中 `Route::Tunnel`；
+/// 不再叠加 `www.` 前缀——若条目已含 `www.`，`www.www.` 会因 DNS 解析失败误判拨测失败（对抗审核发现）。
+fn derive_probe_host(wl: &[String]) -> Option<String> {
+    wl.iter()
+        .find(|e| e.split('.').count() >= 2)
+        .cloned()
+}
+
+/// 出网拨测：经本地引擎对探测目标发 CONNECT，验证出网通道（WS 隧道 / 远端上游）真实可达。
+///
+/// 同步实现——`proxy_enable_inner` 是同步 Tauri 命令，不用 `tauri::async_runtime::block_on`
+/// （存在运行时上下文风险）。读写超时由调用方给定。
+fn probe_egress_via_engine(
+    engine_addr: &str,
+    probe_host: &str,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(engine_addr)
+        .map_err(|e| format!("引擎未就绪（{engine_addr}）: {e}"))?;
+    s.set_read_timeout(Some(timeout))
+        .map_err(|e| format!("设置读超时失败: {e}"))?;
+    s.set_write_timeout(Some(timeout))
+        .map_err(|e| format!("设置写超时失败: {e}"))?;
+    let req = format!("CONNECT {probe_host}:443 HTTP/1.1\r\nHost: {probe_host}:443\r\n\r\n");
+    s.write_all(req.as_bytes())
+        .map_err(|e| format!("出网拨测写入失败: {e}"))?;
+
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 512];
+    loop {
+        match s.read(&mut tmp) {
+            Ok(0) => return Err("出网拨测：引擎在建连前关闭了连接（隧道/上游不可用）".into()),
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 8192 {
+                    break;
+                }
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                return Err(format!(
+                    "出网拨测超时：{timeout:?} 内未能建立到 {probe_host} 的出网连接"
+                ));
+            }
+            Err(e) => return Err(format!("出网拨测读失败: {e}")),
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    if head.starts_with("HTTP/1.1 2") || head.starts_with("HTTP/1.0 2") {
+        return Ok(());
+    }
+    // 把完整响应体带进错误（502 的 body 是引擎给的隧道失败原因，如
+    // "502 Bad Gateway: tunnel failed for openai.com: ... unauthorized"），
+    // 只取状态行会吞掉真实原因，用户无从排查。
+    let body = head.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(&head).trim();
+    Err(format!("出网拨测失败：{}", body))
+}
+
 fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     if ENGINE_ON.load(AOrd::SeqCst) { sync_tray_and_emit(&app, true); return Ok(()); }
     let mut wl = { if let Some(tx)=WHITELIST_TX.get(){tx.borrow().clone()} else { init_watch_from_file(); WHITELIST_TX.get().map(|tx| tx.borrow().clone()).unwrap_or_else(load_whitelist_from_file) } };
     for h in ALWAYS_TUNNEL { if !wl.iter().any(|w| w==h) { wl.push(h.to_string()); } }
-    let (tunnel_url, tunnel_token) = tunnel_config_load();
-    if !wl.is_empty() && (tunnel_url.is_none() || tunnel_token.is_none()) {
-        return Err("隧道未配置：白名单流量无法出网。请先在「设置 → 隧道中继」保存端点与令牌（二者缺一不可），再开启总开关".into());
+    // 按出网模式装配通道：chained → 远端上游代理；direct → WS gate 隧道
+    let cfg_json = app_config_get();
+    let mode_type = cfg_json.get("mode_type").and_then(|v| v.as_str()).unwrap_or("direct").to_string();
+    let upstream = if mode_type == "chained" {
+        let raw_host = cfg_json.get("remote_host").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if raw_host.is_empty() {
+            return Err("远端代理未配置：请先在首页「方案 B」填写服务器地址或粘贴连接口令".into());
+        }
+        // 容错：剥掉误带的 scheme；缺端口回落 8899
+        let bare = raw_host
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let host = if bare.contains(':') { bare.to_string() } else { format!("{bare}:8899") };
+        let username = cfg_json.get("username").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let password = cred_get_impl(CREDENTIAL_USER_PROXY).ok().flatten().unwrap_or_default();
+        Some(proxy::engine::Upstream { host, username, password })
+    } else {
+        None
+    };
+    if upstream.is_none() {
+        let (tunnel_url, tunnel_token) = tunnel_config_load();
+        if !wl.is_empty() && (tunnel_url.is_none() || tunnel_token.is_none()) {
+            return Err("隧道未配置：白名单流量无法出网。请先在「设置 → 方案 A」填写授权码，或在首页粘贴同步口令，再开启总开关".into());
+        }
+        let _ = ensure_tunnel_watch().send((tunnel_url, tunnel_token));
     }
     {
         let tx = ensure_watch();
         if tx.borrow().clone() != wl { let _ = tx.send(wl.clone()); }
-        let _ = ensure_tunnel_watch().send((tunnel_url, tunnel_token));
+        let _ = ensure_upstream_watch().send(upstream);
     }
     // Engine singleton: reuse existing task if alive (热更新 via watch, 不重复 bind)
     let already_running = ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner()).is_some();
@@ -486,6 +595,7 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
         let rx = ensure_watch().subscribe();
         let rx_mode = ensure_mode_watch().subscribe();
         let rx_tunnel = ensure_tunnel_watch().subscribe();
+        let rx_upstream = ensure_upstream_watch().subscribe();
         let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
         let rx_clone = rx.clone();
         let handle = tauri::async_runtime::spawn(async move {
@@ -494,12 +604,13 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
                 whitelist: rx_clone,
                 mode: rx_mode,
                 tunnel: rx_tunnel,
+                upstream: rx_upstream,
             };
             if let Err(e) = proxy::engine::run(cfg, stats).await { log::warn!("proxy engine exited: {e}"); }
         });
         *ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
     } else {
-        // Already running: whitelist 与 tunnel 已 via watch 更新，无需重 spawn
+        // Already running: whitelist 与 tunnel/upstream 已 via watch 更新，无需重 spawn
         log::info!("engine already running, reuse existing listener");
     }
     // Probe: must succeed before setting PAC, otherwise fail fast (Blocker #1)
@@ -517,6 +628,25 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
                 h.abort();
             }
             return Err("代理引擎启动失败：127.0.0.1:18900 未就绪，请检查端口占用后重试".into());
+        }
+    }
+    // 阶段二：真实出网拨测（放在启用系统代理之前，失败时无需回滚注册表）。
+    // 仅当存在需要走出网通道的流量时才拨测：全局模式 或 白名单非空；两者皆空 = 全直连，无可测。
+    let mode_now = if let Some(tx) = PROXY_MODE_TX.get() { *tx.borrow() } else { load_proxy_mode_from_file() };
+    if matches!(mode_now, proxy::pac::ProxyMode::Global) || !wl.is_empty() {
+        let probe_host = derive_probe_host(&wl).unwrap_or_else(|| "www.google.com".to_string());
+        if let Err(e) = probe_egress_via_engine(
+            "127.0.0.1:18900",
+            &probe_host,
+            std::time::Duration::from_secs(8),
+        ) {
+            // 状态位不得撒谎：撤销引擎任务并回到「已停止」
+            if let Some(h) = ENGINE_TASK.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                h.abort();
+            }
+            ENGINE_ON.store(false, AOrd::SeqCst);
+            sync_tray_and_emit(&app, false);
+            return Err(format!("出网拨测失败，系统代理未启用：{e}"));
         }
     }
     let snap = proxy::sysproxy::enable(proxy::sysproxy::Mode::Pac)?;
@@ -539,9 +669,19 @@ fn proxy_disable_inner(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 #[tauri::command]
-fn proxy_enable(app: tauri::AppHandle) -> Result<(), String> { proxy_enable_inner(app) }
+/// 异步化：proxy_enable_inner 内含出网拨测（最长 ~10s），同步命令跑在主线程会冻结 UI。
+/// spawn_blocking 让拨测在阻塞线程池执行，前端 invoke 调用方式不变。
+async fn proxy_enable(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || proxy_enable_inner(app))
+        .await
+        .map_err(|e| e.to_string())?
+}
 #[tauri::command]
-fn proxy_disable(app: tauri::AppHandle) -> Result<(), String> { proxy_disable_inner(app) }
+async fn proxy_disable(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || proxy_disable_inner(app))
+        .await
+        .map_err(|e| e.to_string())?
+}
 #[tauri::command]
 fn proxy_status() -> serde_json::Value {
     let mode = if let Some(tx) = PROXY_MODE_TX.get() { *tx.borrow() } else { load_proxy_mode_from_file() };
@@ -569,17 +709,26 @@ async fn dial_via_proxy(proxy_addr: &str, host: &str, port: u16) -> std::io::Res
 async fn proxy_test_sites() -> Result<Vec<serde_json::Value>, String> {
     if !ENGINE_ON.load(AOrd::SeqCst) { return Err("代理未启用：请先打开系统代理总开关".into()); }
     const PROXY_ADDR: &str = "127.0.0.1:18900";
-    let sites = ["google.com", "x.com", "openai.com", "anthropic.com", "github.com"];
-    let mut out = Vec::new();
+    let sites = ["chatgpt.com", "claude.ai", "gemini.google.com", "github.com", "google.com"];
+
+    let mut tasks = Vec::new();
     for site in sites {
-        let started = std::time::Instant::now();
-        let r = tokio::time::timeout(std::time::Duration::from_secs(10), dial_via_proxy(PROXY_ADDR, site, 443)).await;
-        let ok = matches!(r, Ok(Ok(())));
-        let ms = started.elapsed().as_millis() as u64;
-        let error = match &r { Err(_)=>"timeout".to_string(), Ok(Err(e))=>e.to_string(), Ok(Ok(()))=>String::new() };
-        out.push(serde_json::json!({"site": site, "ok": ok, "ms": ms, "error": error}));
+        tasks.push(async move {
+            let started = std::time::Instant::now();
+            let r = tokio::time::timeout(std::time::Duration::from_secs(4), dial_via_proxy(PROXY_ADDR, site, 443)).await;
+            let ok = matches!(r, Ok(Ok(())));
+            let ms = started.elapsed().as_millis() as u64;
+            let error = match &r {
+                Err(_) => "timeout".to_string(),
+                Ok(Err(e)) => e.to_string(),
+                Ok(Ok(())) => String::new(),
+            };
+            serde_json::json!({"site": site, "ok": ok, "ms": ms, "error": error})
+        });
     }
-    Ok(out)
+
+    let results = futures_util::future::join_all(tasks).await;
+    Ok(results)
 }
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 #[tauri::command]
@@ -604,7 +753,7 @@ async fn api_bypass_fetch(method: String, url: String, headers: Option<std::coll
     Ok(serde_json::json!({"status": status, "body": json, "text": text}))
 }
 #[tauri::command]
-fn proxy_auto_config_get() -> serde_json::Value { std::fs::read_to_string(app_config_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(serde_json::json!({})) }
+fn proxy_auto_config_get() -> serde_json::Value { std::fs::read_to_string(app_config_path()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or(serde_json::json!({})) }
 #[tauri::command]
 fn proxy_auto_config_set(patch: serde_json::Value) -> Result<(), String> { app_config_set(patch) }
 #[tauri::command]
@@ -624,6 +773,212 @@ fn app_config_set(patch: serde_json::Value) -> Result<(), String> {
 }
 #[tauri::command]
 fn proxy_bypass_hosts() -> Vec<String> { proxy::pac::collect_bypass_hosts().into_iter().collect() }
+
+/// 在默认浏览器中打开外部链接
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    // 严格校验：仅接受 http/https 且不含任何 cmd 元字符（& | < > ^ 空格 引号 百分号），
+    // 否则经 `cmd /C start` 执行时会被二次解析成命令分隔，构成命令注入（对抗审核发现）。
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("非法 URL 协议".into());
+    }
+    if url.chars().any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '"' | ' ' | '%')) {
+        return Err("URL 包含不允许的字符".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW = 0x08000000
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open").arg(&url).spawn().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        std::process::Command::new("xdg-open").arg(&url).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 终极网络急救箱：一键无条件恢复直连
+#[tauri::command]
+fn proxy_rescue(app: tauri::AppHandle) -> Result<String, String> {
+    proxy::sysproxy::rescue_network()?;
+    ENGINE_ON.store(false, AOrd::SeqCst);
+    *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    sync_tray_and_emit(&app, false);
+    Ok("网络已成功急救修复：已完全清除所有系统代理与 PAC 关联，网络已恢复直连。".to_string())
+}
+
+/// 获取当前代理配置与状态
+#[tauri::command]
+fn proxy_get_current_config() -> serde_json::Value {
+    let cfg = app_config_get();
+    let mode_type = cfg.get("mode_type").and_then(|v| v.as_str()).unwrap_or("direct");
+    let configured = cfg.get("configured").and_then(|v| v.as_bool()).unwrap_or(false);
+    let worker_url = cfg.get("worker_url").and_then(|v| v.as_str()).unwrap_or("");
+    let remote_host = cfg.get("remote_host").and_then(|v| v.as_str()).unwrap_or("");
+    let username = cfg.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let has_secret = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().is_some() || cred_get_impl(CREDENTIAL_USER).ok().flatten().is_some();
+
+    serde_json::json!({
+        "mode_type": mode_type,
+        "configured": configured,
+        "worker_url": worker_url,
+        "remote_host": remote_host,
+        "username": username,
+        "has_secret": has_secret
+    })
+}
+
+fn configure_direct_tunnel(_worker_url: &str, secret: &str) -> Result<(), String> {
+    // gate 隧道端点是产品基础设施（gate.ponyjob.top/ws，见 deploy/cf-gate-worker/wrangler.toml）。
+    // worker_url 是 HTTP 数据面出口地址（edge.ponyjob.top），与 WS 隧道桥不是同一域名——
+    // 曾用 worker_url 推导隧道端点导致 wss://edge.ponyjob.top[/ws] 拨测超时（CF 层 403），已废弃推导。
+    let ws_url = GATE_WS_URL.to_string();
+
+    let dir = data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let tmp = dir.join("tunnel.json.tmp");
+    let target = dir.join(TUNNEL_FILE);
+    let _ = std::fs::write(&tmp, serde_json::to_string(&serde_json::json!({ "url": ws_url })).unwrap_or_default());
+    let _ = std::fs::rename(&tmp, target);
+
+    let _ = cred_set_impl(CREDENTIAL_USER_TUNNEL, secret.to_string());
+    // 注意：secret 是 gate 隧道令牌，与后端 admin_token 无关——严禁写入 CREDENTIAL_USER
+    // （管理面 Bearer 会随之失效，401 连锁跳设置页）。
+    let _ = ensure_tunnel_watch().send((Some(ws_url), Some(secret.to_string())));
+    Ok(())
+}
+
+/// 切换模式 A（个人独立直连）与模式 B（连接远端代理）
+#[tauri::command]
+fn proxy_mode_switch(mode_type: String, config: serde_json::Value) -> Result<(), String> {
+    let mut patch = serde_json::json!({
+        "mode_type": mode_type,
+        "configured": true
+    });
+    if mode_type == "chained" {
+        if let Some(host) = config.get("remote_host").and_then(|v| v.as_str()) {
+            patch["remote_host"] = serde_json::json!(host);
+        }
+        if let Some(user) = config.get("username").and_then(|v| v.as_str()) {
+            patch["username"] = serde_json::json!(user);
+        }
+        if let Some(pass) = config.get("password").and_then(|v| v.as_str()) {
+            let _ = cred_set_impl(CREDENTIAL_USER_PROXY, pass.to_string());
+        }
+    } else if mode_type == "direct" {
+        let worker = config.get("worker_url").and_then(|v| v.as_str()).unwrap_or("https://edge.ponyjob.top");
+        patch["worker_url"] = serde_json::json!(worker);
+        if let Some(sec) = config.get("proxy_secret").and_then(|v| v.as_str()) {
+            let _ = configure_direct_tunnel(worker, sec);
+        }
+    }
+    app_config_set(patch)
+}
+
+static USED_SYNC_NONCES: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// 跨端口令一键导入（支持 pproxy-sync:// 与 pproxy:// 协议）
+#[tauri::command]
+fn proxy_import_sync(sync_uri: String, passphrase: Option<String>) -> Result<serde_json::Value, String> {
+    let raw = sync_uri.trim();
+    if raw.starts_with("pproxy-sync://") {
+        use base64::Engine as _;
+        let encoded = raw.strip_prefix("pproxy-sync://").unwrap_or(raw);
+        let pass = passphrase.as_deref().unwrap_or("pony-proxy-universal-sync-salt-v1");
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(encoded)
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(encoded))
+            .map_err(|_| "无效的同步口令格式（Base64 解码失败）".to_string())?;
+        if bytes.len() < 28 {
+            return Err("同步口令损坏或过短".into());
+        }
+        let salt = &bytes[..16];
+        let nonce = &bytes[16..28];
+        let cipher_data = &bytes[28..];
+
+        use sha2::{Digest, Sha256};
+        let mut current = Sha256::digest(format!("{}:{}", hex::encode(salt), pass).as_bytes());
+        for _ in 1..10_000 {
+            let mut h = Sha256::new();
+            h.update(current);
+            h.update(salt);
+            h.update(pass.as_bytes());
+            current = h.finalize();
+        }
+        use chacha20poly1305::aead::{Aead, KeyInit};
+        let cipher = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&current).map_err(|e| e.to_string())?;
+        let decrypted = cipher.decrypt(chacha20poly1305::Nonce::from_slice(nonce), cipher_data)
+            .map_err(|_| "解密失败：同步口令错误、密码不匹配或已被篡改".to_string())?;
+        let payload: serde_json::Value = serde_json::from_slice(&decrypted).map_err(|e| e.to_string())?;
+
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        if let Some(exp) = payload.get("exp").and_then(|v| v.as_u64()) {
+            if now > exp {
+                return Err("该同步口令已过期（超过 10 分钟），请在原设备重新导出！".into());
+            }
+        }
+
+        // Nonce 防重放检查
+        if let Some(nonce_str) = payload.get("nonce").and_then(|v| v.as_str()) {
+            let mut lock = USED_SYNC_NONCES.lock().unwrap();
+            let set = lock.get_or_insert_with(std::collections::HashSet::new);
+            if set.contains(nonce_str) {
+                return Err("安全拦截：该同步口令已被使用过（防重放），请重新导出生成！".into());
+            }
+            set.insert(nonce_str.to_string());
+        }
+
+        let data = payload.get("data").cloned().unwrap_or_default();
+        let server_url = data.get("server_url").and_then(|v| v.as_str()).unwrap_or("http://127.0.0.1:8899");
+        let worker_url = data.get("worker_url").and_then(|v| v.as_str()).unwrap_or("https://edge.ponyjob.top");
+        let proxy_secret = data.get("proxy_secret").and_then(|v| v.as_str());
+
+        let patch = serde_json::json!({
+            "mode_type": "direct",
+            "server_url": server_url,
+            "worker_url": worker_url,
+            "configured": true
+        });
+        let _ = app_config_set(patch);
+        if let Some(sec) = proxy_secret {
+            let _ = configure_direct_tunnel(worker_url, sec);
+        }
+        Ok(serde_json::json!({
+            "success": true,
+            "mode": "direct",
+            "message": "跨端同步成功！已自动切换为独立加速模式。"
+        }))
+    } else if raw.starts_with("pproxy://") || raw.starts_with("http://") {
+        let cleaned = raw.strip_prefix("pproxy://").or_else(|| raw.strip_prefix("http://")).unwrap();
+        let (auth, host_port) = cleaned.split_once('@').ok_or_else(|| "连接口令格式错误，缺少 @".to_string())?;
+        let (username, password) = auth.split_once(':').ok_or_else(|| "连接口令格式错误，缺少密码".to_string())?;
+        let patch = serde_json::json!({
+            "mode_type": "chained",
+            "remote_host": host_port,
+            "username": username,
+            "configured": true
+        });
+        let _ = app_config_set(patch);
+        let _ = cred_set_impl(CREDENTIAL_USER_PROXY, password.to_string());
+        Ok(serde_json::json!({
+            "success": true,
+            "mode": "chained",
+            "remote_host": host_port,
+            "username": username,
+            "message": format!("已成功连接远端代理服务器 ({host_port})！")
+        }))
+    } else {
+        Err("无法识别的口令格式，请粘贴以 pproxy-sync:// 或 pproxy:// 开头的有效口令".into())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -653,11 +1008,83 @@ mod tests {
         tokio::spawn(async move { let (s,_)=l.accept().await.unwrap(); drop(s); });
         assert!(dial_via_proxy(&addr.to_string(), "x.com", 443).await.is_err());
     }
+    /// 同步假引擎：accept 后按 script 应答；script 为 None 时永不回包（模拟半死连接）。
+    fn fake_engine_sync(script: Option<&'static str>) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            while let Ok((mut s, _)) = l.accept() {
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 1024];
+                    use std::io::{Read, Write};
+                    let _ = s.read(&mut buf);
+                    match script {
+                        Some(resp) => { let _ = s.write_all(resp.as_bytes()); }
+                        None => std::thread::sleep(std::time::Duration::from_secs(30)),
+                    }
+                });
+            }
+        });
+        addr.to_string()
+    }
+
+    #[test]
+    fn probe_egress_ok_on_2xx() {
+        let addr = fake_engine_sync(Some("HTTP/1.1 200 Connection Established\r\n\r\n"));
+        probe_egress_via_engine(&addr, "www.github.com", std::time::Duration::from_secs(3))
+            .expect("2xx 应视为出网可达");
+    }
+
+    #[test]
+    fn probe_egress_err_on_non_2xx() {
+        // 错误信息已改为携带完整响应体（只取状态行会吞掉隧道失败的真实原因），
+        // 故 fake engine 的 502 必须带 body，断言也对齐 body 关键字
+        let addr = fake_engine_sync(Some(
+            "HTTP/1.1 502 Bad Gateway\r\n\r\n502 Bad Gateway: tunnel failed for www.github.com: denied",
+        ));
+        let e = probe_egress_via_engine(&addr, "www.github.com", std::time::Duration::from_secs(3))
+            .expect_err("非 2xx 必须判为出网失败");
+        assert!(e.contains("tunnel failed"), "错误应携带引擎失败原因: {e}");
+    }
+
+    #[test]
+    fn probe_egress_times_out_on_silent_engine() {
+        // P1-4：引擎 accept 后不回包，拨测必须超时返回，不得挂住开启流程
+        let addr = fake_engine_sync(None);
+        let started = std::time::Instant::now();
+        let e = probe_egress_via_engine(&addr, "www.github.com", std::time::Duration::from_millis(300))
+            .expect_err("半死连接必须超时");
+        assert!(e.contains("超时"), "错误应说明超时: {e}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "不得挂起: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn probe_host_derived_from_whitelist() {
+        // 探测目标必须随白名单走，否则白名单改造后会退化成直连误判
+        assert_eq!(
+            derive_probe_host(&["github.com".into(), "youtube.com".into()]).as_deref(),
+            Some("github.com")
+        );
+        assert_eq!(derive_probe_host(&[]), None);
+        assert_eq!(derive_probe_host(&["localhost".into()]), None, "单段域名不能作为探测目标");
+    }
+
     #[test]
     fn test_app_config_set_and_get() {
         let res = app_config_set(serde_json::json!({"auto_proxy": true, "dont_ask": true}));
         assert!(res.is_ok());
         let got = app_config_get();
         assert_eq!(got["auto_proxy"], true);
+    }
+
+    #[test]
+    fn migrate_tunnel_url_maps_old_gate_to_correct_endpoint() {
+        // 旧配置把 HTTP 网关域名当 gate 用（edge.ponyjob.top，可能缺 /ws）→ 必须迁移到 gate.ponyjob.top/ws
+        assert_eq!(migrate_tunnel_url("wss://edge.ponyjob.top"), "wss://gate.ponyjob.top/ws");
+        assert_eq!(migrate_tunnel_url("wss://edge.ponyjob.top/ws"), "wss://gate.ponyjob.top/ws");
+        assert_eq!(migrate_tunnel_url("ws://edge.ponyjob.top"), "wss://gate.ponyjob.top/ws");
+        // 正确端点与自定义端点保持原样
+        assert_eq!(migrate_tunnel_url("wss://gate.ponyjob.top/ws"), "wss://gate.ponyjob.top/ws");
+        assert_eq!(migrate_tunnel_url("wss://self-host.example.com/tunnel"), "wss://self-host.example.com/tunnel");
     }
 }
