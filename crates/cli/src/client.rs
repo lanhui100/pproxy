@@ -201,6 +201,11 @@ impl AdminClient {
         &self.base
     }
 
+    /// 管理面 admin token（doctor 诊断用：识别 probe token 误用 admin token）。
+    pub fn admin_token(&self) -> &str {
+        &self.token
+    }
+
     async fn send(
         &self,
         method: reqwest::Method,

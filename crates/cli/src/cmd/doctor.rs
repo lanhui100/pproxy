@@ -106,15 +106,14 @@ pub(crate) fn run(
         let data_plane = data_plane_override.or_else(|| derive_from_base(http.base_url()));
         match (probe_token, &data_plane, enabled_names.first()) {
             (Some(tok), Some(dp), Some(first_route)) => {
-                let url = format!("{}/{}/{}/", dp.trim_end_matches('/'), tok, first_route);
-                let client = http.with_timeout(30);
-                match client.probe_get(&url).await {
+                match probe_data_plane(http, dp, tok, first_route).await {
                     Ok(status) => {
                         if probe_pass(status) {
                             println!("[pass] data plane probe: HTTP {status} via {first_route}");
                             passed += 1;
                         } else {
-                            println!("[fail] data plane probe: HTTP {status} (token rejected?) via {first_route}");
+                            let hint = data_plane_hint(status, tok, http.admin_token());
+                            println!("[fail] data plane probe: HTTP {status}{hint} via {first_route}");
                             failed += 1;
                         }
                     }
@@ -274,17 +273,87 @@ fn print_summary(passed: u32, failed: u32, skipped: u32) {
 /// 管理面 base URL → 数据面 base 推导兜底（config.data_plane 缺失时）。
 /// 同 config::derive_data_plane 的规则，但此处不产生错误（doctor 尽力而为）。
 fn derive_from_base(server: &str) -> Option<String> {
-    let rest = server.strip_prefix("http://").or_else(|| server.strip_prefix("https://"))?;
+    let host = host_of(server)?;
+    let scheme = if server.starts_with("https://") { "https" } else { "http" };
+    Some(format!("{scheme}://{host}:8899"))
+}
+
+/// 提取 base URL 的 host（`http(s)://host[:port]/path` → host）。纯函数可测。
+fn host_of(base: &str) -> Option<&str> {
+    let rest = base.strip_prefix("http://").or_else(|| base.strip_prefix("https://"))?;
     let host_port = rest.split('/').next()?;
     let host = match host_port.rsplit_once(':') {
         Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
         _ => host_port,
     };
     if host.is_empty() {
-        return None;
+        None
+    } else {
+        Some(host)
     }
-    let scheme = if server.starts_with("https://") { "https" } else { "http" };
-    Some(format!("{scheme}://{host}:8899"))
+}
+
+/// host 是否回环地址（含 localhost / IPv6 字面量）。纯函数可测。
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+/// 数据面 base 的 host 非回环时，返回本机回退 base。
+/// 与 CONNECT 隧道探针同一策略（af2ee89）：管理面常因 tailnet 绑非回环
+/// 地址而推导出不可达的数据面地址，本机数据面通常只绑 127.0.0.1:8899。
+/// 纯函数可测。
+fn loopback_fallback(base: &str) -> Option<String> {
+    match host_of(base) {
+        Some(host) if !is_loopback_host(host) => Some("http://127.0.0.1:8899".to_string()),
+        _ => None,
+    }
+}
+
+/// 数据面抽样 URL：`{base}/{token}/{route}/`（base 尾斜杠容忍）。
+fn probe_url(base: &str, token: &str, route: &str) -> String {
+    format!("{}/{}/{}/", base.trim_end_matches('/'), token, route)
+}
+
+/// 数据面 HTTP 抽样：先试 data_plane，连接类失败且 host 非回环时回退本机
+/// 127.0.0.1:8899 重试（同一数据面、同一 URL 路径）。回退仅发生在连接失败
+/// （服务端可达时返回的状态码不回退）。
+async fn probe_data_plane(
+    http: &AdminClient,
+    data_plane: &str,
+    token: &str,
+    route: &str,
+) -> Result<u16, String> {
+    let client = http.with_timeout(30);
+    let url = probe_url(data_plane, token, route);
+    match client.probe_get(&url).await {
+        Ok(status) => Ok(status),
+        Err(ApiError::Connection(_)) => match loopback_fallback(data_plane) {
+            Some(fb) => {
+                let fb_url = probe_url(&fb, token, route);
+                match client.probe_get(&fb_url).await {
+                    Ok(status) => Ok(status),
+                    Err(fb_e) => Err(format!(
+                        "无法连接数据面 {data_plane}，回退 {fb} 也失败: {fb_e}"
+                    )),
+                }
+            }
+            None => Err(format!("无法连接数据面 {data_plane}（本机数据面未监听?）")),
+        },
+        Err(e) => Err(format!("数据面请求失败: {e}")),
+    }
+}
+
+/// 数据面 401/403 拒绝时的诊断提示（纯函数可测）。常见误用：拿管理面 admin
+/// token 当 probe token，但数据面按 S-P2-1 设计拒绝 admin token（crates/core
+/// token.rs `verify`），无痕迹提示会误导成"服务挂了"。
+fn data_plane_hint(status: u16, probe_token: &str, admin_token: &str) -> &'static str {
+    match status {
+        401 if probe_token == admin_token => {
+            " (probe token == admin token；数据面按设计拒绝 admin token，请用 `pproxy token create` 新建数据 token 再传 --probe-token)"
+        }
+        401 => " (token 被数据面拒绝：已吊销/过期，或误用 admin token)",
+        _ => " (token rejected?)",
+    }
 }
 
 #[cfg(test)]
@@ -400,5 +469,89 @@ mod tests {
     fn probe_pass_known_fail_codes() {
         assert!(!probe_pass(401));
         assert!(!probe_pass(403));
+    }
+
+    // ---- host_of / is_loopback_host / loopback_fallback / probe_url / data_plane_hint ----
+
+    #[test]
+    fn host_of_extracts_host() {
+        assert_eq!(host_of("http://<TAILNET_IP>:8900"), Some("<TAILNET_IP>"));
+        assert_eq!(host_of("http://127.0.0.1:8900"), Some("127.0.0.1"));
+        assert_eq!(host_of("https://localhost:8900"), Some("localhost"));
+        assert_eq!(host_of("http://localhost"), Some("localhost"));
+        assert_eq!(host_of("http://[::1]:8900"), Some("[::1]"));
+        assert_eq!(host_of("not a url"), None);
+        assert_eq!(host_of(""), None);
+    }
+
+    #[test]
+    fn is_loopback_host_variants() {
+        for h in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+            assert!(is_loopback_host(h), "{h} 应判为回环");
+        }
+        for h in ["<TAILNET_IP>", "example.com", "gate.ponyjob.top"] {
+            assert!(!is_loopback_host(h), "{h} 不应判为回环");
+        }
+    }
+
+    #[test]
+    fn loopback_fallback_non_loopback_returns_loopback() {
+        assert_eq!(
+            loopback_fallback("http://<TAILNET_IP>:8899"),
+            Some("http://127.0.0.1:8899".to_string())
+        );
+        assert_eq!(
+            loopback_fallback("https://example.com:8899"),
+            Some("http://127.0.0.1:8899".to_string())
+        );
+    }
+
+    #[test]
+    fn loopback_fallback_loopback_is_none() {
+        assert_eq!(loopback_fallback("http://127.0.0.1:8899"), None);
+        assert_eq!(loopback_fallback("http://localhost:8899"), None);
+    }
+
+    #[test]
+    fn probe_url_joins_and_trims_trailing_slash() {
+        assert_eq!(
+            probe_url("http://127.0.0.1:8899", "pony_abc", "anthropic"),
+            "http://127.0.0.1:8899/pony_abc/anthropic/"
+        );
+        assert_eq!(
+            probe_url("http://127.0.0.1:8899/", "pony_abc", "openai"),
+            "http://127.0.0.1:8899/pony_abc/openai/"
+        );
+    }
+
+    #[test]
+    fn derive_from_base_keeps_behavior() {
+        assert_eq!(
+            derive_from_base("http://<TAILNET_IP>:8900"),
+            Some("http://<TAILNET_IP>:8899".to_string())
+        );
+        assert_eq!(
+            derive_from_base("http://127.0.0.1:8900"),
+            Some("http://127.0.0.1:8899".to_string())
+        );
+        assert_eq!(derive_from_base("not a url"), None);
+    }
+
+    #[test]
+    fn data_plane_hint_admin_token_401_is_explicit() {
+        let h = data_plane_hint(401, "pony_admin_x", "pony_admin_x");
+        assert!(h.contains("admin token"), "应明确提示 admin token: {h}");
+    }
+
+    #[test]
+    fn data_plane_hint_non_admin_401_is_generic() {
+        let h = data_plane_hint(401, "pony_data_x", "pony_admin_x");
+        assert!(!h.contains("== admin"), "不应误判为 admin token: {h}");
+        assert!(h.contains("吊销/过期"), "应提示通用原因: {h}");
+    }
+
+    #[test]
+    fn data_plane_hint_403_stays_generic() {
+        assert_eq!(data_plane_hint(403, "pony_admin_x", "pony_admin_x"), " (token rejected?)");
     }
 }

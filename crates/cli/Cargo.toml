@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 pproxy-core = { path = "../core" }
+pproxy-engine = { path = "../engine" }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 serde.workspace = true
@@ -20,6 +21,9 @@ libc = "0.2"
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
+base64.workspace = true
+chacha20poly1305.workspace = true
+fs2.workspace = true
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 

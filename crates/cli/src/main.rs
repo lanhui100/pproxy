@@ -20,7 +20,7 @@ pub const EXIT_LOCAL_CONFIG: i32 = 2;
 pub const EXIT_UNREACHABLE: i32 = 3;
 
 #[derive(Parser)]
-#[command(name = "pproxy", version, about = "Pony Proxy 管理 CLI")]
+#[command(name = "pproxy", version, about = "Pony Proxy 智能多模代理 CLI")]
 struct Cli {
     /// 覆盖 admin token（优先级最高：> PONY_ADMIN_TOKEN > config.toml）
     #[arg(long, global = true)]
@@ -38,6 +38,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 独立启动嵌入式网关服务（前台运行）
+    Serve {
+        /// 监听地址（默认 127.0.0.1:8899；局域网共享可用 0.0.0.0:8899）
+        #[arg(long)]
+        listen: Option<String>,
+    },
+    /// 用户管理（Basic Auth 用户名/密码）
+    User {
+        #[command(subcommand)]
+        cmd: UserCmd,
+    },
+    /// 跨端安全配置同步（ChaCha20-Poly1305 加密）
+    Sync {
+        #[command(subcommand)]
+        cmd: SyncCmd,
+    },
     /// 写入 ~/.pony/config.toml（或 --interactive 交互式引导）
     Init {
         #[arg(long)]
@@ -58,9 +74,16 @@ enum Command {
     /// 服务状态（管理面 health + 本机 systemd + 环境代理）
     Status,
     /// 开启本机环境代理（设置 http_proxy / https_proxy 环境变量）
-    On,
+    On {
+        /// 直接输出 shell export 语句（用于 eval "$(pproxy on --eval)"）
+        #[arg(long)]
+        eval: bool,
+    },
     /// 关闭本机环境代理（清除 http_proxy / https_proxy 环境变量）
     Off {
+        /// 直接输出 shell unset 语句（用于 eval "$(pproxy off --eval)"）
+        #[arg(long)]
+        eval: bool,
         /// 就地清除当前 shell 代理环境变量（无需 source）
         #[arg(long)]
         hard: bool,
@@ -102,6 +125,49 @@ enum Command {
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum UserCmd {
+    /// 添加 Basic Auth 用户
+    Add {
+        username: String,
+        /// 自定义密码（若不提供将自动生成高强度密码）
+        #[arg(long)]
+        password: Option<String>,
+        /// 有效天数（默认永久）
+        #[arg(long)]
+        expires_days: Option<u32>,
+    },
+    /// 列出所有用户
+    List,
+    /// 删除指定用户
+    Rm { username: String },
+    /// 禁用指定用户
+    Disable { username: String },
+    /// 启用指定用户
+    Enable { username: String },
+    /// 修改指定用户密码
+    Passwd {
+        username: String,
+        #[arg(long)]
+        password: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCmd {
+    /// 导出跨端加密配置口令（有效期 10 分钟）
+    Export {
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// 导入跨端加密配置口令
+    Import {
+        payload: String,
+        #[arg(long)]
+        passphrase: Option<String>,
     },
 }
 
@@ -162,12 +228,14 @@ enum TokenCmd {
 
 #[derive(Subcommand)]
 enum ConfigCmd {
+    /// 导出第三方客户端配置片段（支持 subconverter / clash / surge / cursor 等格式）
     Export {
+        /// 目标客户端类型: cursor | openai | claude | clash | surge | subconverter | env
         service: String,
-        /// 路由名（缺省=service 名）
+        /// 关联路由名称（缺省自动导出全部可用路由）
         #[arg(long)]
         route: Option<String>,
-        /// 显式嵌入明文 token（用户从创建时保存处取）
+        /// 数据面明文 token（缺省自动使用第一个有效 token）
         #[arg(long)]
         token: Option<String>,
     },
@@ -176,11 +244,12 @@ enum ConfigCmd {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
-        Ok(code) => ExitCode::from(code as u8),
+        Ok(code) => match code {
+            EXIT_OK => ExitCode::SUCCESS,
+            _ => ExitCode::from(code as u8),
+        },
         Err(e) => {
-            let mut err = std::io::stderr();
-            let _ = writeln!(err, "error: {e}");
-            // 本地配置缺失/非法 → 退出码 2（M2 §5）；其余 → 1
+            let _ = writeln!(std::io::stderr(), "error: {e}");
             let code = if e.is_local_config() {
                 EXIT_LOCAL_CONFIG
             } else {
@@ -191,7 +260,6 @@ fn main() -> ExitCode {
     }
 }
 
-/// run 层错误：携带退出码类别（本地配置 → 2，其余 → 1）。
 enum RunError {
     LocalConfig(config::ConfigError),
     Msg(String),
@@ -225,7 +293,40 @@ impl From<String> for RunError {
 }
 
 fn run(cli: Cli) -> Result<i32, RunError> {
-    // init 优先：交互式或非交互式
+    // 1. serve 独立起服
+    if let Command::Serve { listen } = &cli.command {
+        return cmd::serve::run(listen.as_deref()).map_err(RunError::Msg);
+    }
+
+    // 2. user 用户管理
+    if let Command::User { cmd } = &cli.command {
+        return match cmd {
+            UserCmd::Add { username, password, expires_days } => {
+                cmd::user::add(username, password.as_deref(), *expires_days).map_err(RunError::Msg)
+            }
+            UserCmd::List => cmd::user::list().map_err(RunError::Msg),
+            UserCmd::Rm { username } => cmd::user::rm(username).map_err(RunError::Msg),
+            UserCmd::Disable { username } => cmd::user::disable(username).map_err(RunError::Msg),
+            UserCmd::Enable { username } => cmd::user::enable(username).map_err(RunError::Msg),
+            UserCmd::Passwd { username, password } => {
+                cmd::user::passwd(username, password).map_err(RunError::Msg)
+            }
+        };
+    }
+
+    // 3. sync 跨端同步
+    if let Command::Sync { cmd } = &cli.command {
+        return match cmd {
+            SyncCmd::Export { passphrase } => {
+                cmd::sync::export(passphrase.as_deref()).map_err(RunError::Msg)
+            }
+            SyncCmd::Import { payload, passphrase } => {
+                cmd::sync::import(payload, passphrase.as_deref()).map_err(RunError::Msg)
+            }
+        };
+    }
+
+    // 4. init 优先：交互式或非交互式
     if let Command::Init { server, token, force, interactive } = &cli.command {
         if *interactive || server.is_none() {
             return cmd::init_interactive::run_interactive(*force).map_err(RunError::Msg);
@@ -234,7 +335,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         return init(&server, token.as_deref(), *force);
     }
 
-    // deploy 也需要配置（但 deploy 本身会读取配置中的 token 等字段）
+    // 5. deploy 也需要配置
     if let Command::Deploy { target } = &cli.command {
         let cfg = config::load()?;
         let t = cmd::deploy::Target::from_str(target)
@@ -242,7 +343,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         return cmd::deploy::run(t, &cfg).map_err(RunError::Msg);
     }
 
-    // start/stop/restart 纯本机 systemd，不读管理 API 配置
+    // 6. start/stop/restart 纯本机 systemd
     let action = match &cli.command {
         Command::Start => Some("start"),
         Command::Stop => Some("stop"),
@@ -253,16 +354,13 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         return cmd::service::systemd_action(action).map_err(RunError::Msg);
     }
 
-    // on/off/env 环境代理开关，不需要管理 API 配置
+    // 7. on/off/env 环境代理开关
     match &cli.command {
-        Command::On => {
-            return cmd::proxy_env::toggle(true).map_err(RunError::Msg);
+        Command::On { eval } => {
+            return cmd::proxy_env::on(*eval).map_err(RunError::Msg);
         }
-        Command::Off { hard: true } => {
-            return cmd::proxy_env::toggle_hard(false).map_err(RunError::Msg);
-        }
-        Command::Off { hard: false } => {
-            return cmd::proxy_env::toggle(false).map_err(RunError::Msg);
+        Command::Off { eval, hard } => {
+            return cmd::proxy_env::off(*eval, *hard).map_err(RunError::Msg);
         }
         Command::Env { cmd } => {
             return match cmd {
@@ -277,7 +375,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         _ => {}
     }
 
-    // 组装配置与 client
+    // 8. 组装配置与 client
     let cfg = config::load()?;
     let server = cli.server.clone().unwrap_or_else(|| cfg.server.clone());
     let admin_token = cli
@@ -333,7 +431,17 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Config {
             cmd: ConfigCmd::Export { service, route, token },
         } => cmd::export_cmd::run(&cfg, service, route.as_deref(), token.as_deref()),
-        Command::Init { .. } | Command::Deploy { .. } | Command::Start | Command::Stop | Command::Restart | Command::On | Command::Off { .. } | Command::Env { .. } => {
+        Command::Serve { .. }
+        | Command::User { .. }
+        | Command::Sync { .. }
+        | Command::Init { .. }
+        | Command::Deploy { .. }
+        | Command::Start
+        | Command::Stop
+        | Command::Restart
+        | Command::On { .. }
+        | Command::Off { .. }
+        | Command::Env { .. } => {
             unreachable!("handled above")
         }
     };

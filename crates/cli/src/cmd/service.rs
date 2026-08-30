@@ -53,10 +53,17 @@ pub fn status(http: &AdminClient) -> Result<i32, String> {
     #[cfg(target_os = "linux")]
     {
         if which_systemctl().is_some() {
-            match Command::new("systemctl").args(["is-active", "pproxy"]).output() {
+            let is_root = unsafe { libc::geteuid() == 0 };
+            let cmd_args = if is_root {
+                vec!["is-active", "pproxy"]
+            } else {
+                vec!["--user", "is-active", "pproxy"]
+            };
+            match Command::new("systemctl").args(&cmd_args).output() {
                 Ok(out) => {
                     let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    println!("systemd (pproxy): {state}");
+                    let mode = if is_root { "system" } else { "user" };
+                    println!("systemd (pproxy [{mode}]): {state}");
                 }
                 Err(_) => {}
             }
@@ -79,7 +86,7 @@ fn which_systemctl() -> Option<std::path::PathBuf> {
     })
 }
 
-/// start/stop/restart：sudo systemctl 封装，透传 exit code（M2 §4.2）。
+/// start/stop/restart：自动适配 root (system) vs 非 root (user) systemd 服务。
 pub fn systemd_action(action: &str) -> Result<i32, String> {
     #[cfg(not(target_os = "linux"))]
     {
@@ -93,11 +100,20 @@ pub fn systemd_action(action: &str) -> Result<i32, String> {
             eprintln!("error: systemctl not found — service 开关仅支持本机 systemd");
             return Ok(EXIT_FAILURE);
         }
-        // 直接 Command（不经 shell，无注入面）；sudo 提权交互由终端处理
-        let status = Command::new("sudo")
-            .args(["systemctl", action, "pproxy"])
-            .status()
-            .map_err(|e| format!("failed to spawn sudo systemctl: {e}"))?;
+
+        let is_root = unsafe { libc::geteuid() == 0 };
+        let status = if is_root {
+            Command::new("systemctl")
+                .args([action, "pproxy"])
+                .status()
+                .map_err(|e| format!("failed to spawn systemctl: {e}"))?
+        } else {
+            Command::new("systemctl")
+                .args(["--user", action, "pproxy"])
+                .status()
+                .map_err(|e| format!("failed to spawn systemctl --user: {e}"))?
+        };
+
         Ok(status.code().unwrap_or(EXIT_FAILURE))
     }
 }

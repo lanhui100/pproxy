@@ -37,7 +37,7 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 /// config.toml 结构（M2 §3）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PonyConfig {
     pub server: String,
     pub admin_token: String,
@@ -62,11 +62,13 @@ pub struct PonyConfig {
     pub proxy_secret: Option<String>,
 }
 
-/// `$HOME/.pony/config.toml` 路径；HOME 缺失 → 错误（退出码 2）。
+/// `$HOME/.pony/config.toml` 路径；HOME / USERPROFILE 缺失 → 错误（退出码 2）。
 pub fn config_path() -> Result<PathBuf, ConfigError> {
-    let home = std::env::var("HOME").map_err(|_| ConfigError::Read(
-        std::io::Error::new(std::io::ErrorKind::NotFound, "HOME not set"),
-    ))?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| ConfigError::Read(
+            std::io::Error::new(std::io::ErrorKind::NotFound, "HOME or USERPROFILE not set"),
+        ))?;
     Ok(Path::new(&home).join(".pony").join("config.toml"))
 }
 
@@ -91,18 +93,35 @@ pub fn load() -> Result<PonyConfig, ConfigError> {
     Ok(cfg)
 }
 
-/// 写配置并 chmod 600；父目录一并创建（0700）。
+/// 写配置并原子赋予 0600 权限；父目录一并创建（0700）。
 pub fn save(cfg: &PonyConfig) -> Result<PathBuf, ConfigError> {
     let path = config_path()?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(ConfigError::Read)?;
         #[cfg(unix)]
-        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
     }
     let body = toml::to_string_pretty(cfg).map_err(|e| ConfigError::Parse(e.to_string()))?;
-    fs::write(&path, body).map_err(ConfigError::Read)?;
+
     #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(ConfigError::Read)?;
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(ConfigError::Read)?;
+        file.write_all(body.as_bytes()).map_err(ConfigError::Read)?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(&path, body).map_err(ConfigError::Read)?;
+    }
+
     Ok(path)
 }
 

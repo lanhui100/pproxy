@@ -262,6 +262,46 @@ pub fn status() -> Result<i32, String> {
     Ok(EXIT_OK)
 }
 
+/// 开启环境代理（支持 --eval 直接输出 export 语句）。
+pub fn on(eval: bool) -> Result<i32, String> {
+    if eval {
+        let data_plane = match config::load() {
+            Ok(cfg) => config::derive_data_plane(&cfg)
+                .unwrap_or_else(|_| "http://127.0.0.1:8899".to_string()),
+            Err(_) => "http://127.0.0.1:8899".to_string(),
+        };
+        let k8s_entries = detect_k8s_cluster_entries();
+        let extra_no_proxy = if k8s_entries.is_empty() {
+            String::new()
+        } else {
+            format!(",{}", k8s_entries.join(","))
+        };
+        let no_proxy = format!("{}{}", DEFAULT_NO_PROXY, extra_no_proxy);
+
+        println!("export http_proxy=\"{data_plane}\"");
+        println!("export https_proxy=\"{data_plane}\"");
+        println!("export no_proxy=\"{no_proxy}\"");
+        println!("export HTTP_PROXY=\"{data_plane}\"");
+        println!("export HTTPS_PROXY=\"{data_plane}\"");
+        println!("export NO_PROXY=\"{no_proxy}\"");
+        Ok(EXIT_OK)
+    } else {
+        enable_proxy()
+    }
+}
+
+/// 关闭环境代理（支持 --eval / --hard）。
+pub fn off(eval: bool, hard: bool) -> Result<i32, String> {
+    if eval {
+        println!("unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY");
+        Ok(EXIT_OK)
+    } else if hard {
+        disable_proxy_hard()
+    } else {
+        disable_proxy()
+    }
+}
+
 /// 开启/关闭持久化代理（保留向后兼容）。
 pub fn toggle(enable: bool) -> Result<i32, String> {
     if enable {

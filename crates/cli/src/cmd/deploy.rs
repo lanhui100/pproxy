@@ -567,8 +567,11 @@ mod tests {
         assert!(result.unwrap_err().contains("PROXY_SECRET 未配置"));
     }
 
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_deploy_root_from_env() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         // 用临时目录模拟 deploy/ 结构
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("cf-worker")).unwrap();
@@ -582,17 +585,13 @@ mod tests {
 
     #[test]
     fn resolve_deploy_root_missing_in_env_dir() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
         // 设置 PPROXY_DEPLOY_DIR 指向一个不存在 wrangler.toml 的目录
-        // 注意：由于编译期嵌入路径存在（CARGO_MANIFEST_DIR），仅验证 env 路径优先
         let tmp = tempfile::tempdir().unwrap();
-        // 创建 cf-worker 目录但不放 wrangler.toml → PPROXY_DEPLOY_DIR 路径无效
         std::fs::create_dir_all(tmp.path().join("cf-worker")).unwrap();
         std::env::set_var("PPROXY_DEPLOY_DIR", tmp.path());
         let result = resolve_deploy_root();
         std::env::remove_var("PPROXY_DEPLOY_DIR");
-        // PPROXY_DEPLOY_DIR 无效但编译期嵌入路径仍能找到真实 deploy/，
-        // 所以 result 可能 Ok。仅验证 env 设置不干扰其他路径。
-        // 无法在此环境中模拟"完全找不到"场景，跳过严格断言。
         if let Err(e) = result {
             assert!(e.contains("无法定位"));
         }
