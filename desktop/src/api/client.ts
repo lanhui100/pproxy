@@ -74,18 +74,12 @@ function inTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
-/** 默认 token 解析：Tauri→凭据库；浏览器 dev→localStorage；node 测试→null。 */
+/**
+ * 默认 token 解析：admin token 已随单体化废弃（桌面端不再认证远端管理面），
+ * 一律返回 null。`setTokenProvider` 机制保留：测试可注入；未来如有需要（如
+ * 接入远端 server 管理面）再装配。
+ */
 async function defaultResolveToken(): Promise<string | null> {
-  if (inTauri()) {
-    try {
-      return await invoke<string | null>('credential_get')
-    } catch {
-      return null
-    }
-  }
-  if (typeof localStorage !== 'undefined') {
-    return localStorage.getItem('pony-dev-admin-token')
-  }
   return null
 }
 
@@ -115,7 +109,7 @@ export function onUnauthorized(fn: UnauthorizedListener): () => void {
  * 给调用方展示，不再触发全局导航（防死循环）；且**绝不清除 keyring 凭据**
  * （服务端轮换期间不能把好凭据洗掉）。
  */
-interface RequestOptions {
+export interface RequestOptions {
   skipAuthRedirect?: boolean
 }
 
@@ -239,7 +233,9 @@ export const api = {
     request(z.object({ revoked: z.boolean() }), 'DELETE', `/api/tokens/${id}`),
 
   // routes
-  listRoutes: () => request(RoutesRespSchema, 'GET', '/api/routes'),
+  // 被动加载（列表/轮询）必须传 { skipAuthRedirect: true }：401 走页内横幅，
+  // 不得把用户踢到设置页（R7/F8 豁免名单；主动操作保持默认跳转语义）。
+  listRoutes: (opts?: RequestOptions) => request(RoutesRespSchema, 'GET', '/api/routes', undefined, opts),
   createRoute: (req: z.infer<typeof CreateRouteReqSchema>) => {
     CreateRouteReqSchema.parse(req)
     return request(CreateRouteRespSchema, 'POST', '/api/routes', req)
@@ -265,12 +261,12 @@ export const api = {
   quota: () => request(QuotaRespSchema, 'GET', '/api/quota'),
 
   // alerts
-  alerts: (unreadOnly?: boolean, limit?: number) => {
+  alerts: (unreadOnly?: boolean, limit?: number, opts?: RequestOptions) => {
     const q = new URLSearchParams()
     if (unreadOnly) q.set('unread', '1')
     if (limit !== undefined) q.set('limit', String(Math.min(Math.max(limit, 1), 500)))
     const qs = q.toString()
-    return request(AlertsRespSchema, 'GET', `/api/alerts${qs ? `?${qs}` : ''}`)
+    return request(AlertsRespSchema, 'GET', `/api/alerts${qs ? `?${qs}` : ''}`, undefined, opts)
   },
   markAlertRead: (id: number) =>
     request(z.object({ read: z.boolean() }), 'POST', `/api/alerts/${id}/read`),

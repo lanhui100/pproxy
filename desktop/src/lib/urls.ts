@@ -167,3 +167,22 @@ export function parseServiceUrlInput(raw: string): ParsedServiceUrl | null {
     subPath,
   }
 }
+
+/**
+ * 安全且可靠地在系统默认浏览器中打开外部 URL（兼容 Tauri 与 Web 运行环境）
+ */
+export async function openExternalUrl(url: string): Promise<void> {
+  const isTauriEnv = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  if (isTauriEnv) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('open_external_url', { url })
+      return
+    } catch (e) {
+      console.error('Failed to open external url via tauri command:', e)
+    }
+  }
+  if (typeof window !== 'undefined') {
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }
+}

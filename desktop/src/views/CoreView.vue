@@ -1,42 +1,26 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import {
   Activity,
   ChevronDown,
-  Copy,
   Globe,
   Loader2,
-  LoaderCircle,
   Plus,
   RefreshCw,
   ShieldCheck,
-  Trash2,
   Zap,
 } from '@lucide/vue'
 
-import { api, type RouteDto } from '@/api/client'
-import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
-import EmptyState from '@/components/common/EmptyState.vue'
 import InfoTip from '@/components/common/InfoTip.vue'
-import LatencyBars from '@/components/common/LatencyBars.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
-import SkeletonTable from '@/components/common/SkeletonTable.vue'
 import StatusDot from '@/components/common/StatusDot.vue'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { useAdaptivePoll } from '@/composables/useAdaptivePoll'
-import { useSessionSecret } from '@/composables/useSessionSecret'
-import { copySecret } from '@/composables/useSecretCopy'
 import { useToast } from '@/composables/useToast'
 import { provisionTunnel } from '@/composables/useTunnelProvision'
-import { loadBackendUrl, loadDataPlaneUrl } from '@/lib/config'
-import { errText } from '@/lib/errors'
-import { appendLatencyPoint, type LatencyPoint } from '@/lib/latencyHistory'
-import { upstreamLabel } from '@/lib/statusLabels'
-import { cleanDomainInput, deriveDataPlane, parseServiceUrlInput } from '@/lib/urls'
+import { cleanDomainInput } from '@/lib/urls'
 
 const toast = useToast()
-const { getSessionSecret, setSessionSecret } = useSessionSecret()
 
 function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -151,7 +135,7 @@ async function toggleProxy(on: boolean): Promise<void> {
     if (on) {
       const r = await provisionTunnel()
       if (r === 'unavailable') {
-        proxyError.value = '网关未提供隧道配置，请先在「设置 → 隧道中继」填写'
+        proxyError.value = '隧道未配置，请先在「设置 → 隧道中继」填写端点与令牌'
         return
       }
     }
@@ -187,282 +171,8 @@ async function testSites(): Promise<void> {
   }
 }
 
-// ==================== 2. 服务专线网关与智能接入 ====================
-const routes = ref<RouteDto[]>([])
-const routesLoading = ref(false)
-const routesError = ref('')
-
-const inputUrl = ref('')
-const parsedUrl = computed(() => parseServiceUrlInput(inputUrl.value))
-const addingRoute = ref(false)
-const syncToWhitelist = ref(true)
-
-// 最近接入成功生成的专线信息
-interface CreatedAccessResult {
-  service: string
-  token: string
-  publicUrl: string
-  lanUrl: string
-}
-const lastCreated = ref<CreatedAccessResult | null>(null)
-
-// 专线测速时序历史（30 分钟轮询采样）
-const STORAGE_KEY = 'pony_route_latency_history_v1'
-const routeHistories = ref<Record<string, LatencyPoint[]>>({})
-const probingRoute = ref<string>('')
-const switchingRoute = ref<string>('')
-
-// 编辑与删除
-const deleteTarget = ref<RouteDto | null>(null)
-const deleting = ref(false)
-
-function loadHistories(): void {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      routeHistories.value = parsed.routes || {}
-    }
-  } catch {
-    /* 忽略异常 */
-  }
-}
-
-function saveHistories(): void {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    const prev = raw ? JSON.parse(raw) : {}
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        ...prev,
-        routes: routeHistories.value,
-      }),
-    )
-  } catch {
-    /* 忽略异常 */
-  }
-}
-
-function getBaseUrls(): { publicBase: string; lanBase: string } {
-  const configuredDataPlane = loadDataPlaneUrl()
-  const backend = loadBackendUrl() || 'http://127.0.0.1:8900'
-  const derivedDataPlane = deriveDataPlane(backend) || 'http://127.0.0.1:8899'
-
-  const publicBase = configuredDataPlane || derivedDataPlane
-  let lanBase = 'http://127.0.0.1:8899'
-
-  try {
-    const u = new URL(derivedDataPlane)
-    lanBase = `http://${u.hostname}:8899`
-  } catch {
-    /* 默认 127.0.0.1 */
-  }
-  return { publicBase, lanBase }
-}
-
-function buildServiceUrls(service: string, token: string, subPath = ''): { publicUrl: string; lanUrl: string } {
-  const { publicBase, lanBase } = getBaseUrls()
-  const tok = token.trim() || 'default_token'
-  const cleanPath = subPath ? (subPath.startsWith('/') ? subPath : `/${subPath}`) : '/v1'
-  return {
-    publicUrl: `${publicBase.replace(/\/$/, '')}/${tok}/${service}${cleanPath}`,
-    lanUrl: `${lanBase.replace(/\/$/, '')}/${tok}/${service}${cleanPath}`,
-  }
-}
-
-function getRouteUpstreamKey(r: RouteDto): string {
-  return r.override_upstream || r.effective_upstream || r.upstream || 'worker'
-}
-
-async function refreshRoutes(): Promise<void> {
-  routesLoading.value = true
-  routesError.value = ''
-  try {
-    const res = await api.listRoutes()
-    routes.value = res.routes
-  } catch (e) {
-    routesError.value = errText(e)
-  } finally {
-    routesLoading.value = false
-  }
-}
-
-// 自动探活全部路由（30 分钟轮询一次）
-async function probeAllRoutes(): Promise<void> {
-  if (routes.value.length === 0) return
-  const now = Date.now()
-
-  for (const r of routes.value) {
-    if (!r.enabled) continue
-    try {
-      const res = await api.testRoute(r.name, { skipAuthRedirect: true })
-      routeHistories.value[r.name] = appendLatencyPoint(routeHistories.value[r.name], {
-        ts: now,
-        ok: res.ok,
-        ms: res.latency_ms ?? undefined,
-        err: res.error ? errText(res.error) : undefined,
-      })
-    } catch (e) {
-      routeHistories.value[r.name] = appendLatencyPoint(routeHistories.value[r.name], {
-        ts: now,
-        ok: false,
-        err: errText(e),
-      })
-    }
-  }
-  saveHistories()
-}
-
-// 自适应 30 分钟轮询（1,800,000 ms）
-const { start: start30MinPoll } = useAdaptivePoll(
-  async () => {
-    await refreshRoutes()
-    await probeAllRoutes()
-  },
-  {
-    baseIntervalMs: 1_800_000,
-    maxIntervalMs: 3_600_000,
-    immediate: false,
-  },
-)
-
-async function testSingleRoute(r: { name: string }): Promise<void> {
-  probingRoute.value = r.name
-  const now = Date.now()
-  try {
-    const res = await api.testRoute(r.name)
-    const pt: LatencyPoint = {
-      ts: now,
-      ok: res.ok,
-      ms: res.latency_ms ?? undefined,
-      err: res.error ? errText(res.error) : undefined,
-    }
-    routeHistories.value[r.name] = appendLatencyPoint(routeHistories.value[r.name], pt)
-    if (res.ok) {
-      toast.success(`${r.name} 连接正常`, `延迟: ${res.latency_ms}ms`)
-    } else {
-      toast.error(`${r.name} 测速异常`, res.error ? errText(res.error) : '连接失败')
-    }
-  } catch (e) {
-    const pt: LatencyPoint = {
-      ts: now,
-      ok: false,
-      err: errText(e),
-    }
-    routeHistories.value[r.name] = appendLatencyPoint(routeHistories.value[r.name], pt)
-    toast.error('测速失败', errText(e))
-  } finally {
-    probingRoute.value = ''
-    saveHistories()
-  }
-}
-
-async function submitSmartAccess(): Promise<void> {
-  if (!parsedUrl.value) {
-    toast.error('请输入有效的 API 地址或域名')
-    return
-  }
-  addingRoute.value = true
-  const { inferredName, cleanHost, subPath } = parsedUrl.value
-
-  try {
-    // 1. 自动为该服务创建专属 Token（名称符合 ^[a-zA-Z0-9._-]{1,64}$ 规范）
-    const tokenName = `route_${inferredName.replace(/[^a-zA-Z0-9._-]/g, '_')}`.slice(0, 60)
-    let tokenStr = getSessionSecret() || ''
-    try {
-      const tokRes = await api.createToken({
-        name: tokenName,
-      })
-      tokenStr = tokRes.token
-      setSessionSecret(tokRes.token, tokRes.name)
-    } catch {
-      /* 若已存在同名密钥则沿用当前会话密钥 */
-    }
-
-    // 2. 创建服务路由
-    await api.createRoute({
-      name: inferredName,
-      target_host: cleanHost,
-    })
-
-    // 3. 同步加入加速名单
-    if (syncToWhitelist.value) {
-      await addWhitelistEntry(cleanHost)
-    }
-
-    // 4. 生成成品专线 URL（含已拼入的 Token 与完整子路径）
-    const urls = buildServiceUrls(inferredName, tokenStr, subPath)
-    lastCreated.value = {
-      service: inferredName,
-      token: tokenStr,
-      publicUrl: urls.publicUrl,
-      lanUrl: urls.lanUrl,
-    }
-
-    inputUrl.value = ''
-    await refreshRoutes()
-    void testSingleRoute({ name: inferredName })
-    toast.success(`专线「${inferredName}」已接入就绪`)
-  } catch (e) {
-    toast.error('创建专线失败', errText(e))
-  } finally {
-    addingRoute.value = false
-  }
-}
-
-// 手动切换线路（CF Worker <-> Vercel）
-async function switchRouteUpstream(r: RouteDto, nextUpstream: 'worker' | 'vercel'): Promise<void> {
-  switchingRoute.value = r.name
-  try {
-    await api.patchRoute(r.name, { override_upstream: nextUpstream })
-    r.override_upstream = nextUpstream
-    await refreshRoutes()
-    toast.success(`「${r.name}」已切换至 ${upstreamLabel(nextUpstream).label}`)
-    void testSingleRoute({ name: r.name })
-  } catch (e) {
-    toast.error('切换线路失败', errText(e))
-  } finally {
-    switchingRoute.value = ''
-  }
-}
-
-async function copyUrl(url: string, label: string): Promise<void> {
-  await copySecret(url, {
-    onCopied: () => toast.success(`已复制 ${label}`, '已包含专属访问令牌，可直接粘贴进客户端使用'),
-  })
-}
-
-async function toggleRouteEnabled(r: RouteDto, enabled: boolean): Promise<void> {
-  try {
-    await api.patchRoute(r.name, { enabled })
-    r.enabled = enabled
-    toast.success(`服务「${r.name}」已${enabled ? '启用' : '停用'}`)
-  } catch (e) {
-    toast.error(errText(e))
-  }
-}
-
-async function doDeleteRoute(): Promise<void> {
-  if (!deleteTarget.value) return
-  deleting.value = true
-  try {
-    await api.deleteRoute(deleteTarget.value.name)
-    toast.success(`已删除服务「${deleteTarget.value.name}」`)
-    deleteTarget.value = null
-    await refreshRoutes()
-  } catch (e) {
-    toast.error(errText(e))
-  } finally {
-    deleting.value = false
-  }
-}
-
 onMounted(async () => {
-  loadHistories()
   await refreshProxy()
-  await refreshRoutes()
-  start30MinPoll()
 
   if (isTauri()) {
     try {
@@ -479,13 +189,14 @@ onMounted(async () => {
     }
   }
 })
+
 </script>
 
 <template>
   <div class="space-y-6">
     <PageHeader
       title="代理与服务"
-      subtitle="Windows 系统全局透明加速与大模型 API 专线网关"
+      subtitle="Windows 系统全局透明加速"
     />
 
     <!-- ==================== 1. 本机透明代理总控（无边框 微圆角背景色） ==================== -->
@@ -663,236 +374,3 @@ onMounted(async () => {
         </div>
       </details>
     </div>
-
-    <!-- ==================== 2. 大模型 API 专线接入（无边框 微圆角背景色） ==================== -->
-    <div class="rounded-xl bg-card p-4 space-y-4 shadow-xs">
-      <div>
-        <h2 class="text-sm font-semibold tracking-tight flex items-center gap-2">
-          <Zap class="size-4 text-primary" />
-          大模型与 API 专线接入
-        </h2>
-        <p class="text-xs text-muted-foreground mt-0.5">
-          粘贴目标 API 地址，自动生成已嵌入专属 Token 的公网与局域网接入 URL，即拷即用。
-        </p>
-      </div>
-
-      <!-- 智能 URL 接入器：内嵌一键接入按钮 -->
-      <div class="space-y-2">
-        <div class="relative flex items-center rounded-lg bg-muted/50 p-1 shadow-xs">
-          <input
-            v-model="inputUrl"
-            placeholder="粘贴任意 API 地址，如 https://api.openai.com/v1 或 opencode.ai/zen/v1"
-            class="w-full bg-transparent pl-3 pr-24 py-2 text-xs font-mono outline-none"
-            @keyup.enter="submitSmartAccess"
-          />
-          <Button
-            size="sm"
-            class="absolute right-1.5 h-7.5 px-3.5 text-xs font-medium rounded-md shrink-0"
-            :disabled="!inputUrl.trim() || addingRoute"
-            @click="submitSmartAccess"
-          >
-            <LoaderCircle v-if="addingRoute" class="size-3 animate-spin mr-1" />
-            一键接入
-          </Button>
-        </div>
-
-        <!-- 智能识别提示 -->
-        <div v-if="parsedUrl" class="flex items-center justify-between text-xs text-muted-foreground bg-muted/30 rounded-md px-3 py-1.5">
-          <span class="flex items-center gap-2">
-            <span class="text-ok font-medium">✓ 智能识别:</span>
-            <span>服务名 <strong>{{ parsedUrl.inferredName }}</strong></span>
-            <span>目标 <code>{{ parsedUrl.cleanHost }}</code></span>
-          </span>
-          <label class="flex items-center gap-1.5 text-[11px] cursor-pointer">
-            <input v-model="syncToWhitelist" type="checkbox" class="rounded text-primary" />
-            同时加入 Windows 代理加速名单
-          </label>
-        </div>
-      </div>
-
-      <!-- 最近一次生成的专线直出卡片 -->
-      <div v-if="lastCreated" class="rounded-xl bg-ok-soft/70 dark:bg-emerald-950/40 p-3.5 space-y-2.5 shadow-xs">
-        <div class="flex items-center justify-between">
-          <div class="text-xs font-semibold text-ok flex items-center gap-1.5">
-            <span>🎉 专线「{{ lastCreated.service }}」接入就绪</span>
-          </div>
-          <button type="button" class="text-xs text-muted-foreground hover:text-foreground cursor-pointer" @click="lastCreated = null">
-            ✕
-          </button>
-        </div>
-
-        <div class="grid gap-2 sm:grid-cols-2 text-xs">
-          <!-- 公网接入地址 -->
-          <div class="rounded-md bg-background p-2.5 space-y-1 shadow-xs">
-            <div class="text-[11px] flex items-center justify-between">
-              <span class="font-bold text-foreground">公网接入</span>
-              <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[11px]" @click="copyUrl(lastCreated!.publicUrl, '公网接入地址')">
-                <Copy class="size-3 mr-1" />
-                复制
-              </Button>
-            </div>
-            <code class="block text-[11px] font-mono break-all text-foreground select-all">{{ lastCreated.publicUrl }}</code>
-          </div>
-
-          <!-- 局域网接入地址 -->
-          <div class="rounded-md bg-background p-2.5 space-y-1 shadow-xs">
-            <div class="text-[11px] flex items-center justify-between">
-              <span class="font-bold text-foreground">局域网接入</span>
-              <Button size="xs" variant="ghost" class="h-5 px-1.5 text-[11px]" @click="copyUrl(lastCreated!.lanUrl, '局域网接入地址')">
-                <Copy class="size-3 mr-1" />
-                复制
-              </Button>
-            </div>
-            <code class="block text-[11px] font-mono break-all text-foreground select-all">{{ lastCreated.lanUrl }}</code>
-          </div>
-        </div>
-      </div>
-
-      <!-- 已接入专线列表（待用户添加后显示，带时序微网格测速） -->
-      <div class="space-y-2 pt-2">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <h3 class="text-xs font-semibold text-foreground">已接入专线列表（{{ routes.length }}）</h3>
-            <span class="text-[11px] text-muted-foreground font-normal">（30 分钟轮询测速）</span>
-          </div>
-          <Button variant="ghost" size="xs" :disabled="routesLoading" @click="refreshRoutes">
-            <RefreshCw class="size-3 mr-1" :class="{ 'animate-spin': routesLoading }" />
-            刷新列表
-          </Button>
-        </div>
-
-        <SkeletonTable v-if="routesLoading && routes.length === 0" :rows="2" />
-        
-        <!-- 初始空状态 -->
-        <EmptyState
-          v-else-if="routes.length === 0"
-          title="暂无 API 专线服务"
-          description="在上方粘贴 API 地址一键接入，系统将自动生成专线接入地址与访问令牌。"
-        />
-
-        <!-- 专线卡片列表 -->
-        <div v-else class="space-y-2">
-          <div
-            v-for="r in routes"
-            :key="r.name"
-            class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg bg-muted/30 transition hover:bg-muted/50"
-            :class="{ 'opacity-60': !r.enabled }"
-          >
-            <!-- 左侧：服务信息、线路切换器与快捷复制 -->
-            <div class="space-y-1.5 min-w-0">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="font-semibold text-xs font-mono">{{ r.name }}</span>
-                <span class="text-[11px] font-mono text-muted-foreground">({{ r.target_host }})</span>
-                
-                <!-- 当前线路与手动切换器 (CF Worker <-> Vercel) -->
-                <div class="inline-flex items-center gap-1 rounded bg-muted/80 p-0.5 text-[10px]">
-                  <button
-                    type="button"
-                    class="rounded px-1.5 py-0.5 transition cursor-pointer font-medium"
-                    :class="getRouteUpstreamKey(r) === 'worker' || getRouteUpstreamKey(r) === 'cf' ? 'bg-primary text-primary-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
-                    :disabled="switchingRoute === r.name"
-                    @click="switchRouteUpstream(r, 'worker')"
-                  >
-                    CF Worker
-                  </button>
-                  <button
-                    type="button"
-                    class="rounded px-1.5 py-0.5 transition cursor-pointer font-medium"
-                    :class="getRouteUpstreamKey(r) === 'vercel' ? 'bg-primary text-primary-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground'"
-                    :disabled="switchingRoute === r.name"
-                    @click="switchRouteUpstream(r, 'vercel')"
-                  >
-                    Vercel 出口
-                  </button>
-                </div>
-              </div>
-
-              <!-- 快捷复制专线 URL -->
-              <div class="flex flex-wrap items-center gap-2 pt-0.5 text-[11px]">
-                <button
-                  type="button"
-                  class="inline-flex items-center gap-1 text-primary hover:underline cursor-pointer font-mono"
-                  @click="copyUrl(buildServiceUrls(r.name, getSessionSecret() || '').publicUrl, '公网专线地址')"
-                >
-                  <Copy class="size-2.5" />
-                  复制公网 URL
-                </button>
-                <span class="text-muted-foreground/40">·</span>
-                <button
-                  type="button"
-                  class="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground hover:underline cursor-pointer font-mono"
-                  @click="copyUrl(buildServiceUrls(r.name, getSessionSecret() || '').lanUrl, '局域网专线地址')"
-                >
-                  <Copy class="size-2.5" />
-                  复制局域网 URL
-                </button>
-              </div>
-            </div>
-
-            <!-- 右侧：时序微图、纯图标即时测速、启停开关与删除 -->
-            <div class="flex items-center gap-3 shrink-0">
-              <!-- 12 根时序微柱条 -->
-              <div class="flex items-center gap-2">
-                <LatencyBars :history="routeHistories[r.name]" />
-                <span class="min-w-12 text-right font-mono text-xs tabular-nums font-medium text-foreground">
-                  <template v-if="probingRoute === r.name">
-                    <span class="text-muted-foreground animate-pulse text-[11px]">测速中…</span>
-                  </template>
-                  <template v-else-if="routeHistories[r.name]?.length">
-                    <span :class="routeHistories[r.name]?.at(-1)?.ok ? 'text-foreground' : 'text-bad'">
-                      {{ routeHistories[r.name]?.at(-1)?.ok ? `${routeHistories[r.name]?.at(-1)?.ms}ms` : '异常' }}
-                    </span>
-                  </template>
-                  <template v-else>
-                    <span class="text-muted-foreground text-[11px]">待测</span>
-                  </template>
-                </span>
-              </div>
-
-              <!-- 纯图标即时测速按钮 -->
-              <button
-                v-if="r.enabled"
-                type="button"
-                class="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-background cursor-pointer transition"
-                :disabled="probingRoute === r.name"
-                title="立即测速"
-                @click="testSingleRoute({ name: r.name })"
-              >
-                <RefreshCw class="size-3.5" :class="{ 'animate-spin': probingRoute === r.name }" />
-              </button>
-
-              <!-- 启停开关 -->
-              <Switch
-                :model-value="r.enabled"
-                size="sm"
-                @update:model-value="(val: boolean) => toggleRouteEnabled(r, val)"
-              />
-
-              <!-- 删除按钮 -->
-              <button
-                type="button"
-                class="p-1.5 rounded-md text-muted-foreground hover:text-bad hover:bg-bad-soft cursor-pointer transition"
-                title="删除专线"
-                @click="deleteTarget = r"
-              >
-                <Trash2 class="size-3.5" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 删除服务确认 -->
-    <ConfirmDialog
-      :open="deleteTarget !== null"
-      :title="`删除专线服务「${deleteTarget?.name ?? ''}」？`"
-      description="删除后，通过该专线路由的请求将无法连接。此操作不可恢复。"
-      confirm-text="确认删除"
-      destructive
-      :busy="deleting"
-      @update:open="(v) => !v && (deleteTarget = null)"
-      @confirm="doDeleteRoute"
-    />
-  </div>
-</template>

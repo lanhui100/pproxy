@@ -43,7 +43,8 @@ export function useAlertNotifications() {
 
   async function pollOnce(): Promise<void> {
     try {
-      const r = await api.alerts(true, 50)
+      // 后台轮询豁免 401：未授权只静默降级，绝不能把用户踢到设置页
+      const r = await api.alerts(true, 50, { skipAuthRedirect: true })
       unreadCount.value = r.alerts.length
       lastError.value = ''
       const seen = new Set(loadDedup())
