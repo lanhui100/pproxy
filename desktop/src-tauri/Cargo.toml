@@ -1,6 +1,6 @@
 [package]
 name = "pony-desktop"
-version = "0.3.17"
+version = "0.3.18"
 description = "pony proxy 桌面管理端"
 authors = ["dm"]
 license = ""

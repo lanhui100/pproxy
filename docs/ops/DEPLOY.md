@@ -7,6 +7,7 @@
 | pony-server (pproxy-server) | systemd `pproxy.service` | dev 服务器 `/home/USER/pproxy/target/release/` |
 | CF Worker | `wrangler deploy` | Cloudflare（edge.ponyjob.top） |
 | Vercel 函数 | Vercel API（v13 deployments） | Vercel（vedge.ponyjob.top） |
+| 桌面分发（updater 主端点） | `scripts/publish-desktop-dist.sh` | Vercel 静态（dl.ponyjob.top，项目 pony-dsk） |
 | 凭据 | `.secrets.env`（600） | 本地，不部署 |
 
 ## 日常操作
@@ -18,6 +19,30 @@ cargo build --release
 sudo systemctl restart pproxy
 curl -s http://127.0.0.1:8899/ | head -c 100   # 健康检查
 ```
+
+### 发桌面版（Windows，含自更新分发）
+```bash
+# 1) 本机（Windows）构建：nsis + updater 签名
+#    签名私钥在 dev 主机 ~/.tauri/pony-desktop.key（公钥须与 tauri.conf.json 一致）
+cd desktop && pnpm tauri build
+# 2) GitHub Release 归档源（tag desktop-vX.Y.Z；gh 已认证）：
+#    上传产物 *_x64-setup.exe / .sig / latest.json
+#    latest.json 的 platforms.*.url 指向 https://dl.ponyjob.top/<点号文件名>
+# 3) Vercel 静态分发（updater 主端点，与 dev 在线状态无关）：
+VERCEL_TOKEN=$(ssh dev 'grep "^PPROXY_VERCEL_TOKEN=" ~/pproxy/.pproxy.env' | cut -d= -f2) \
+  scripts/publish-desktop-dist.sh \
+  desktop/src-tauri/target/release/bundle/nsis latest.json
+# 4) 过渡期回退端点（客户端 <0.3.18 只认 access.ponyjob.top/dsk/）：
+ssh dev 'cd ~/pproxy && scripts/sync-desktop-release.sh desktop-vX.Y.Z'
+# 5) 验证：curl -s https://dl.ponyjob.top/latest.json | grep version
+```
+
+> **分发拓扑（2026-08-30 起）**：updater 双端点容灾——主 `dl.ponyjob.top`（Vercel 静态，
+> 项目 `pony-dsk`，与 dev 在线状态无关）+ 备 `access.ponyjob.top/dsk/`（dev 主机
+> pproxy-server 数据面，pony-tunnel 隧道；客户端 <0.3.18 只认备端点）。dev 上的
+> pproxy-server 不再承担"检查更新"的可用性，仅作过渡回退与 CLI 管理面。
+> DNS：dl → cname.vercel.com（DNS only）；命名约定：分发文件名统一点号
+> （Pony.Proxy_X.Y.Z_x64-setup.exe），tauri 产物空格由发布脚本归一。
 
 ### 更新 CF Worker
 ```bash

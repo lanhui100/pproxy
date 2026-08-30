@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Pony Proxy",
-  "version": "0.3.17",
+  "version": "0.3.18",
   "identifier": "com.ponyjob.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -50,6 +50,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFBMzM1MTQ1NjZDNjE1RTAKUldUZ0ZjWm1SVkV6R3AxQWVtWmFOQW15NUtoTTR6Q3JXQ0hZZ1N5dVljN0tHaEsxQ2I5U3Q2WjgK",
       "endpoints": [
+        "https://dl.ponyjob.top/latest.json",
         "https://access.ponyjob.top/dsk/latest.json"
       ]
     }
