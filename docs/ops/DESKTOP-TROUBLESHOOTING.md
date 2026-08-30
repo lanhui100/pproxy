@@ -701,3 +701,27 @@ node smoke-test.mjs wss://gate.ponyjob.top/ws    openai.com   443 --token '<keyr
 
 **遗留备选**：方案 A（VPS 常驻 Node gate + cloudflared ingress，`systemd/pony-gate-node.service`
 头部注释有完整步骤）作为 Vercel 出口不可用时的回退，未部署。
+
+---
+
+## admin_token 清理收尾 · 2026-08-30（单体化决策的最终执行）
+
+**决策**：admin_token（旧前后端分离架构的远端管理面凭据）在第五轮已随管理面退役而停用，
+本轮将其**代码与存储彻底移除**，仅保留本文档的决策记录。完成后代码中不再有任何
+admin_token 逻辑、凭据槽位或依赖；隧道令牌（tunnel_token）为桌面端唯一凭据，不受影响。
+
+**移除清单**：
+
+| 层 | 内容 |
+|---|---|
+| Rust（lib.rs） | `CREDENTIAL_USER`（admin_token 槽位）常量、`credential_get/set/delete` 三个 Tauri 命令、`api_bypass_fetch` 命令（管理面绕代理 fetch）、`proxy_get_current_config` 的 has_secret admin_token 分支；reqwest 依赖随之移除 |
+| 前端 API 层 | `api/`（client.ts + schemas + msw + 测试，含 token provider/401 拦截机制）整体删除；zod、msw、@tauri-apps/plugin-http 依赖移除 |
+| 前端组件/组合式 | `UsageDrawer`（用量抽屉）、`useAlertNotifications`、`useBackendGate`、`useAdaptivePoll`、`useSessionSecret`、`useSecretCopy`（均无存活调用方）；chart.js/vue-chartjs 随用量抽屉移除 |
+| 前端 lib | `errors`（管理面错误字典）、`statusLabels`（token/quota 状态映射，`Tone` 类型内联进 StatusDot）、`usageJoin`、`format`、`presetGenerator`、`serviceTemplates`、`expiry`、`normalize`；`config.ts` 的 backend url / dev admin token / 数据面地址 / 轮询间隔段 |
+| 本机凭据 | Windows 凭据管理器中遗留的 `pony-desktop / admin_token` 条目已删除；`tunnel_token` 保留 |
+
+**范围界定**：crates/cli 与 crates/core 中的 `admin_token`（`pproxy init --token`、`PonyConfig`、
+`AdminClient`、`generate_admin_token`）是 CLI 连接 pproxy-server 管理面的**在用功能**（ADR-007
+tailnet 管理面），不属于桌面端退役范围，予以保留。
+
+**验证**：cargo test --lib 47/47、clippy 0 警告；vue-tsc 0 错、vitest 36/36、oxlint 0 警告。

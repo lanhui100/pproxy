@@ -156,12 +156,11 @@ pub fn run() {
       }
     })
     .invoke_handler(tauri::generate_handler![
-      credential_get, credential_set, credential_delete,
       proxy_whitelist_get, proxy_whitelist_set, proxy_mode_get, proxy_mode_set,
       proxy_enable, proxy_disable, proxy_pac, proxy_status, proxy_test_sites,
       proxy_tunnel_get, proxy_tunnel_set_url, tunnel_token_save, tunnel_token_clear,
       proxy_auto_config_get, proxy_auto_config_set, app_config_get, app_config_set,
-      proxy_bypass_hosts, api_bypass_fetch,
+      proxy_bypass_hosts,
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
       open_external_url,
     ])
@@ -177,9 +176,8 @@ pub fn run() {
 }
 
 const CREDENTIAL_SERVICE: &str = "pony-desktop";
-const CREDENTIAL_USER: &str = "admin_token";
 const CREDENTIAL_USER_TUNNEL: &str = "tunnel_token";
-/// 方案 B（chained）远端代理密码的独立凭据槽；严禁复用 admin_token（会污染管理面鉴权）。
+/// 方案 B（chained）远端代理密码的独立凭据槽；凭据按用途分槽，严禁混用。
 const CREDENTIAL_USER_PROXY: &str = "proxy_password";
 
 fn cred_entry(user: &str) -> Result<keyring::Entry, String> {
@@ -216,12 +214,6 @@ fn cred_delete_impl(user: &str) -> Result<(), String> {
     Err(e) => Err(format!("credential delete failed: {e}")),
   }
 }
-#[tauri::command]
-fn credential_set(secret: String) -> Result<(), String> { cred_set_impl(CREDENTIAL_USER, secret) }
-#[tauri::command]
-fn credential_get() -> Result<Option<String>, String> { cred_get_impl(CREDENTIAL_USER) }
-#[tauri::command]
-fn credential_delete() -> Result<(), String> { cred_delete_impl(CREDENTIAL_USER) }
 
 // ---- M6 + T1 watch 通道 ----
 static WHITELIST_TX: OnceLock<watch::Sender<Vec<String>>> = OnceLock::new();
@@ -738,21 +730,6 @@ fn proxy_pac() -> String {
     proxy::pac::generate_pac(&entries, mode)
 }
 #[tauri::command]
-async fn api_bypass_fetch(method: String, url: String, headers: Option<std::collections::HashMap<String,String>>, body: Option<String>) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::builder().no_proxy().build().map_err(|e| e.to_string())?;
-    let m = match method.to_ascii_uppercase().as_str() {
-        "GET"=>reqwest::Method::GET, "POST"=>reqwest::Method::POST, "PATCH"=>reqwest::Method::PATCH, "DELETE"=>reqwest::Method::DELETE, "PUT"=>reqwest::Method::PUT, _=>reqwest::Method::GET,
-    };
-    let mut req = client.request(m, &url);
-    if let Some(hs)=headers { for (k,v) in hs { req = req.header(k, v); } }
-    if let Some(b)=body { req = req.body(b).header("Content-Type", "application/json"); }
-    let resp = req.send().await.map_err(|e| e.to_string())?;
-    let status = resp.status().as_u16();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    let json: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text.clone()));
-    Ok(serde_json::json!({"status": status, "body": json, "text": text}))
-}
-#[tauri::command]
 fn proxy_auto_config_get() -> serde_json::Value { std::fs::read_to_string(app_config_path()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap_or(serde_json::json!({})) }
 #[tauri::command]
 fn proxy_auto_config_set(patch: serde_json::Value) -> Result<(), String> { app_config_set(patch) }
@@ -824,7 +801,7 @@ fn proxy_get_current_config() -> serde_json::Value {
     let worker_url = cfg.get("worker_url").and_then(|v| v.as_str()).unwrap_or("");
     let remote_host = cfg.get("remote_host").and_then(|v| v.as_str()).unwrap_or("");
     let username = cfg.get("username").and_then(|v| v.as_str()).unwrap_or("");
-    let has_secret = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().is_some() || cred_get_impl(CREDENTIAL_USER).ok().flatten().is_some();
+    let has_secret = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().is_some();
 
     serde_json::json!({
         "mode_type": mode_type,
@@ -850,8 +827,6 @@ fn configure_direct_tunnel(_worker_url: &str, secret: &str) -> Result<(), String
     let _ = std::fs::rename(&tmp, target);
 
     let _ = cred_set_impl(CREDENTIAL_USER_TUNNEL, secret.to_string());
-    // 注意：secret 是 gate 隧道令牌，与后端 admin_token 无关——严禁写入 CREDENTIAL_USER
-    // （管理面 Bearer 会随之失效，401 连锁跳设置页）。
     let _ = ensure_tunnel_watch().send((Some(ws_url), Some(secret.to_string())));
     Ok(())
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 状态彩点+中文词（spec §2-2）：语义色仅绿/黄/红，灰=中性，主题色=强调
-import type { Tone } from '@/lib/statusLabels'
+type Tone = 'ok' | 'warn' | 'error' | 'muted' | 'accent'
 
 withDefaults(defineProps<{ tone: Tone; label?: string; size?: 'sm' | 'md' | 'lg' }>(), { size: 'sm', label: '' })
 

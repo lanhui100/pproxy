@@ -1,5 +1,5 @@
 // 隧道配置就绪检查（单体架构）：只读本地（tunnel.json + 系统凭据库）。
-// 旧版会从远端网关 /api/tunnel/config 拉取下发值——admin token 与远端管理面已废弃，
+// 旧版会从远端网关拉取下发值——远端管理面已随单体化废弃，
 // 隧道配置现在完全由用户在「设置 → 隧道中继」手动维护。
 import { loadTunnelConfig } from '@/lib/config'
 
