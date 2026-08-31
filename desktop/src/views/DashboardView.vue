@@ -1050,7 +1050,7 @@ async function submitImportOrChained() {
                       : 'text-muted-foreground hover:text-foreground',
                   ]"
                 >
-                  CF
+                  C
                 </button>
                 <button
                   @click="switchSiteIface(row, 'vercel')"
@@ -1062,7 +1062,7 @@ async function submitImportOrChained() {
                       : 'text-muted-foreground hover:text-foreground',
                   ]"
                 >
-                  Vercel
+                  V
                 </button>
               </div>
             </div>

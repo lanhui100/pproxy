@@ -9,10 +9,10 @@
 
 ## 0. 状态与断点
 
-**状态**：阶段 2 完成，待阶段 3（用户 Render 建站 + 实测）
-**当前断点**：代码全部入库（`ec17e1a` + 安全回改），selftest 28/28、gate-policy 28/28 全过。
-**Next Action**：T3 —— 用户按 `deploy/render-gate/README.md` 在 Render 建站（Oregon/Free）→ 配置双 gate URL → 执行 §T3 验收三步。
-**Resume Hint**：恢复时读本节 + §4 门禁表；独立代码审核因子代理基础设施故障降级为主会话独立 pass（§8.2 如实标注）。
+**状态**：阶段 3 进行中——CF 侧已上线并构造性验证通过，剩 Render 建站（用户操作）
+**当前断点**：① worker colo 门禁已部署（version 1688d7d0）；② 发现并已修复 `TUNNEL_TOKEN_HASH` 漂移（重新 `wrangler secret put` 与 `.pproxy.env` 对齐，顺带恢复了桌面隧道鉴权）；③ 构造性验证通过：google host → `{"ok":false,"reason":"unsupported_colo:LAX"}`（dev 落 LAX，验证后已删临时 secret 恢复默认 HKG,MFM），非 google host → `ok:true`。
+**Next Action**：用户按 `deploy/render-gate/README.md` 在 Render 建站（Oregon/Free）→ 隧道 URL 配 `wss://gate.ponyjob.top/ws,wss://<app>.onrender.com/ws` → 3 个 agy 长任务实测。
+**Resume Hint**：恢复时读本节 + §4 门禁表；Render 侧未开始；worker 侧已完成勿重复部署。
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
