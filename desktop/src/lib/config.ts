@@ -61,8 +61,12 @@ export async function clearTunnelToken(): Promise<boolean> {
   return true
 }
 
-// ---- auto_proxy 首次询问（Fix4 v0.2）：默认 false，缺字段时弹窗询问 ----
-export interface AutoProxyConfig { auto_proxy?: boolean; dont_ask?: boolean }
+// ---- auto_proxy 偏好配置：默认 true（启动即开启智能模式代理） ----
+export interface AutoProxyConfig {
+  auto_proxy?: boolean
+  dont_ask?: boolean
+  proxy_mode?: 'whitelist' | 'global'
+}
 
 export async function loadAutoProxyConfig(): Promise<AutoProxyConfig> {
   if (isTauri()) {

@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
 import { useToast } from '@/composables/useToast'
 import {
   checkForUpdate,
@@ -31,7 +32,9 @@ import {
   clearTunnelToken,
   isTauri,
   isValidTunnelUrl,
+  loadAutoProxyConfig,
   loadTunnelConfig,
+  saveAutoProxyConfig,
   saveTunnelConfig,
 } from '@/lib/config'
 import { cleanDomainInput, openExternalUrl } from '@/lib/urls'
@@ -157,9 +160,36 @@ const isSaving = ref(false)
 // 跨端同步
 const importSyncUri = ref('')
 
+// 启动与系统偏好
+const autoProxyEnabled = ref(true)
+const autoProxySaving = ref(false)
+
+async function refreshAutoProxy(): Promise<void> {
+  try {
+    const cfg = await loadAutoProxyConfig()
+    autoProxyEnabled.value = cfg.auto_proxy !== false
+  } catch {
+    autoProxyEnabled.value = true
+  }
+}
+
+async function handleAutoProxyToggle(val: boolean): Promise<void> {
+  autoProxyEnabled.value = val
+  autoProxySaving.value = true
+  try {
+    await saveAutoProxyConfig({ auto_proxy: val })
+    toast.success(val ? '已开启启动自动代理' : '已关闭启动自动代理')
+  } catch (e: any) {
+    toast.error('保存设置失败', typeof e === 'string' ? e : e?.message)
+  } finally {
+    autoProxySaving.value = false
+  }
+}
+
 onMounted(async () => {
   void refreshTunnel()
   void refreshWhitelist()
+  void refreshAutoProxy()
 
   if (isTauri()) {
     try {
@@ -537,6 +567,34 @@ async function triggerRescue() {
         </div>
         <div v-else class="rounded-lg border border-dashed border-border py-4 text-center text-xs text-muted-foreground">
           暂无自定义域名，可在上方输入框添加
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- 启动与系统偏好 -->
+    <Card class="border-border shadow-sm">
+      <CardHeader class="pb-3">
+        <div class="flex items-center justify-between">
+          <CardTitle class="text-base flex items-center gap-2">
+            <Sparkles class="h-4 w-4 text-primary" />
+            启动与系统偏好
+          </CardTitle>
+        </div>
+        <CardDescription>
+          管理软件启动时的默认行为
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-4">
+        <div class="flex items-center justify-between rounded-xl border border-border/80 bg-muted/20 p-3.5">
+          <div class="space-y-0.5 pr-4">
+            <div class="text-xs font-semibold text-foreground">启动即默认开启代理</div>
+            <div class="text-xs text-muted-foreground">软件启动时自动接管系统代理（默认开启智能分流模式）</div>
+          </div>
+          <Switch
+            :model-value="autoProxyEnabled"
+            @update:model-value="handleAutoProxyToggle"
+            :disabled="autoProxySaving"
+          />
         </div>
       </CardContent>
     </Card>
