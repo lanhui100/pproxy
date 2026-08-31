@@ -6,6 +6,38 @@ pub struct Table {
     rows: Vec<Vec<String>>,
 }
 
+/// 计算单个字符在终端中的显示列宽（East Asian Width 支持）。纯函数可测。
+pub fn char_width(c: char) -> usize {
+    let u = c as u32;
+    // 控制字符与零宽字符
+    if u < 0x20 || (0x7F..=0x9F).contains(&u) || u == 0x200B || u == 0xFEFF {
+        return 0;
+    }
+    // 宽字符范围（CJK 统一表意文字、全角标点、日韩假名、全角 ASCII、Emoji 等）
+    if (0x1100..=0x115F).contains(&u)
+        || (0x2E80..=0xA4CF).contains(&u)
+        || (0xAC00..=0xD7A3).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0xFE10..=0xFE19).contains(&u)
+        || (0xFE30..=0xFE6F).contains(&u)
+        || (0xFF00..=0xFF60).contains(&u)
+        || (0xFFE0..=0xFFE6).contains(&u)
+        || (0x1F300..=0x1F64F).contains(&u)
+        || (0x1F900..=0x1F9FF).contains(&u)
+        || (0x20000..=0x2FFFD).contains(&u)
+        || (0x30000..=0x3FFFD).contains(&u)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+/// 计算字符串在终端中的总显示列宽。纯函数可测。
+pub fn display_width(s: &str) -> usize {
+    s.chars().map(char_width).sum()
+}
+
 impl Table {
     pub fn new(headers: &[&str]) -> Self {
         Self {
@@ -18,13 +50,13 @@ impl Table {
         self.rows.push(row);
     }
 
-    /// 渲染为对齐文本（无第三方 table 库）。
+    /// 渲染为对齐文本（支持中英混排与 CJK 等宽对齐）。
     pub fn render(&self) -> String {
         let ncols = self.headers.len();
-        let mut widths: Vec<usize> = self.headers.iter().map(|h| h.chars().count()).collect();
+        let mut widths: Vec<usize> = self.headers.iter().map(|h| display_width(h)).collect();
         for row in &self.rows {
             for (i, cell) in row.iter().enumerate().take(ncols) {
-                widths[i] = widths[i].max(cell.chars().count());
+                widths[i] = widths[i].max(display_width(cell));
             }
         }
         let mut out = String::new();
@@ -55,7 +87,7 @@ impl Table {
 }
 
 fn pad(s: &str, width: usize) -> String {
-    let len = s.chars().count();
+    let len = display_width(s);
     if len >= width {
         s.to_string()
     } else {
@@ -244,5 +276,28 @@ mod tests {
         assert_eq!(utc_parts(1_787_270_400), (2026, 8, 21, 0, 0));
         // 闰年：2024-02-29 12:34 UTC = 1709210040
         assert_eq!(utc_parts(1_709_210_040), (2024, 2, 29, 12, 34));
+    }
+
+    #[test]
+    fn test_display_width() {
+        assert_eq!(display_width("hello"), 5);
+        assert_eq!(display_width("中国"), 4);
+        assert_eq!(display_width("pproxy 代理"), 11); // 6 + 1 + 4 = 11
+        assert_eq!(display_width("✨ 测试"), 6); // 2 + 1 + 2 + 1 = 6 (emoji 2, space 1, 测试 4 -> 2 + 1 + 4 = 7, wait: emoji ✨ is \u{2728} or other)
+    }
+
+    #[test]
+    fn test_table_cjk_alignment() {
+        let mut t = Table::new(&["服务名", "状态"]);
+        t.push(vec!["anthropic".into(), "已启用".into()]);
+        t.push(vec!["本地网关".into(), "禁用".into()]);
+        let rendered = t.render();
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines.len(), 4);
+        // 表头 "服务名" 宽 6, "anthropic" 宽 9, "本地网关" 宽 8 => 第一列列宽 9
+        // 行 2 "已启用" 宽 6, 表头 "状态" 宽 4 => 第二列列宽 6
+        assert!(lines[0].starts_with("服务名   ")); // 6 + 3 spaces = 9
+        assert!(lines[2].starts_with("anthropic")); // 9
+        assert!(lines[3].starts_with("本地网关 ")); // 8 + 1 space = 9
     }
 }

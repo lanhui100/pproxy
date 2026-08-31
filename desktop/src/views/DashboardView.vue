@@ -414,10 +414,10 @@ function latestClass(history: LatencyPoint[]): string {
 
 // 状态弱化文字（按钮之下）
 const statusText = computed(() => {
-  if (!isRunning.value) return '加速已停止，点击上方按钮即可开启'
+  if (!isRunning.value) return '加速已停止，点击上方开启'
   return proxyMode.value === 'whitelist'
-    ? '智能分流中：国内网络直连，海外服务经加速通道'
-    : '全局加速中：全部网络流量经加速通道'
+    ? '海外加速，国内直连'
+    : '全部流量走加速'
 })
 
 // 轮询：测速 10 分钟一轮（对齐 2 小时 12 根柱条）；用量 60 秒一刷

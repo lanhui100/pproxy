@@ -2,8 +2,8 @@
 //!
 //! 支持从 Windows 桌面端导出加密配置，在 Linux Server 上一键导入，免去重复登录 CF/Vercel。
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -23,8 +23,56 @@ const DEFAULT_SYNC_PASSPHRASE: &str = "pony-proxy-universal-sync-salt-v1";
 const SYNC_TTL_SECONDS: u64 = 600; // 10 分钟有效
 const KDF_ITERATIONS: u32 = 10_000;
 
-// 内存中已消费 Nonce 黑名单（防重放）
-static USED_NONCES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+use std::path::PathBuf;
+
+const NONCES_CACHE_FILE: &str = ".nonces.json";
+
+fn nonces_file_path() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .map_err(|_| "HOME / USERPROFILE not set".to_string())?;
+    Ok(home.join(".pony").join(NONCES_CACHE_FILE))
+}
+
+/// 检查并记录 Nonce（跨进程持久化防重放 + 过期条目自动清理）。
+fn check_and_record_nonce(nonce: &str, exp: u64, now: u64) -> Result<(), String> {
+    let path = nonces_file_path()?;
+    check_and_record_nonce_at(&path, nonce, exp, now)
+}
+
+fn check_and_record_nonce_at(path: &std::path::Path, nonce: &str, exp: u64, now: u64) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    let mut nonces: HashMap<String, u64> = if path.exists() {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
+    // 1. 清理已过期 Nonce
+    nonces.retain(|_, &mut item_exp| now <= item_exp);
+
+    // 2. 防重放检查
+    if nonces.contains_key(nonce) {
+        return Err("安全拦截：该同步口令已被使用过（防重放机制），请重新导出生成！".into());
+    }
+
+    // 3. 记录当前 Nonce
+    nonces.insert(nonce.to_string(), exp);
+
+    // 4. 写回持久化存储
+    if let Ok(json) = serde_json::to_string(&nonces) {
+        let _ = std::fs::write(path, json);
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncData {
@@ -182,15 +230,8 @@ pub fn import(input: &str, passphrase: Option<&str>) -> Result<i32, String> {
         return Err("该同步口令已过期（超过 10 分钟），请在原设备重新导出生成！".into());
     }
 
-    // 2. Nonce 防重放检查（SEC-02）
-    {
-        let mut lock = USED_NONCES.lock().unwrap();
-        let set = lock.get_or_insert_with(HashSet::new);
-        if set.contains(&payload.nonce) {
-            return Err("安全拦截：该同步口令已被使用过（防重放机制），请重新导出生成！".into());
-        }
-        set.insert(payload.nonce.clone());
-    }
+    // 2. Nonce 防重放检查（跨进程文件持久化防重放）
+    check_and_record_nonce(&payload.nonce, payload.exp, now)?;
 
     // 3. 写入本地配置
     let mut cfg = load().unwrap_or_else(|_| PonyConfig {
@@ -242,15 +283,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_check_and_record_nonce_persistence_and_expiry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_nonces.json");
+        let unique_nonce = format!("test_nonce_{}", rand::Rng::gen::<u64>(&mut rand::thread_rng()));
+        let now = 1000;
+        let exp = 1600;
+
+        // 第一次插入
+        assert!(check_and_record_nonce_at(&path, &unique_nonce, exp, now).is_ok());
+
+        // 同一个 Nonce 重复尝试（重放攻击）
+        let err = check_and_record_nonce_at(&path, &unique_nonce, exp, now + 10);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("安全拦截"));
+
+        // 当时间流逝超过 exp 时，该 Nonce 被自动清理淘汰，系统恢复安全
+        let later = exp + 10;
+        let another_nonce = format!("test_nonce_{}", rand::Rng::gen::<u64>(&mut rand::thread_rng()));
+        assert!(check_and_record_nonce_at(&path, &another_nonce, later + 600, later).is_ok());
+    }
+
+    #[test]
     fn sync_roundtrip_url_safe_and_replay_protection() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
+        let unique_nonce = format!("nonce_{}", rand::Rng::gen::<u64>(&mut rand::thread_rng()));
         let payload = SyncPayload {
             v: 1,
             exp: now + 300,
-            nonce: "unique_nonce_999".to_string(),
+            nonce: unique_nonce,
             data: SyncData {
                 server_url: Some("http://127.0.0.1:8899".into()),
                 worker_url: Some("https://edge.ponyjob.top".into()),

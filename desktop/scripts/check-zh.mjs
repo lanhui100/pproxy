@@ -22,7 +22,8 @@ const WHITELIST_WORDS = new Set([
 ])
 
 // 允许纯英文存在的 .ts 文件名片段（技术模块，不直接承载用户文案）
-const TS_FILE_ALLOW = /(^|\/)(client|schemas|msw|config|normalize|urls|utils|format|statusLabels|errors|useUpdater|useAlertNotifications|useSecretCopy|useToast|useBackendGate|useAdaptivePoll|useTunnelProvision|useSessionSecret|presetGenerator|serviceTemplates|latencyHistory|usageJoin|router)\.ts$/
+const TS_FILE_ALLOW = /(^|\/)(client|schemas|msw|config|normalize|urls|utils|format|statusLabels|errors|useUpdater|useAlertNotifications|useSecretCopy|useToast|useBackendGate|useAdaptivePoll|useTunnelProvision|useSessionSecret|presetGenerator|serviceTemplates|latencyHistory|usageJoin|usageChart|router)\.ts$/
+
 
 function extractWords(text) {
   return text.match(/[A-Za-z][A-Za-z_-]+/g) ?? []

@@ -101,10 +101,18 @@ async fn main() -> anyhow::Result<()> {
     info!("data plane listening on {data_addr}");
 
     // 5.5 CONNECT 隧道配置（pproxy-connect-tunnel spec §3.4）：PoolConfig 智能推导 + env 覆盖，fail-closed
-    let tunnel_cfg = connect::TunnelConfig::from_pool_config_and_env(&config).map(Arc::new);
-    if let Some(cfg) = &tunnel_cfg {
-        let allowlist = cfg.allowlist.join(", ");
-        info!(gate_url = %cfg.gate_url, allowlist = %allowlist, "CONNECT tunnel enabled via gate worker");
+    // 性能专项：包装为待命隧道池（预建 WS 会话，establish 从 ~5 RTT 压到 1 RTT）。
+    // 运维回滚开关：PPROXY_TUNNEL_POOL=0 禁池化（退回每 CONNECT 冷建连的旧行为）。
+    let tunnel_cfg = connect::TunnelConfig::from_pool_config_and_env(&config).map(|c| {
+        if std::env::var("PPROXY_TUNNEL_POOL").ok().as_deref() == Some("0") {
+            connect::TunnelPool::with_size(c, 0)
+        } else {
+            connect::TunnelPool::new(c)
+        }
+    });
+    if let Some(pool) = &tunnel_cfg {
+        let allowlist = pool.config().allowlist.join(", ");
+        info!(gate_url = %pool.config().gate_url, allowlist = %allowlist, "CONNECT tunnel enabled via gate worker");
     }
 
     // 8. 管理面绑定非回环地址时 warn（S-P2-额外 裁决：提示暴露面扩大，不阻止启动）
@@ -143,6 +151,25 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 数据面在当前线程驱动（主任务）；admin 已移交后台任务
+    // 边缘连接池保活（性能专项，env 开关 PPROXY_EDGE_KEEPALIVE=1）：
+    // 间隔 45s < reqwest pool_idle_timeout 90s，保持到 edge 的 TLS 连接常驻，
+    // 消除冷握手（跨洲 ~2-3 RTT）。默认关闭：Vercel 侧每次 ping 计一次函数
+    // 调用（约 1920 次/日），CF worker 侧无副作用，按部署形态开启。
+    if std::env::var("PPROXY_EDGE_KEEPALIVE").ok().as_deref() == Some("1") {
+        let edges = Arc::clone(&edges);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+                for (name, edge) in edges.iter() {
+                    if let Err(e) = edge.keepalive_ping().await {
+                        tracing::debug!(upstream = %name, error = %e, "edge keepalive ping failed");
+                    }
+                }
+            }
+        });
+        info!("edge keepalive enabled (PPROXY_EDGE_KEEPALIVE=1, interval 45s; note: Vercel 上游每次 ping 计一次函数调用, ~1920 次/日)");
+    }
+
     let gw_state = gateway::GatewayState {
         tokens,
         edges,

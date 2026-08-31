@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import {
+  Check,
   Download,
   ExternalLink,
   LifeBuoy,
@@ -101,7 +102,7 @@ async function removeWhitelistEntry(i: number): Promise<void> {
   }
 }
 
-// ---- 隧道中继（方案 A 出网通道：WS 端点 + 令牌；曾因无配置入口导致令牌无法修复）----
+// ---- 隧道中继（方案 A 出网通道：WS 端点 + 令牌）----
 const tunnelUrlInput = ref('')
 const tunnelTokenInput = ref('')
 const tunnelHasToken = ref(false)
@@ -223,8 +224,15 @@ async function doImportSync() {
       })) as any
       toast.success(res.message || '导入成功！')
       importSyncUri.value = ''
+      // 切换模式至 chained 并刷新配置状态
+      currentMode.value = 'chained'
+      const cfg = (await invoke('proxy_get_current_config')) as any
+      remoteHost.value = cfg.remote_host || ''
+      remoteUser.value = cfg.username || ''
     } else {
       toast.success('口令导入成功！')
+      importSyncUri.value = ''
+      currentMode.value = 'chained'
     }
   } catch (e: any) {
     toast.error('导入失败: ' + (typeof e === 'string' ? e : e?.message))
@@ -248,126 +256,228 @@ async function triggerRescue() {
 
 <template>
   <div class="h-full overflow-y-auto p-6 space-y-6 max-w-4xl mx-auto">
-    <div>
+    <!-- 头部说明 -->
+    <div class="pb-1">
       <h1 class="text-2xl font-bold tracking-tight text-foreground">设置中心</h1>
-      <p class="text-sm text-muted-foreground mt-0.5">管理您的加速模式、多端配置同步与网络急救</p>
+      <p class="text-sm text-muted-foreground mt-0.5">管理加速出网方案、域名分流规则与系统网络维护</p>
     </div>
 
-    <!-- 隧道中继（方案 A 出网通道：WS 端点 + 令牌） -->
+    <!-- 加速出网方案 -->
     <Card class="border-border shadow-sm">
       <CardHeader class="pb-3">
-        <CardTitle class="text-base flex items-center gap-2">
-          <Zap class="h-4 w-4 text-blue-600" />
-          隧道中继（出网通道）
-        </CardTitle>
-        <CardDescription>
-          方案 A 的 WS 隧道端点与令牌；保存后重新开启代理时生效。
-          <span v-if="tunnelHasToken" class="text-emerald-600">本机已保存令牌，留空则沿用。</span>
-        </CardDescription>
-      </CardHeader>
-      <CardContent class="space-y-3">
-        <div class="space-y-1">
-          <Label class="text-xs font-medium">隧道端点（wss://）</Label>
-          <Input v-model="tunnelUrlInput" placeholder="wss://gate.ponyjob.top/ws" class="font-mono text-sm" />
+        <div class="flex items-center justify-between">
+          <CardTitle class="text-base flex items-center gap-2">
+            <Zap class="h-4 w-4 text-primary" />
+            加速出网方案
+          </CardTitle>
+          <span class="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
+            {{ currentMode === 'direct' ? '个人独立加速' : '远端代理连接' }}
+          </span>
         </div>
-        <div class="space-y-1">
-          <Label class="text-xs font-medium">隧道令牌</Label>
-          <Input
-            v-model="tunnelTokenInput"
-            type="password"
-            placeholder="粘贴隧道令牌（与 gate 的 TUNNEL_TOKEN_HASH 对应）"
-            class="font-mono text-sm"
-          />
-        </div>
-        <div class="pt-1 flex justify-end gap-2">
-          <Button variant="outline" size="sm" class="text-xs h-9" :disabled="tunnelSaving" @click="clearTunnelTokenAction">
-            清除令牌
-          </Button>
-          <Button size="sm" class="text-xs h-9" :disabled="tunnelSaving" @click="saveTunnel">
-            {{ tunnelSaving ? '保存中…' : '保存隧道配置' }}
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-
-    <!-- 加速模式配置 -->
-    <Card class="border-border shadow-sm">
-      <CardHeader class="pb-3">
-        <CardTitle class="text-base flex items-center gap-2">
-          <Zap class="h-4 w-4 text-primary" />
-          加速出网模式
-        </CardTitle>
-        <CardDescription>选择适合您的加速方案，支持随时切换</CardDescription>
+        <CardDescription>选择适合您的加速出口通道，支持随时切换与多端同步</CardDescription>
       </CardHeader>
       <CardContent class="space-y-4">
-        <div class="grid grid-cols-2 gap-3">
+        <!-- 方案切换卡片（对齐欢迎页） -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
+            type="button"
             @click="currentMode = 'direct'"
             :class="[
-              'p-4 rounded-xl border text-left transition-all',
+              'relative rounded-xl border p-4 text-left transition-all cursor-pointer',
               currentMode === 'direct'
-                ? 'border-primary bg-primary/5'
-                : 'border-border bg-card hover:border-muted-foreground/30',
+                ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                : 'border-border bg-card hover:border-muted-foreground/40',
             ]"
           >
-            <div class="font-medium text-sm flex items-center gap-1.5">
-              <Sparkles class="h-4 w-4 text-primary" />
-              方案 A：个人独立加速
+            <Check
+              v-if="currentMode === 'direct'"
+              class="absolute right-3 top-3 h-4 w-4 text-primary"
+            />
+            <div class="flex items-center gap-3">
+              <div
+                :class="[
+                  'rounded-lg p-2',
+                  currentMode === 'direct' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                ]"
+              >
+                <Sparkles class="h-4 w-4" />
+              </div>
+              <div>
+                <div class="text-sm font-semibold flex items-center gap-1.5">
+                  方案 A：个人独立加速
+                  <span class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">推荐</span>
+                </div>
+                <div class="text-xs text-muted-foreground mt-0.5">直连 Cloudflare / Vercel 双出口，专属通道极速无干扰</div>
+              </div>
             </div>
-            <div class="text-xs text-muted-foreground mt-1">独立 Cloudflare 出口，专属通道极速无干扰</div>
           </button>
 
           <button
+            type="button"
             @click="currentMode = 'chained'"
             :class="[
-              'p-4 rounded-xl border text-left transition-all',
+              'relative rounded-xl border p-4 text-left transition-all cursor-pointer',
               currentMode === 'chained'
-                ? 'border-primary bg-primary/5'
-                : 'border-border bg-card hover:border-muted-foreground/30',
+                ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                : 'border-border bg-card hover:border-muted-foreground/40',
             ]"
           >
-            <div class="font-medium text-sm flex items-center gap-1.5">
-              <Server class="h-4 w-4 text-blue-600" />
-              方案 B：连接远端代理
+            <Check
+              v-if="currentMode === 'chained'"
+              class="absolute right-3 top-3 h-4 w-4 text-primary"
+            />
+            <div class="flex items-center gap-3">
+              <div
+                :class="[
+                  'rounded-lg p-2',
+                  currentMode === 'chained' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                ]"
+              >
+                <Server class="h-4 w-4" />
+              </div>
+              <div>
+                <div class="text-sm font-semibold">方案 B：连接远端代理</div>
+                <div class="text-xs text-muted-foreground mt-0.5">连接私有 Linux Server 或局域网其他代理服务</div>
+              </div>
             </div>
-            <div class="text-xs text-muted-foreground mt-1">连接私有 Linux Server 或局域网其他代理</div>
           </button>
         </div>
 
-        <div v-if="currentMode === 'direct'" class="space-y-3 pt-2">
-          <div class="flex items-center justify-between">
-            <Label class="text-xs font-medium">更新 Cloudflare API Token</Label>
-            <button
-              type="button"
-              @click="openExternalUrl('https://dash.cloudflare.com/profile/api-tokens')"
-              class="text-xs text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
-            >
-              获取 Token <ExternalLink class="h-3 w-3" />
-            </button>
+        <!-- 方案 A：独立加速详细配置 -->
+        <div v-if="currentMode === 'direct'" class="space-y-3.5 pt-1">
+          <!-- 授权码配置 -->
+          <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-3">
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <Label class="text-xs font-medium">更新加速授权码 (Cloudflare Token)</Label>
+                <button
+                  type="button"
+                  @click="openExternalUrl('https://dash.cloudflare.com/profile/api-tokens')"
+                  class="text-xs text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
+                >
+                  获取授权码 <ExternalLink class="h-3 w-3" />
+                </button>
+              </div>
+              <Input
+                v-model="cfToken"
+                type="password"
+                placeholder="如需更新授权码请在此输入"
+                class="font-mono text-xs"
+              />
+            </div>
+            <p class="text-xs text-muted-foreground flex items-center gap-1.5">
+              <ShieldCheck class="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+              凭据仅保存在本机系统凭据管理器，安全无泄漏
+            </p>
           </div>
-          <Input v-model="cfToken" type="password" placeholder="如需更新 Token 请在此输入" class="text-sm" />
+
+          <!-- 隧道中继高级配置（WS 端点 + 令牌） -->
+          <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-3">
+            <div class="flex items-center justify-between">
+              <div class="text-xs font-semibold flex items-center gap-1.5">
+                <Zap class="h-3.5 w-3.5 text-blue-600" />
+                隧道中继端点与令牌 (出网通道)
+              </div>
+              <span v-if="tunnelHasToken" class="text-[11px] text-emerald-600 font-medium">
+                本机已保存令牌
+              </span>
+              <span v-else class="text-[11px] text-muted-foreground">
+                未配置令牌
+              </span>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div class="space-y-1">
+                <Label class="text-xs text-muted-foreground">隧道端点 (wss://)</Label>
+                <Input v-model="tunnelUrlInput" placeholder="wss://gate.ponyjob.top/ws" class="font-mono text-xs" />
+              </div>
+              <div class="space-y-1">
+                <Label class="text-xs text-muted-foreground">隧道令牌 (留空沿用已保存)</Label>
+                <Input
+                  v-model="tunnelTokenInput"
+                  type="password"
+                  placeholder="粘贴隧道令牌"
+                  class="font-mono text-xs"
+                />
+              </div>
+            </div>
+            <div class="flex justify-end gap-2 pt-1">
+              <Button
+                variant="outline"
+                size="sm"
+                class="text-xs h-8 cursor-pointer"
+                :disabled="tunnelSaving"
+                @click="clearTunnelTokenAction"
+              >
+                清除令牌
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                class="text-xs h-8 cursor-pointer"
+                :disabled="tunnelSaving"
+                @click="saveTunnel"
+              >
+                <RefreshCw v-if="tunnelSaving" class="h-3 w-3 mr-1 animate-spin" />
+                {{ tunnelSaving ? '保存中…' : '保存隧道配置' }}
+              </Button>
+            </div>
+          </div>
+
+          <div class="flex justify-end pt-1">
+            <Button @click="saveModeConfig" :disabled="isSaving" class="text-xs h-9 font-medium px-4 cursor-pointer">
+              <RefreshCw v-if="isSaving" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              {{ isSaving ? '保存中…' : '保存出网配置' }}
+            </Button>
+          </div>
         </div>
 
-        <div v-if="currentMode === 'chained'" class="grid grid-cols-2 gap-3 pt-2">
-          <div class="col-span-2 space-y-1">
-            <Label class="text-xs">代理服务器地址 (IP 或域名 : 端口)</Label>
-            <Input v-model="remoteHost" placeholder="例如 192.168.1.100:8899" class="text-sm" />
+        <!-- 方案 B：远端代理详细配置 -->
+        <div v-if="currentMode === 'chained'" class="space-y-3.5 pt-1">
+          <!-- 口令一键导入 -->
+          <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-2">
+            <div class="text-xs font-semibold flex items-center gap-1.5">
+              <Share2 class="h-3.5 w-3.5 text-blue-600" />
+              口令一键导入 (多端同步)
+            </div>
+            <div class="flex gap-2">
+              <Input
+                v-model="importSyncUri"
+                placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
+                class="text-xs font-mono"
+                @keyup.enter="doImportSync"
+              />
+              <Button @click="doImportSync" class="text-xs h-9 shrink-0 cursor-pointer">一键导入</Button>
+            </div>
+            <p class="text-[11px] text-muted-foreground">
+              由 Linux Server 执行 <code>pproxy user add</code> 或 <code>pproxy sync export</code> 导出
+            </p>
           </div>
-          <div class="space-y-1">
-            <Label class="text-xs">用户名</Label>
-            <Input v-model="remoteUser" placeholder="用户名" class="text-sm" />
-          </div>
-          <div class="space-y-1">
-            <Label class="text-xs">密码</Label>
-            <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" />
-          </div>
-        </div>
 
-        <div class="pt-2 flex justify-end">
-          <Button @click="saveModeConfig" :disabled="isSaving" class="text-xs h-9">
-            <RefreshCw v-if="isSaving" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
-            {{ isSaving ? '保存中...' : '保存配置' }}
-          </Button>
+          <!-- 手动参数配置 -->
+          <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-3">
+            <div class="text-xs font-semibold">手动配置服务器参数</div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div class="sm:col-span-3 space-y-1">
+                <Label class="text-xs text-muted-foreground">服务器地址 (IP 或域名 : 端口)</Label>
+                <Input v-model="remoteHost" placeholder="例如 192.168.1.100:8899" class="text-xs font-mono" />
+              </div>
+              <div class="space-y-1">
+                <Label class="text-xs text-muted-foreground">用户名</Label>
+                <Input v-model="remoteUser" placeholder="用户名" class="text-xs" />
+              </div>
+              <div class="sm:col-span-2 space-y-1">
+                <Label class="text-xs text-muted-foreground">密码</Label>
+                <Input v-model="remotePass" type="password" placeholder="密码" class="text-xs" />
+              </div>
+            </div>
+          </div>
+
+          <div class="flex justify-end pt-1">
+            <Button @click="saveModeConfig" :disabled="isSaving" class="text-xs h-9 font-medium px-4 cursor-pointer">
+              <RefreshCw v-if="isSaving" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              {{ isSaving ? '保存中…' : '保存并连接' }}
+            </Button>
+          </div>
         </div>
       </CardContent>
     </Card>
@@ -378,14 +488,14 @@ async function triggerRescue() {
         <div class="flex items-center justify-between">
           <CardTitle class="text-base flex items-center gap-2">
             <ShieldCheck class="h-4 w-4 text-emerald-600" />
-            自定义加速域名名单（白名单）
+            智能分流加速名单
           </CardTitle>
-          <span class="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground font-mono">
+          <span class="rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground font-mono">
             {{ whitelistEntries.length }} 个自定义
           </span>
         </div>
         <CardDescription>
-          智能分流模式下生效。添加主域名（如 google.com）将自动覆盖全部子域名与地区域名；常用海外站点已默认内置。
+          智能分流模式下生效。添加主域名（如 huggingface.co）将自动覆盖全部子域名；常用海外站点已默认内置。
         </CardDescription>
       </CardHeader>
       <CardContent class="space-y-3">
@@ -398,7 +508,7 @@ async function triggerRescue() {
           />
           <Button
             size="sm"
-            class="text-xs h-9 shrink-0"
+            class="text-xs h-9 shrink-0 cursor-pointer"
             :disabled="!newWhitelistEntry.trim() || isAddingDomain"
             @click="addWhitelistEntry()"
           >
@@ -411,94 +521,87 @@ async function triggerRescue() {
           <span
             v-for="(e, i) in whitelistEntries"
             :key="e"
-            class="inline-flex items-center gap-1.5 rounded-full bg-muted/80 px-2.5 py-1 text-xs text-foreground/80 border border-border/50 shadow-xs font-mono"
+            class="inline-flex items-center gap-1.5 rounded-full bg-muted/80 hover:bg-muted px-3 py-1 text-xs text-foreground/90 border border-border/50 shadow-xs font-mono transition-colors"
           >
             {{ e }}
             <button
               type="button"
-              class="rounded-full text-muted-foreground hover:text-rose-500 leading-none p-0.5 cursor-pointer ml-0.5 text-sm"
-              title="移除"
+              class="rounded-full text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 leading-none p-0.5 cursor-pointer ml-0.5 transition-colors"
+              title="移除域名"
+              :aria-label="`移除域名 ${e}`"
               @click="removeWhitelistEntry(i)"
             >
               ×
             </button>
           </span>
         </div>
-        <p v-else class="text-xs text-muted-foreground">名单为空，可在上方输入框添加自定义域名</p>
-      </CardContent>
-    </Card>
-
-    <!-- 跨端一键导入与同步 -->
-    <Card class="border-border shadow-sm">
-      <CardHeader class="pb-3">
-        <CardTitle class="text-base flex items-center gap-2">
-          <Share2 class="h-4 w-4 text-blue-600" />
-          多端配置导入
-        </CardTitle>
-        <CardDescription>支持一键粘贴来自手机或 Linux Server 的同步口令</CardDescription>
-      </CardHeader>
-      <CardContent class="space-y-3">
-        <div class="flex gap-2">
-          <Input
-            v-model="importSyncUri"
-            placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
-            class="text-xs font-mono"
-          />
-          <Button @click="doImportSync" class="text-xs h-9 shrink-0">一键导入</Button>
+        <div v-else class="rounded-lg border border-dashed border-border py-4 text-center text-xs text-muted-foreground">
+          暂无自定义域名，可在上方输入框添加
         </div>
       </CardContent>
     </Card>
 
-    <!-- 网络急救箱 -->
-    <Card class="border-amber-500/30 bg-amber-500/5 shadow-sm">
-      <CardHeader class="pb-3">
-        <CardTitle class="text-base flex items-center gap-2 text-amber-700 dark:text-amber-400">
-          <LifeBuoy class="h-4 w-4" />
-          网络急救箱 (Windows 专属)
-        </CardTitle>
-        <CardDescription>
-          如果软件异常退出导致电脑无法上网，或需要彻底恢复系统直连，点击下方按钮即可一键修复。
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <Button
-          variant="outline"
-          @click="triggerRescue"
-          class="border-amber-500/40 text-amber-700 dark:text-amber-400 hover:bg-amber-500/10 text-xs h-9"
-        >
-          <LifeBuoy class="h-3.5 w-3.5 mr-1.5" />
-          一键清除所有代理残留并恢复网络
-        </Button>
-      </CardContent>
-    </Card>
+    <!-- 系统与维护：网络急救箱与软件更新并排 -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <!-- 网络急救箱 -->
+      <Card class="border-amber-500/30 bg-amber-500/[0.03] shadow-sm flex flex-col justify-between">
+        <CardHeader class="pb-2">
+          <CardTitle class="text-sm flex items-center gap-2 text-amber-700 dark:text-amber-400">
+            <LifeBuoy class="h-4 w-4 shrink-0" />
+            网络急救箱 (Windows)
+          </CardTitle>
+          <CardDescription class="text-xs">
+            如果软件异常退出导致电脑无法上网，一键清除所有系统代理残留并恢复直连。
+          </CardDescription>
+        </CardHeader>
+        <CardContent class="pt-2">
+          <Button
+            variant="outline"
+            size="sm"
+            @click="triggerRescue"
+            class="w-full border-amber-500/40 text-amber-700 dark:text-amber-400 hover:bg-amber-500/10 text-xs h-8.5 cursor-pointer"
+          >
+            <LifeBuoy class="h-3.5 w-3.5 mr-1.5" />
+            一键恢复系统网络直连
+          </Button>
+        </CardContent>
+      </Card>
 
-    <!-- 软件更新 -->
-    <Card class="border-border shadow-sm">
-      <CardHeader class="pb-3">
-        <CardTitle class="text-base flex items-center gap-2">
-          <Download class="h-4 w-4 text-emerald-600" />
-          软件更新
-        </CardTitle>
-      </CardHeader>
-      <CardContent class="flex items-center justify-between">
-        <div class="text-xs text-muted-foreground">
-          <span v-if="updateAvailable" class="text-emerald-600 font-medium">发现新版本 {{ updateVersion }}</span>
-          <span v-else>当前已是最新版本</span>
-        </div>
-        <Button
-          v-if="updateAvailable"
-          @click="downloadAndInstall"
-          :disabled="downloading"
-          size="sm"
-          class="text-xs h-8"
-        >
-          {{ downloading ? `下载中 ${downloadProgress}%` : '立即升级' }}
-        </Button>
-        <Button v-else variant="outline" size="sm" @click="checkForUpdate" :disabled="checking" class="text-xs h-8">
-          <RefreshCw v-if="checking" class="h-3 w-3 mr-1 animate-spin" />
-          检查更新
-        </Button>
-      </CardContent>
-    </Card>
+      <!-- 软件更新 -->
+      <Card class="border-border shadow-sm flex flex-col justify-between">
+        <CardHeader class="pb-2">
+          <CardTitle class="text-sm flex items-center gap-2">
+            <Download class="h-4 w-4 text-emerald-600 shrink-0" />
+            软件更新
+          </CardTitle>
+          <CardDescription class="text-xs">
+            <span v-if="updateAvailable" class="text-emerald-600 font-medium">发现新版本 {{ updateVersion }}</span>
+            <span v-else>当前已是最新版本，保持最新以获得最佳体验</span>
+          </CardDescription>
+        </CardHeader>
+        <CardContent class="pt-2 flex justify-end">
+          <Button
+            v-if="updateAvailable"
+            @click="downloadAndInstall"
+            :disabled="downloading"
+            size="sm"
+            class="w-full text-xs h-8.5 cursor-pointer"
+          >
+            {{ downloading ? `下载中 ${downloadProgress}%` : '立即升级' }}
+          </Button>
+          <Button
+            v-else
+            variant="outline"
+            size="sm"
+            @click="checkForUpdate"
+            :disabled="checking"
+            class="w-full text-xs h-8.5 cursor-pointer"
+          >
+            <RefreshCw v-if="checking" class="h-3 w-3 mr-1.5 animate-spin" />
+            {{ checking ? '检查中…' : '检查新版本' }}
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
   </div>
 </template>

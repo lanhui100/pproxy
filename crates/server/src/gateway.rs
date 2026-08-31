@@ -47,8 +47,8 @@ pub struct GatewayState {
     pub edges: Arc<HashMap<String, EdgeClient>>,
     pub routes: Arc<pproxy_core::RouteTable>,
     pub usage: Arc<pproxy_core::UsageTracker>,
-    /// CONNECT 隧道配置（pproxy-connect-tunnel spec §3.4）：None 时 CONNECT 全 403。
-    pub tunnel: Option<Arc<crate::connect::TunnelConfig>>,
+    /// CONNECT 隧道（pproxy-connect-tunnel spec §3.4 + 待命池）：None 时 CONNECT 全 403。
+    pub tunnel: Option<Arc<crate::connect::TunnelPool>>,
 }
 
 /// 组装数据面 Router（main.rs 与测试共用）。
@@ -306,6 +306,9 @@ pub async fn serve_data_plane(listener: TcpListener, state: GatewayState) -> std
     let router = data_router(state.clone());
     loop {
         let (stream, _) = listener.accept().await?;
+        // 入站 socket 禁用 Nagle：小包响应（headers/首 chunk）不再等 40ms+
+        // delayed-ACK 凑包，hyper 手动 serve_connection 不会代为设置。
+        let _ = stream.set_nodelay(true);
         let permit = Arc::clone(&sem).acquire_owned().await;
         let router = router.clone();
         let state = state.clone();

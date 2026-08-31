@@ -53,7 +53,7 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
     println!("│   1. 打开 https://dash.cloudflare.com/profile/api-tokens");
     println!("│   2. 点击「Create Token」→「Create Custom Token」");
     println!("│   3. 权限：");
-    printf("│      - Workers: Edit");
+    println!("│      - Workers: Edit");
     println!("│      - Account: Account Settings (Read)");
     println!("│   4. Account Resources: 选择你的账号");
     println!("│   5. 创建后复制 Token（以 cfat_ 开头）");
@@ -210,11 +210,6 @@ fn prompt_secret(label: &str, default: &str) -> String {
     io::stdin().lock().read_line(&mut input).ok();
     let trimmed = input.trim().to_string();
     if trimmed.is_empty() { default.to_string() } else { trimmed }
-}
-
-fn printf(s: &str) {
-    print!("{}", s);
-    io::stdout().flush().ok();
 }
 
 fn generate_random_hex(len: usize) -> String {

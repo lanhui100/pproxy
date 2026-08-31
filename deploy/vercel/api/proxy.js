@@ -63,14 +63,24 @@ export default async function handler(req, res) {
     if (!RESP_STRIP.has(k)) res.setHeader(k, v);
   });
   res.setHeader("x-proxy-edge", "vercel");
+  // 立即刷出响应头：SSE/流式场景首 token 不等首个 body chunk
+  res.flushHeaders();
 
   const reader = upstream.body.getReader();
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      res.write(Buffer.from(value));
-      await new Promise((r) => setImmediate(r));
+      // 背压感知写入：write 返回 false 时等待 drain；
+      // 与 close 竞速——客户端断连时 drain 永不触发，竞速后退出循环，
+      // 防 serverless 函数挂起持续计费（对抗审核 P2）。
+      if (!res.write(Buffer.from(value))) {
+        const ev = await Promise.race([
+          new Promise((r) => res.once("drain", () => r("drain"))),
+          new Promise((r) => res.once("close", () => r("close"))),
+        ]);
+        if (ev === "close") return;
+      }
     }
   } catch {}
   res.end();

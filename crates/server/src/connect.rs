@@ -15,6 +15,7 @@
 //! 绝不记 token/Authorization。
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
@@ -247,11 +248,139 @@ fn suffix_match(host: &str, entry: &str) -> bool {
 }
 
 /// establish 失败分类（spec §3.3 重试语义）：denied 不重试，网络类重试 1 次。
+#[derive(Debug)]
 enum EstablishError {
     /// worker 明确拒绝（`{"ok":false}`，ACL/token 问题）。
     Denied(String),
-    /// 网络类失败（建连/首帧超时/断开）。
+    /// 网络类失败（建联/首帧超时/断开）。
     Network(String),
+}
+
+/// 待命 WS 会话：已完成 TCP+TLS+WS Upgrade（跨洲 ~4 RTT），尚未发送首帧。
+/// 首帧 `{host,port}` 在 checkout 时才声明目标，协议天然支持预建（两个
+/// gate worker 实现均以首帧为目标声明，upgrade 阶段不携带目标信息）。
+struct IdleSession {
+    tx: WsTx,
+    rx: WsRx,
+    born: tokio::time::Instant,
+}
+
+/// 待命隧道池（性能专项）：CONNECT 到达前预建 WS 会话，establish 从
+/// ~5 RTT（TCP+TLS+Upgrade+首帧，250ms RTT 下 ≈1.25-1.75s，用户感知
+/// 1-2s 的主因）压到 1 RTT（首帧声明 ≈250ms）。
+///
+/// 正确性兜底：待命会话可能已静默死亡（CF 空闲回收/NAT 超时）——checkout
+/// 后 bind 失败按 Network 错误走既有重试路径，第二次尝试全新建连，不会
+/// 比无池化更差。TTL 50s < CF WS 空闲回收窗口，最大限度避免取到死会话。
+pub struct TunnelPool {
+    cfg: TunnelConfig,
+    idle: std::sync::Mutex<Vec<IdleSession>>,
+    notify: tokio::sync::Notify,
+    size: usize,
+}
+
+/// 池化目标待命会话数（每会话约一个 TCP+TLS 连接的内存与文件描述符）。
+const POOL_SIZE: usize = 2;
+/// 待命会话最大存活：CF WS 空闲回收前主动轮换（30s：对抗审核 P1——闲置不
+/// poll 的会话接近 TTL 时大概率已死，缩短 TTL 降低 checkout 到死会话概率）。
+const IDLE_TTL: Duration = Duration::from_secs(30);
+/// 补给巡检间隔。
+const REFILL_INTERVAL: Duration = Duration::from_secs(2);
+/// 建连失败时的退避（避免 gate 不可达时热循环）。
+const REFILL_BACKOFF: Duration = Duration::from_secs(5);
+/// 单次 WS 建连超时（对抗审核 P2：connect_async 无超时，gate 半开时
+/// maintain 会永久卡住、池悄悄停止补给）。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl TunnelPool {
+    /// 生产构造：立即在后台预建并维持 `POOL_SIZE` 条待命会话。
+    /// 生命周期说明：maintain 任务持有 Arc 自引用，随进程常驻（生产单例语义）。
+    pub fn new(cfg: TunnelConfig) -> Arc<Self> {
+        Self::with_size(cfg, POOL_SIZE)
+    }
+
+    /// 指定池大小构造；size=0 时禁池化（checkout 恒 None），仍 spawn 空转
+    /// 补给任务（size=0 时 need=0，无网络活动，仅每 2s 一次空巡检）。
+    pub fn with_size(cfg: TunnelConfig, size: usize) -> Arc<Self> {
+        let pool = Arc::new(Self {
+            cfg,
+            idle: std::sync::Mutex::new(Vec::new()),
+            notify: tokio::sync::Notify::new(),
+            size,
+        });
+        tokio::spawn(Self::maintain(Arc::clone(&pool)));
+        pool
+    }
+
+    /// 禁池化构造（测试用）：checkout 恒 None、无后台任务，行为等同旧路径。
+    #[cfg(test)]
+    pub fn disabled(cfg: TunnelConfig) -> Arc<Self> {
+        Arc::new(Self {
+            cfg,
+            idle: std::sync::Mutex::new(Vec::new()),
+            notify: tokio::sync::Notify::new(),
+            size: 0,
+        })
+    }
+
+    /// 当前待命会话数（测试断言用：避免以 stub accept 计数推断入池时机的竞态）。
+    #[cfg(test)]
+    fn idle_len(&self) -> usize {
+        self.idle.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    pub fn config(&self) -> &TunnelConfig {
+        &self.cfg
+    }
+
+    /// 取一条未过期待命会话；过期会话 drop（即关闭底层连接）。
+    fn checkout(&self) -> Option<(WsTx, WsRx)> {
+        let mut guard = self.idle.lock().unwrap_or_else(|p| p.into_inner());
+        while let Some(s) = guard.pop() {
+            if s.born.elapsed() < IDLE_TTL {
+                drop(guard);
+                // 唤醒补给任务立即回填
+                self.notify.notify_one();
+                return Some((s.tx, s.rx));
+            }
+        }
+        None
+    }
+
+    /// 后台补给：清过期 → 补足到 size → 睡眠/等待唤醒；失败退避。
+    async fn maintain(pool: Arc<Self>) {
+        loop {
+            {
+                let mut guard = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
+                guard.retain(|s| s.born.elapsed() < IDLE_TTL);
+            }
+            let need = pool
+                .size
+                .saturating_sub(pool.idle.lock().unwrap_or_else(|p| p.into_inner()).len());
+            let mut healthy = true;
+            for _ in 0..need {
+                match connect_ws(&pool.cfg).await {
+                    Ok((tx, rx)) => {
+                        pool.idle.lock().unwrap_or_else(|p| p.into_inner()).push(IdleSession {
+                            tx,
+                            rx,
+                            born: tokio::time::Instant::now(),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "tunnel pool refill failed");
+                        healthy = false;
+                        break;
+                    }
+                }
+            }
+            let wait = if healthy { REFILL_INTERVAL } else { REFILL_BACKOFF };
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = pool.notify.notified() => {}
+            }
+        }
+    }
 }
 
 impl fmt::Display for EstablishError {
@@ -287,7 +416,7 @@ pub async fn handle_connect_raw(
             return;
         }
     };
-    let Some(cfg) = state.tunnel.as_ref() else {
+    let Some(pool) = state.tunnel.as_ref() else {
         let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: tunnel_not_configured\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
         return;
     };
@@ -296,17 +425,31 @@ pub async fn handle_connect_raw(
         let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: port_not_allowed\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
         return;
     }
-    if !allowlist_match(&host, &cfg.allowlist) {
+    if !allowlist_match(&host, &pool.config().allowlist) {
         tracing::info!(host = %host, "connect denied: no tunnel route");
         let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: no_tunnel_route\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
         return;
     }
 
     // 先 establish（R4）：写 200 前可重试；denied 不重试；绝不静默回落直连
+    // 池化（性能专项）：第一次尝试优先取待命会话（省 TCP+TLS+Upgrade ~4 RTT），
+    // 待命会话 bind 失败（静默死亡）按 Network 重试，第二次尝试全新建连兜底。
+    let establish_started = tokio::time::Instant::now();
     for attempt in 0..MAX_ATTEMPTS {
-        match establish(cfg, &host, port).await {
+        let pooled_session = if attempt == 0 { pool.checkout() } else { None };
+        let used_pool = pooled_session.is_some();
+        let result = match pooled_session {
+            Some((tx, rx)) => bind_target(tx, rx, &host, port).await,
+            None => establish(pool.config(), &host, port).await,
+        };
+        match result {
             Ok((ws_tx, ws_rx)) => {
-                tracing::info!(host = %host, "tunnel established");
+                tracing::info!(
+                    host = %host,
+                    establish_ms = establish_started.elapsed().as_millis() as u64,
+                    pooled = used_pool,
+                    "tunnel established"
+                );
                 // 写 200 Connection Established（裸 TCP，非 hyper）
                 let _ = stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
                 // 直接双向透传（不经过 hyper upgrade）
@@ -315,7 +458,7 @@ pub async fn handle_connect_raw(
             }
             Err(e) => {
                 let retryable = matches!(e, EstablishError::Network(_));
-                tracing::warn!(host = %host, attempt, error = %e, "tunnel establish failed");
+                tracing::warn!(host = %host, attempt, pooled = used_pool, error = %e, "tunnel establish failed");
                 if !retryable || attempt + 1 >= MAX_ATTEMPTS {
                     break;
                 }
@@ -352,6 +495,13 @@ fn split_host_port(authority: &str) -> Option<(String, u16)> {
 /// 建连（写 200 之前，可重试窗口）：WS Upgrade（Bearer token）→ Text 首帧
 /// `{host,port}` → 等 `{"ok":true}`。行为沿桌面端：10s 首帧超时、应答 Ping/Pong。
 async fn establish(cfg: &TunnelConfig, host: &str, port: u16) -> Result<(WsTx, WsRx), EstablishError> {
+    let (tx, rx) = connect_ws(cfg).await?;
+    bind_target(tx, rx, host, port).await
+}
+
+/// 仅完成 TCP+TLS+WS Upgrade（池化预建阶段）：此时尚未声明目标，
+/// 会话可驻留待命池，checkout 时由 [`bind_target`] 首帧声明目标。
+async fn connect_ws(cfg: &TunnelConfig) -> Result<(WsTx, WsRx), EstablishError> {
     let mut req = cfg
         .gate_url
         .clone()
@@ -362,11 +512,16 @@ async fn establish(cfg: &TunnelConfig, host: &str, port: u16) -> Result<(WsTx, W
         WsHeaderValue::from_str(&format!("Bearer {}", cfg.token))
             .map_err(|e| EstablishError::Network(format!("bad token header: {e}")))?,
     );
-    let (ws, _resp) = connect_async(req)
+    let (ws, _resp) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(req))
         .await
+        .map_err(|_| EstablishError::Network("ws connect timeout".into()))?
         .map_err(|e| EstablishError::Network(e.to_string()))?;
-    let (mut tx, mut rx) = ws.split();
+    Ok(ws.split())
+}
 
+/// 在已建立的 WS 上声明目标（Text 首帧 `{host,port}` → 等 `{"ok":true}`）。
+/// 池化会话与新建会话共用此绑定步骤。
+async fn bind_target(mut tx: WsTx, mut rx: WsRx, host: &str, port: u16) -> Result<(WsTx, WsRx), EstablishError> {
     let first = serde_json::json!({ "host": host, "port": port }).to_string();
     tx.send(Message::Text(first))
         .await
@@ -623,7 +778,9 @@ mod tests {
         };
 
         let c = TunnelConfig::from_pool_config_and_env(&pool_cfg).unwrap();
-        assert_eq!(c.gate_url, "wss://edge.ponyjob.top/ws");
+        // edge.ponyjob.top 按 derive_gate_url_from_worker 规则重定向到 WS gate 端点
+        // （HTTP 网关不是 WS gate，见 derive_gate_url_handles_schemes_and_paths）
+        assert_eq!(c.gate_url, "wss://gate.ponyjob.top/ws");
         assert_eq!(c.token, "sec-secret-123");
         assert!(allowlist_match("oauth2.googleapis.com", &c.allowlist));
         assert!(allowlist_match("api.openai.com", &c.allowlist));
@@ -735,7 +892,7 @@ mod tests {
             edges: Arc::new(std::collections::HashMap::new()),
             routes: Arc::new(pproxy_core::RouteTable::new(store.clone(), Arc::new(std::collections::HashMap::new())).unwrap()),
             usage: Arc::new(UsageTracker::new(store)),
-            tunnel: tunnel.map(Arc::new),
+            tunnel: tunnel.map(TunnelPool::disabled),
         }
     }
 
@@ -903,5 +1060,104 @@ mod tests {
         let (status, _, body) = read_response(&mut c).await;
         assert_eq!(status, 200);
         assert!(body.contains("service"), "info 端点应正常服务, body: {body}");
+    }
+
+    // ---- 待命隧道池（性能专项）----
+
+    /// 池化必须在无任何 CONNECT 请求时预建 WS 会话（预热带宽）。
+    #[tokio::test]
+    async fn tunnel_pool_preconnects_without_traffic() {
+        let stub = spawn_stub_worker(&[]).await;
+        let cfg = TunnelConfig {
+            gate_url: stub.url.clone(),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let _pool = TunnelPool::new(cfg);
+        // 后台补给任务应在数秒内建立至少 1 条待命会话
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while stub.conns.load(Ordering::SeqCst) < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池化未在 5s 内预建会话");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// 池化路径端到端：CONNECT 复用待命会话成功 establish 并回 200。
+    #[tokio::test]
+    async fn connect_over_pooled_tunnel_succeeds() {
+        let stub = spawn_stub_worker(&[]).await;
+        let cfg = TunnelConfig {
+            gate_url: stub.url.clone(),
+            token: "tok-pooled".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let mut state = gw_state(None, "pooled");
+        let pool = TunnelPool::new(cfg);
+        // 等待待命会话就绪（否则第一次 CONNECT 走全新建连，无法验证池路径）；
+        // 用 idle_len 判定入池，避免 accept/upgrade 计数窗口竞态
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_len() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池化未预建会话");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        state.tunnel = Some(pool);
+        let addr = start_gateway(state).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT oauth2.googleapis.com:443 HTTP/1.1\r\n\r\n").await.unwrap();
+        let (status, _, _) = read_response(&mut c).await;
+        assert_eq!(status, 200, "池化隧道 establish 成功后才回 200");
+        assert_eq!(
+            stub.auth_captured.lock().unwrap().as_deref(),
+            Some("Bearer tok-pooled"),
+            "池化会话 upgrade 必须携带 Bearer token"
+        );
+    }
+
+    /// 死会话兜底：待命会话被 gate 侧关闭后，checkout bind 失败必须
+    /// 按 Network 重试全新建连，最终仍回 200（不得比无池化更差）。
+    #[tokio::test]
+    async fn dead_pooled_session_falls_back_to_fresh_establish() {
+        // stub 行为：接受 WS 后立即关闭（模拟 CF 空闲回收的死会话）
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let conns2 = Arc::clone(&conns);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { return };
+                conns2.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let callback = |_req: &tokio_tungstenite::tungstenite::http::Request<()>,
+                                    resp: tokio_tungstenite::tungstenite::http::Response<()>| {
+                        Ok(resp)
+                    };
+                    // 第一次连接：upgrade 成功后立即关闭（死会话进池）
+                    if let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                        let _ = ws.close(None).await;
+                    }
+                });
+            }
+        });
+        let cfg = TunnelConfig {
+            gate_url: format!("ws://{addr}/ws"),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let pool = TunnelPool::new(cfg);
+        // 以 idle_len 判定「已入池」（对抗审核 P2：stub accept 计数与客户端
+        // upgrade 完成/入池之间有窗口，用 accept 计数推断入池会竞态 flake）
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_len() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池化未预建会话");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(conns.load(Ordering::SeqCst) >= 1, "stub 应已收到预建连接");
+        // checkout 到死会话后 bind_target 必失败（Network 类）
+        let (tx, rx) = pool.checkout().expect("池中应有待命会话");
+        let err = bind_target(tx, rx, "oauth2.googleapis.com", 443).await;
+        assert!(
+            matches!(err, Err(EstablishError::Network(_))),
+            "死会话 bind 必须归类 Network 以触发重试兜底, got {err:?}"
+        );
     }
 }

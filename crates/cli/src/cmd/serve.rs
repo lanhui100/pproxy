@@ -3,7 +3,6 @@
 //! 具备端口级跨进程排他文件锁、端口自检、优雅退出与局域网网络提示。
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,8 +44,25 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
         let _ = std::fs::create_dir_all(dir);
     }
 
-    let lock_file = File::create(&lock_path)
-        .map_err(|e| format!("无法创建锁文件 {}: {e}", lock_path.display()))?;
+    let open_res = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path);
+
+    let lock_file = match open_res {
+        Ok(f) => f,
+        Err(e) => {
+            // Windows 下若已有进程以独占模式打开，open 可能直接返回 Sharing Violation
+            eprintln!("\n┌─ [ERROR] 端口 {port} 服务启动冲突 ──────────────────────────");
+            eprintln!("│ 无法访问实例锁文件 ({e})：已有 pproxy 实例正在监听端口 {port}。");
+            eprintln!("│ ");
+            eprintln!("│ 👉 若需停止后台守护进程，请运行: pproxy stop");
+            eprintln!("│ 👉 若需启动另一前台实例，请指定新端口: pproxy serve --listen 127.0.0.1:{}", port + 1);
+            eprintln!("└─────────────────────────────────────────────────────────────\n");
+            return Ok(EXIT_FAILURE);
+        }
+    };
 
     if lock_file.try_lock_exclusive().is_err() {
         eprintln!("\n┌─ [ERROR] 端口 {port} 服务启动冲突 ──────────────────────────");
@@ -58,9 +74,11 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
         return Ok(EXIT_FAILURE);
     }
 
-    // 记录当前 PID 到锁文件
+    // 成功获取锁后，安全截断并记录当前 PID 与监听地址
     let mut file = lock_file;
+    let _ = file.set_len(0);
     let _ = writeln!(file, "pid={}\naddr={addr}", std::process::id());
+    let _ = file.flush();
 
     // 2. 异步运行时启动
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -151,4 +169,44 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
 
         Ok(EXIT_OK)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lock_path_format() {
+        let path = get_lock_path_for_port(9999);
+        assert!(path.to_string_lossy().ends_with("pproxy_9999.lock"));
+    }
+
+    #[test]
+    fn test_file_lock_mutual_exclusion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("test_serve.lock");
+
+        let file1 = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&lock_path)
+            .unwrap();
+
+        assert!(file1.try_lock_exclusive().is_ok());
+
+        let file2 = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&lock_path)
+            .unwrap();
+
+        // 另一个句柄尝试获取排他锁应该失败
+        assert!(file2.try_lock_exclusive().is_err());
+
+        // 释放锁 1 后，锁 2 可以获取
+        drop(file1);
+        assert!(file2.try_lock_exclusive().is_ok());
+    }
 }

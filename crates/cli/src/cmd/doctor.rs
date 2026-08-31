@@ -161,12 +161,10 @@ pub(crate) enum TunnelProbeResult {
 /// 不依赖 token/env，零机密（spec §3.7）。
 fn tunnel_probe(data_plane: &Option<String>, host: &str) -> TunnelProbeResult {
     let addr = match data_plane {
-        Some(dp) => {
-            // 从 http://host:port 提取 host:port
-            let rest = dp.trim_start_matches("http://").trim_start_matches("https://");
-            let host_port = rest.split('/').next().unwrap_or(rest);
-            host_port.to_string()
-        }
+        Some(dp) => match normalize_host_port(dp) {
+            Some(a) => a,
+            None => return TunnelProbeResult::Skip("数据面地址格式无效"),
+        },
         None => return TunnelProbeResult::Skip("数据面地址不可推导"),
     };
 
@@ -268,6 +266,36 @@ pub(crate) fn classify_probe_result(
 
 fn print_summary(passed: u32, failed: u32, skipped: u32) {
     println!("{passed} passed, {failed} failed, {skipped} skipped");
+}
+
+/// 提取并补齐合法的 host:port 供 SocketAddr / ToSocketAddrs 解析。纯函数可测。
+pub(crate) fn normalize_host_port(url_or_addr: &str) -> Option<String> {
+    let s = url_or_addr.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(rest) = s.strip_prefix("https://") {
+        let host_port = rest.split('/').next()?;
+        if host_port.contains(':') {
+            Some(host_port.to_string())
+        } else {
+            Some(format!("{host_port}:443"))
+        }
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        let host_port = rest.split('/').next()?;
+        if host_port.contains(':') {
+            Some(host_port.to_string())
+        } else {
+            Some(format!("{host_port}:8899"))
+        }
+    } else {
+        let host_port = s.split('/').next()?;
+        if host_port.contains(':') {
+            Some(host_port.to_string())
+        } else {
+            Some(format!("{host_port}:8899"))
+        }
+    }
 }
 
 /// 管理面 base URL → 数据面 base 推导兜底（config.data_plane 缺失时）。
@@ -553,5 +581,16 @@ mod tests {
     #[test]
     fn data_plane_hint_403_stays_generic() {
         assert_eq!(data_plane_hint(403, "pony_admin_x", "pony_admin_x"), " (token rejected?)");
+    }
+
+    #[test]
+    fn test_normalize_host_port() {
+        assert_eq!(normalize_host_port("https://gate.ponyjob.top"), Some("gate.ponyjob.top:443".to_string()));
+        assert_eq!(normalize_host_port("https://gate.ponyjob.top:8443"), Some("gate.ponyjob.top:8443".to_string()));
+        assert_eq!(normalize_host_port("http://127.0.0.1"), Some("127.0.0.1:8899".to_string()));
+        assert_eq!(normalize_host_port("http://127.0.0.1:9000"), Some("127.0.0.1:9000".to_string()));
+        assert_eq!(normalize_host_port("192.168.1.100"), Some("192.168.1.100:8899".to_string()));
+        assert_eq!(normalize_host_port("192.168.1.100:8080"), Some("192.168.1.100:8080".to_string()));
+        assert_eq!(normalize_host_port(""), None);
     }
 }

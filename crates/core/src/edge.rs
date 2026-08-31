@@ -58,6 +58,25 @@ impl EdgeClient {
         out
     }
 
+    /// 连接池保活 ping（性能专项，PPROXY_EDGE_KEEPALIVE 开启时由装配点周期调用）。
+    ///
+    /// 两个正确性要点（对抗审核 P0）：
+    /// 1. 必须读尽响应 body——否则 reqwest 不把连接归还池，预热完全无效；
+    /// 2. 不走 `execute`——避免误触发幂等重试/120s 超时逻辑，也不带 url 参数
+    ///    （CF worker 返回 404 伪装页、Vercel 返回 400，均可在握手层完成预热）。
+    pub async fn keepalive_ping(&self) -> anyhow::Result<()> {
+        let resp = self
+            .http
+            .get(&self.worker_url)
+            .header("X-Proxy-Secret", &self.secret)
+            .send()
+            .await
+            .context("edge keepalive ping failed")?;
+        // 读尽 body，连接才归还池
+        let _ = resp.bytes().await.context("edge keepalive drain failed")?;
+        Ok(())
+    }
+
     pub async fn execute(&self, req: ForwardRequest) -> anyhow::Result<Response> {
         let is_idempotent = matches!(
             req.method,

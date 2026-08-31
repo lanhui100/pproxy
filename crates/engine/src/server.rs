@@ -79,6 +79,9 @@ pub async fn run_engine(
                 continue;
             }
         };
+        // 入站 socket 禁用 Nagle（hyper 手动 serve_connection 不设 nodelay），
+        // 消除小包响应 40ms+ 的 delayed-ACK 等待。
+        let _ = stream.set_nodelay(true);
 
         let permit = match sem.clone().try_acquire_owned() {
             Ok(p) => p,
