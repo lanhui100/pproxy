@@ -19,7 +19,7 @@ use crate::auth::{
     extract_credentials, proxy_auth_required, rate_limited_lockout, split_first_segment,
     unauthorized, AuthContext, AuthSubject,
 };
-use crate::connect::TunnelConfig;
+use crate::connect::TunnelPool;
 use crate::upstream::UpstreamManager;
 
 pub const MAX_BODY_SIZE: usize = 32 * 1024 * 1024;
@@ -32,7 +32,7 @@ pub struct GatewayState {
     pub upstream: Arc<UpstreamManager>,
     pub usage: Arc<UsageTracker>,
     pub gatekeeper: Arc<AuthGatekeeper>,
-    pub tunnel: Option<Arc<TunnelConfig>>,
+    pub tunnel: Option<Arc<TunnelPool>>,
     pub instance_uuid: String,
 }
 

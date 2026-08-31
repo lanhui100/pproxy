@@ -15,7 +15,7 @@ use pproxy_core::token::TokenService;
 use pproxy_core::usage::UsageTracker;
 use pproxy_core::user::UserService;
 use pproxy_core::{EdgeClient, PoolConfig, Store};
-use pproxy_engine::connect::TunnelConfig;
+use pproxy_engine::connect::{TunnelConfig, TunnelPool};
 use pproxy_engine::{
     generate_instance_uuid, run_engine, EngineConfig, GatewayState, UpstreamManager,
 };
@@ -118,6 +118,7 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
             ..Default::default()
         };
         let tunnel_cfg = TunnelConfig::from_pool_config_and_env(&pool_config);
+        let tunnel_pool = tunnel_cfg.map(TunnelPool::new);
 
         let instance_uuid = generate_instance_uuid();
 
@@ -127,7 +128,7 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
             upstream,
             usage,
             gatekeeper,
-            tunnel: tunnel_cfg.map(Arc::new),
+            tunnel: tunnel_pool,
             instance_uuid: instance_uuid.clone(),
         };
 

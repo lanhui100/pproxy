@@ -9,7 +9,7 @@ pub mod server;
 pub mod upstream;
 
 pub use auth::{AuthContext, AuthSubject};
-pub use connect::TunnelConfig;
+pub use connect::{TunnelConfig, TunnelPool};
 pub use gateway::{build_data_router, GatewayState};
 pub use server::{generate_instance_uuid, run_engine, EngineConfig};
 pub use upstream::{RemoteProxyConfig, UpstreamManager, UpstreamMode};

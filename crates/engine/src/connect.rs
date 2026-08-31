@@ -1,7 +1,9 @@
-//! CONNECT 隧道网关（强制 Basic Auth / Token 鉴权 + Gatekeeper 防爆破 + WS 隧道中继）。
+//! CONNECT 隧道网关（强制 Basic Auth / Token 鉴权 + Gatekeeper 防爆破 + WS 隧道中继 + TunnelPool 池化）。
 //!
 //! 修复红队 Blocker-01 隐患：杜绝任何未鉴权的 CONNECT 免密白嫖出口。
 //! 修复红队 3 缺陷：采用单循环 tokio::select! 消除半开死锁，支持 Ping/Pong 保活。
+//! 协议对齐（M6 / gate worker）：WS Upgrade 不绑定目标，通过首帧 Text JSON {"host":..., "port":...}
+//! 声明目标并等待 {"ok": true}，支持待命连接池（TunnelPool）将冷建连延迟压到 1 RTT。
 
 use std::fmt;
 use std::net::IpAddr;
@@ -22,6 +24,11 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::auth::parse_basic_auth;
 
+/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws。
+const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+
+/// 单次 WS 建连超时。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 首帧等待超时。
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// 网络类失败重试：总尝试 2 次。
@@ -63,11 +70,12 @@ impl TunnelConfig {
     pub fn build(gate_url: &str, token: &str, custom_allowlist: Option<&[&str]>) -> Self {
         let mut allowlist = DEFAULT_ALLOWLIST
             .iter()
-            .map(|s| s.to_lowercase())
+            .map(|s| normalize_host(s))
+            .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
         if let Some(custom) = custom_allowlist {
             for item in custom {
-                let s = item.trim().to_lowercase();
+                let s = normalize_host(item);
                 if !s.is_empty() && !allowlist.contains(&s) {
                     allowlist.push(s);
                 }
@@ -87,8 +95,18 @@ impl TunnelConfig {
 
         let url = env_url.or_else(|| {
             pool_config.worker_url.as_ref().map(|w| {
-                let clean = w.trim_start_matches("https://").trim_start_matches("http://").trim_end_matches('/');
-                format!("wss://{clean}/ws")
+                let clean = w
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/');
+                let derived = format!("wss://{clean}/ws");
+                if derived.starts_with("wss://edge.ponyjob.top")
+                    || derived.starts_with("ws://edge.ponyjob.top")
+                {
+                    GATE_WS_URL.to_string()
+                } else {
+                    derived
+                }
             })
         });
         let token = env_token.or_else(|| pool_config.worker_secret.clone());
@@ -100,6 +118,108 @@ impl TunnelConfig {
             Some(Self::build(&u, &t, custom.as_deref()))
         } else {
             None
+        }
+    }
+}
+
+/// 待命 WS 会话。
+struct IdleSession {
+    tx: WsTx,
+    rx: WsRx,
+    born: tokio::time::Instant,
+}
+
+/// 待命隧道池：CONNECT 到达前预建 WS 会话，将冷建连 RTT 从 ~5 RTT 压至 1 RTT。
+pub struct TunnelPool {
+    cfg: TunnelConfig,
+    idle: std::sync::Mutex<Vec<IdleSession>>,
+    notify: tokio::sync::Notify,
+    size: usize,
+}
+
+const POOL_SIZE: usize = 2;
+const IDLE_TTL: Duration = Duration::from_secs(30);
+const REFILL_INTERVAL: Duration = Duration::from_secs(2);
+const REFILL_BACKOFF: Duration = Duration::from_secs(5);
+
+impl TunnelPool {
+    pub fn new(cfg: TunnelConfig) -> Arc<Self> {
+        Self::with_size(cfg, POOL_SIZE)
+    }
+
+    pub fn with_size(cfg: TunnelConfig, size: usize) -> Arc<Self> {
+        let pool = Arc::new(Self {
+            cfg,
+            idle: std::sync::Mutex::new(Vec::new()),
+            notify: tokio::sync::Notify::new(),
+            size,
+        });
+        tokio::spawn(Self::maintain(Arc::clone(&pool)));
+        pool
+    }
+
+    #[cfg(test)]
+    pub fn disabled(cfg: TunnelConfig) -> Arc<Self> {
+        Arc::new(Self {
+            cfg,
+            idle: std::sync::Mutex::new(Vec::new()),
+            notify: tokio::sync::Notify::new(),
+            size: 0,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn idle_len(&self) -> usize {
+        self.idle.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+
+    pub fn config(&self) -> &TunnelConfig {
+        &self.cfg
+    }
+
+    pub fn checkout(&self) -> Option<(WsTx, WsRx)> {
+        let mut guard = self.idle.lock().unwrap_or_else(|p| p.into_inner());
+        while let Some(s) = guard.pop() {
+            if s.born.elapsed() < IDLE_TTL {
+                drop(guard);
+                self.notify.notify_one();
+                return Some((s.tx, s.rx));
+            }
+        }
+        None
+    }
+
+    async fn maintain(pool: Arc<Self>) {
+        loop {
+            {
+                let mut guard = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
+                guard.retain(|s| s.born.elapsed() < IDLE_TTL);
+            }
+            let need = pool
+                .size
+                .saturating_sub(pool.idle.lock().unwrap_or_else(|p| p.into_inner()).len());
+            let mut healthy = true;
+            for _ in 0..need {
+                match connect_ws(&pool.cfg).await {
+                    Ok((tx, rx)) => {
+                        pool.idle.lock().unwrap_or_else(|p| p.into_inner()).push(IdleSession {
+                            tx,
+                            rx,
+                            born: tokio::time::Instant::now(),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "tunnel pool refill failed");
+                        healthy = false;
+                        break;
+                    }
+                }
+            }
+            let wait = if healthy { REFILL_INTERVAL } else { REFILL_BACKOFF };
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = pool.notify.notified() => {}
+            }
         }
     }
 }
@@ -150,13 +270,13 @@ pub fn verify_connect_credentials(
     false
 }
 
-/// 处理裸 CONNECT 隧道请求（带鉴权阻断）。
+/// 处理裸 CONNECT 隧道请求（带鉴权阻断与池化加速）。
 pub async fn handle_connect_raw(
     client_ip: IpAddr,
     head: &str,
     leftover: Vec<u8>,
     mut stream: TcpStream,
-    tunnel_cfg: Option<Arc<TunnelConfig>>,
+    tunnel_pool: Option<Arc<TunnelPool>>,
     users: Option<Arc<UserService>>,
     tokens: Arc<TokenService>,
     gatekeeper: Arc<AuthGatekeeper>,
@@ -204,7 +324,7 @@ pub async fn handle_connect_raw(
         }
     };
 
-    let Some(cfg) = tunnel_cfg.as_ref() else {
+    let Some(pool) = tunnel_pool.as_ref() else {
         let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: tunnel_not_configured\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
         return;
     };
@@ -215,28 +335,37 @@ pub async fn handle_connect_raw(
         return;
     }
 
-    if !allowlist_match(&host, &cfg.allowlist) {
+    if !allowlist_match(&host, &pool.config().allowlist) {
         tracing::info!(host = %host, "connect denied: no tunnel route");
         let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: no_tunnel_route\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
         return;
     }
 
-    // 4. Establish WebSocket Tunnel
+    // 4. Establish WebSocket Tunnel (优先池化 checkout，失败或重试走全新建连)
     for attempt in 0..MAX_ATTEMPTS {
-        match establish(cfg, &host, port).await {
+        let pooled_session = if attempt == 0 { pool.checkout() } else { None };
+        let used_pool = pooled_session.is_some();
+        let result = match pooled_session {
+            Some((tx, rx)) => bind_target(tx, rx, &host, port).await,
+            None => establish(pool.config(), &host, port).await,
+        };
+        match result {
             Ok((ws_tx, ws_rx)) => {
-                tracing::info!(host = %host, "tunnel established successfully");
+                tracing::info!(host = %host, attempt, pooled = used_pool, "tunnel established successfully");
                 let _ = stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
                 relay(stream, leftover, ws_tx, ws_rx).await;
                 return;
             }
             Err(e) => {
                 let retryable = matches!(e, EstablishError::Network(_));
-                tracing::warn!(host = %host, attempt, error = %e, "tunnel establish failed");
+                tracing::warn!(host = %host, attempt, pooled = used_pool, error = %e, "tunnel establish failed");
                 if !retryable || attempt + 1 >= MAX_ATTEMPTS {
                     break;
                 }
-                tokio::time::sleep(RETRY_DELAY).await;
+                // 若本次失败来自待命池死会话，立即降级全新建连，无需等待 400ms 退避
+                if !used_pool {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
             }
         }
     }
@@ -253,9 +382,18 @@ pub fn parse_connect_head(head: &str) -> Option<(String, u16)> {
         return None;
     }
     let target = parts.next()?;
-    let (host, port_str) = target.rsplit_once(':')?;
+    split_host_port(target)
+}
+
+fn split_host_port(authority: &str) -> Option<(String, u16)> {
+    if let Some(stripped) = authority.strip_prefix('[') {
+        let (h, rest) = stripped.split_once(']')?;
+        let port = rest.strip_prefix(':').and_then(|p| p.parse().ok())?;
+        return Some((h.to_string(), port));
+    }
+    let (host, port_str) = authority.rsplit_once(':')?;
     let port = port_str.parse::<u16>().ok()?;
-    let host = host.trim_matches('[').trim_matches(']').to_lowercase();
+    let host = normalize_host(host);
     if host.is_empty() {
         return None;
     }
@@ -263,25 +401,36 @@ pub fn parse_connect_head(head: &str) -> Option<(String, u16)> {
 }
 
 pub fn allowlist_match(host: &str, allowlist: &[String]) -> bool {
-    let host = host.to_lowercase();
-    for rule in allowlist {
-        let rule = rule.to_lowercase();
-        if host == rule {
-            return true;
-        }
-        if host.ends_with(&format!(".{rule}")) {
-            return true;
-        }
+    let h = normalize_host(host);
+    if h.is_empty() {
+        return false;
     }
-    false
+    allowlist.iter().any(|e| suffix_match(&h, &normalize_host(e)))
+}
+
+fn normalize_host(host: &str) -> String {
+    let h = host.trim().to_ascii_lowercase();
+    let h = h.trim_start_matches('*').trim_start_matches('.');
+    let mut h = h.to_string();
+    while h.ends_with('.') {
+        h.pop();
+    }
+    h
+}
+
+fn suffix_match(host: &str, entry: &str) -> bool {
+    if entry.is_empty() || !host.ends_with(entry) {
+        return false;
+    }
+    let rest = &host[..host.len() - entry.len()];
+    rest.is_empty() || rest.ends_with('.')
 }
 
 #[derive(Debug)]
-enum EstablishError {
+pub enum EstablishError {
     Handshake(String),
     Network(String),
-    Protocol(String),
-    Timeout,
+    Denied(String),
 }
 
 impl fmt::Display for EstablishError {
@@ -289,17 +438,15 @@ impl fmt::Display for EstablishError {
         match self {
             Self::Handshake(s) => write!(f, "handshake rejected: {s}"),
             Self::Network(s) => write!(f, "network error: {s}"),
-            Self::Protocol(s) => write!(f, "protocol error: {s}"),
-            Self::Timeout => write!(f, "first frame timed out"),
+            Self::Denied(s) => write!(f, "denied: {s}"),
         }
     }
 }
 
-async fn establish(
-    cfg: &TunnelConfig,
-    host: &str,
-    port: u16,
-) -> Result<(WsTx, WsRx), EstablishError> {
+impl std::error::Error for EstablishError {}
+
+/// 仅完成 TCP+TLS+WS Upgrade（Bearer token 认证，不携带目标 host）。
+pub async fn connect_ws(cfg: &TunnelConfig) -> Result<(WsTx, WsRx), EstablishError> {
     let mut req = cfg
         .gate_url
         .as_str()
@@ -311,38 +458,68 @@ async fn establish(
         WsHeaderValue::from_str(&format!("Bearer {}", cfg.token))
             .map_err(|e| EstablishError::Handshake(e.to_string()))?,
     );
-    req.headers_mut().insert(
-        "x-target-host",
-        WsHeaderValue::from_str(host).map_err(|e| EstablishError::Handshake(e.to_string()))?,
-    );
-    req.headers_mut().insert(
-        "x-target-port",
-        WsHeaderValue::from_str(&port.to_string())
-            .map_err(|e| EstablishError::Handshake(e.to_string()))?,
-    );
 
-    let (ws_stream, _) = connect_async(req)
+    let (ws_stream, _) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(req))
+        .await
+        .map_err(|_| EstablishError::Network("ws connect timeout".into()))?
+        .map_err(|e| EstablishError::Network(e.to_string()))?;
+
+    Ok(ws_stream.split())
+}
+
+/// 在已建立的 WS 会话上声明目标（首帧 Text JSON {"host":..., "port":...} → 等 {"ok":true}）。
+pub async fn bind_target(
+    mut tx: WsTx,
+    mut rx: WsRx,
+    host: &str,
+    port: u16,
+) -> Result<(WsTx, WsRx), EstablishError> {
+    let first = serde_json::json!({ "host": host, "port": port }).to_string();
+    tx.send(Message::Text(first))
         .await
         .map_err(|e| EstablishError::Network(e.to_string()))?;
 
-    let (ws_tx, ws_rx) = ws_stream.split();
+    let deadline = tokio::time::Instant::now() + FIRST_FRAME_TIMEOUT;
+    loop {
+        let msg = tokio::time::timeout_at(deadline, rx.next())
+            .await
+            .map_err(|_| EstablishError::Network("first-frame timeout".into()))?
+            .ok_or_else(|| EstablishError::Network("closed before ok".into()))?
+            .map_err(|e| EstablishError::Network(e.to_string()))?;
 
-    // 等待首帧 `{"type":"connected"}`
-    let mut ws_rx = ws_rx;
-    let first = tokio::time::timeout(FIRST_FRAME_TIMEOUT, ws_rx.next()).await;
-    match first {
-        Ok(Some(Ok(Message::Text(txt)))) => {
-            if txt.contains("\"connected\"") {
-                Ok((ws_tx, ws_rx))
-            } else {
-                Err(EstablishError::Protocol(txt))
+        match msg {
+            Message::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t)
+                    .map_err(|_| EstablishError::Network("bad first-frame json".into()))?;
+                if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
+                    return Ok((tx, rx));
+                }
+                let reason = v
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("denied")
+                    .to_string();
+                return Err(EstablishError::Denied(reason));
             }
+            Message::Ping(p) => {
+                tx.send(Message::Pong(p))
+                    .await
+                    .map_err(|e| EstablishError::Network(e.to_string()))?;
+            }
+            Message::Close(c) => return Err(EstablishError::Network(format!("closed: {c:?}"))),
+            _ => {}
         }
-        Ok(Some(Ok(msg))) => Err(EstablishError::Protocol(format!("unexpected frame: {msg:?}"))),
-        Ok(Some(Err(e))) => Err(EstablishError::Network(e.to_string())),
-        Ok(None) => Err(EstablishError::Network("ws closed immediately".into())),
-        Err(_) => Err(EstablishError::Timeout),
     }
+}
+
+/// 全新建连：connect_ws + bind_target。
+pub async fn establish(
+    cfg: &TunnelConfig,
+    host: &str,
+    port: u16,
+) -> Result<(WsTx, WsRx), EstablishError> {
+    let (tx, rx) = connect_ws(cfg).await?;
+    bind_target(tx, rx, host, port).await
 }
 
 /// 双向中继：单循环 tokio::select! 保证任意一端断开立即整体释放，支持 WebSocket Ping/Pong 保活。
@@ -394,6 +571,93 @@ async fn relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::TcpListener;
+
+    struct StubGate {
+        url: String,
+        auth_captured: Arc<std::sync::Mutex<Option<String>>>,
+        target_captured: Arc<std::sync::Mutex<Option<(String, u64)>>>,
+        conns: Arc<AtomicUsize>,
+    }
+
+    async fn spawn_stub_gate(ok: bool, reason: Option<&str>) -> StubGate {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let auth_captured = Arc::new(std::sync::Mutex::new(None));
+        let target_captured = Arc::new(std::sync::Mutex::new(None));
+        let conns = Arc::new(AtomicUsize::new(0));
+
+        let auth_c = Arc::clone(&auth_captured);
+        let target_c = Arc::clone(&target_captured);
+        let conns_c = Arc::clone(&conns);
+        let reason_s = reason.map(str::to_string);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { return };
+                conns_c.fetch_add(1, Ordering::SeqCst);
+                let auth_c = Arc::clone(&auth_c);
+                let target_c = Arc::clone(&target_c);
+                let reason_s = reason_s.clone();
+
+                tokio::spawn(async move {
+                    let callback = |req: &tokio_tungstenite::tungstenite::http::Request<()>,
+                                    resp: tokio_tungstenite::tungstenite::http::Response<()>| {
+                        // 验证 Upgrade 不带 x-target-host / x-target-port
+                        assert!(req.headers().get("x-target-host").is_none());
+                        assert!(req.headers().get("x-target-port").is_none());
+                        let auth = req.headers().get("authorization").map(|v| v.to_str().unwrap().to_string());
+                        *auth_c.lock().unwrap() = auth;
+                        Ok(resp)
+                    };
+
+                    let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await else { return };
+
+                    while let Some(Ok(msg)) = ws.next().await {
+                        match msg {
+                            Message::Text(txt) => {
+                                let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+                                let host = v.get("host").and_then(|h| h.as_str()).unwrap().to_string();
+                                let port = v.get("port").and_then(|p| p.as_u64()).unwrap();
+                                *target_c.lock().unwrap() = Some((host, port));
+
+                                if ok {
+                                    ws.send(Message::Text(serde_json::json!({"ok": true}).to_string())).await.unwrap();
+                                    // 回显二进制
+                                    while let Some(Ok(bin_msg)) = ws.next().await {
+                                        if let Message::Binary(b) = bin_msg {
+                                            let _ = ws.send(Message::Binary(b)).await;
+                                        } else if bin_msg.is_close() {
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    ws.send(Message::Text(serde_json::json!({
+                                        "ok": false,
+                                        "reason": reason_s.as_deref().unwrap_or("denied")
+                                    }).to_string())).await.unwrap();
+                                    let _ = ws.close(None).await;
+                                }
+                                break;
+                            }
+                            Message::Ping(p) => {
+                                let _ = ws.send(Message::Pong(p)).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+            }
+        });
+
+        StubGate {
+            url: format!("ws://{addr}/ws"),
+            auth_captured,
+            target_captured,
+            conns,
+        }
+    }
 
     #[test]
     fn parse_connect_head_valid() {
@@ -416,7 +680,124 @@ mod tests {
         assert!(allowlist_match("openai.com", &allowlist));
         assert!(allowlist_match("api.openai.com", &allowlist));
         assert!(allowlist_match("chat.openai.com", &allowlist));
-        assert!(!allowlist_match("evil-openai.com", &allowlist));
+        assert!(!allowlist_match("notopenai.com", &allowlist));
+        assert!(!allowlist_match("openai.com.evil.cn", &allowlist));
         assert!(!allowlist_match("google.com", &allowlist));
+    }
+
+    #[tokio::test]
+    async fn establish_sends_first_frame_and_expects_ok() {
+        let stub = spawn_stub_gate(true, None).await;
+        let cfg = TunnelConfig {
+            gate_url: stub.url.clone(),
+            token: "secret-tok".into(),
+            allowlist: vec!["openai.com".into()],
+        };
+
+        let result = establish(&cfg, "api.openai.com", 443).await;
+        assert!(result.is_ok(), "establish should succeed on ok:true response: {result:?}");
+
+        assert_eq!(
+            stub.auth_captured.lock().unwrap().as_deref(),
+            Some("Bearer secret-tok"),
+            "Upgrade request must contain Bearer authorization"
+        );
+        assert_eq!(
+            stub.target_captured.lock().unwrap().clone(),
+            Some(("api.openai.com".to_string(), 443)),
+            "First frame text JSON must declare host and port"
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_handles_denied_reason() {
+        let stub = spawn_stub_gate(false, Some("acl denied")).await;
+        let cfg = TunnelConfig {
+            gate_url: stub.url.clone(),
+            token: "secret-tok".into(),
+            allowlist: vec!["openai.com".into()],
+        };
+
+        let result = establish(&cfg, "evil.com", 443).await;
+        match result {
+            Err(EstablishError::Denied(reason)) => {
+                assert_eq!(reason, "acl denied");
+            }
+            other => panic!("expected EstablishError::Denied, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_pool_preconnects_and_binds_target() {
+        let stub = spawn_stub_gate(true, None).await;
+        let cfg = TunnelConfig {
+            gate_url: stub.url.clone(),
+            token: "pool-tok".into(),
+            allowlist: vec!["google.com".into()],
+        };
+        let pool = TunnelPool::new(cfg);
+
+        // 等待待命连接进入池
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_len() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "Pool failed to preconnect in 5s");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(stub.conns.load(Ordering::SeqCst) >= 1);
+        let (tx, rx) = pool.checkout().expect("session should be in pool");
+        let bind_res = bind_target(tx, rx, "api.google.com", 443).await;
+        assert!(bind_res.is_ok());
+
+        assert_eq!(
+            stub.target_captured.lock().unwrap().clone(),
+            Some(("api.google.com".to_string(), 443))
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_pooled_session_falls_back_to_fresh_establish() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let conns = Arc::new(AtomicUsize::new(0));
+        let conns2 = Arc::clone(&conns);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { return };
+                conns2.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let callback = |_req: &tokio_tungstenite::tungstenite::http::Request<()>,
+                                    resp: tokio_tungstenite::tungstenite::http::Response<()>| {
+                        Ok(resp)
+                    };
+                    // 第一次连接：upgrade 成功后立即关闭（模拟死会话）
+                    if let Ok(mut ws) = tokio_tungstenite::accept_hdr_async(stream, callback).await {
+                        let _ = ws.close(None).await;
+                    }
+                });
+            }
+        });
+
+        let cfg = TunnelConfig {
+            gate_url: format!("ws://{addr}/ws"),
+            token: "tok".into(),
+            allowlist: vec!["google.com".into()],
+        };
+        let pool = TunnelPool::new(cfg);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_len() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池化未预建会话");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(conns.load(Ordering::SeqCst) >= 1);
+
+        let (tx, rx) = pool.checkout().expect("池中应有待命会话");
+        let err = bind_target(tx, rx, "api.google.com", 443).await;
+        assert!(
+            matches!(err, Err(EstablishError::Network(_))),
+            "死会话 bind 必须归类 Network 错误以触发无缝重试, got {err:?}"
+        );
     }
 }
