@@ -286,8 +286,8 @@ const siteRows = ref<SiteRow[]>([
 
 const IFACE_CHOICE_PREFIX = 'pony-site-iface:'
 
-function siteSeriesKey(host: string, iface: Iface): string {
-  return `site:${host}:${iface}`
+function siteSeriesKey(host: string): string {
+  return `site:${host}`
 }
 
 function loadAllHistories(): void {
@@ -299,18 +299,25 @@ function loadAllHistories(): void {
       const saved = localStorage.getItem(IFACE_CHOICE_PREFIX + row.host)
       if (saved === 'cf' || saved === 'vercel') row.iface = saved
     } catch { /* 忽略 */ }
-    row.history = loadLatencySeries(siteSeriesKey(row.host, row.iface))
+    let hist = loadLatencySeries(siteSeriesKey(row.host))
+    if (!hist.length) {
+      // 兼容迁移按出口存储的旧版时序数据
+      const oldHist = loadLatencySeries(`site:${row.host}:${row.iface}`)
+      if (oldHist.length) {
+        hist = oldHist
+        saveLatencySeries(siteSeriesKey(row.host), hist)
+      }
+    }
+    row.history = hist
   }
 }
 
 function switchSiteIface(row: SiteRow, iface: Iface): void {
   if (row.iface === iface) return
-  saveLatencySeries(siteSeriesKey(row.host, row.iface), row.history)
   row.iface = iface
   try {
     localStorage.setItem(IFACE_CHOICE_PREFIX + row.host, iface)
   } catch { /* 忽略 */ }
-  row.history = loadLatencySeries(siteSeriesKey(row.host, iface))
   void testSiteRow(row)
 }
 
@@ -348,6 +355,7 @@ async function testIfaceRow(row: IfaceRow): Promise<void> {
     saveLatencySeries(`iface:${row.id}`, row.history)
   } catch (e) {
     row.history = appendLatencyPoint(row.history, { ts: Date.now(), ok: false, err: String(e) })
+    saveLatencySeries(`iface:${row.id}`, row.history)
   } finally {
     row.testing = false
   }
@@ -359,9 +367,10 @@ async function testSiteRow(row: SiteRow): Promise<void> {
   try {
     const point = await probeSite(row.host, row.iface)
     row.history = appendLatencyPoint(row.history, point)
-    saveLatencySeries(siteSeriesKey(row.host, row.iface), row.history)
+    saveLatencySeries(siteSeriesKey(row.host), row.history)
   } catch (e) {
     row.history = appendLatencyPoint(row.history, { ts: Date.now(), ok: false, err: String(e) })
+    saveLatencySeries(siteSeriesKey(row.host), row.history)
   } finally {
     row.testing = false
   }
@@ -808,31 +817,15 @@ async function submitImportOrChained() {
 
         <!-- 用量统计：近 7 日双轴图（左轴调用次数·双柱，右轴调用量·双曲线） -->
         <section class="flex-1 min-w-0 space-y-2">
-          <div class="flex items-center justify-between">
-            <h3 class="text-sm font-semibold">
-              用量统计
-              <span class="ml-2 text-xs font-normal text-muted-foreground">
-                今日请求
-                <span class="text-foreground font-medium tabular-nums">{{ todayTotals.requests }}</span>
-                · 累计
-                <span class="text-foreground font-medium tabular-nums">{{ formatBytes(totalBytes) }}</span>
-              </span>
-            </h3>
-            <div class="flex items-center gap-3 text-[11px] text-muted-foreground">
-              <span class="inline-flex items-center gap-1.5">
-                <span class="h-2.5 w-2.5 rounded-sm bg-[#f6821f]"></span>CF 次数
-              </span>
-              <span class="inline-flex items-center gap-1.5">
-                <span class="h-2.5 w-2.5 rounded-sm bg-foreground/80"></span>Vercel 次数
-              </span>
-              <span class="inline-flex items-center gap-1.5">
-                <span class="inline-block h-0.5 w-3.5 rounded-full bg-[#f6821f]"></span>CF 流量
-              </span>
-              <span class="inline-flex items-center gap-1.5">
-                <span class="inline-block h-0.5 w-3.5 rounded-full bg-foreground/80"></span>Vercel 流量
-              </span>
-            </div>
-          </div>
+          <h3 class="text-sm font-semibold">
+            用量统计
+            <span class="ml-2 text-xs font-normal text-muted-foreground">
+              今日请求
+              <span class="text-foreground font-medium tabular-nums">{{ todayTotals.requests }}</span>
+              · 累计
+              <span class="text-foreground font-medium tabular-nums">{{ formatBytes(totalBytes) }}</span>
+            </span>
+          </h3>
 
           <svg
             :viewBox="`0 0 ${usageChart.W} ${usageChart.H}`"
@@ -950,6 +943,20 @@ async function submitImportOrChained() {
             </text>
           </svg>
 
+          <div class="flex items-center justify-end gap-3 text-[11px] text-muted-foreground">
+            <span class="inline-flex items-center gap-1.5">
+              <span class="h-2.5 w-2.5 rounded-sm bg-[#f6821f]"></span>CF 次数
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="h-2.5 w-2.5 rounded-sm bg-foreground/80"></span>Vercel 次数
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="inline-block h-0.5 w-3.5 rounded-full bg-[#f6821f]"></span>CF 流量
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="inline-block h-0.5 w-3.5 rounded-full bg-foreground/80"></span>Vercel 流量
+            </span>
+          </div>
         </section>
       </div>
 
@@ -968,18 +975,16 @@ async function submitImportOrChained() {
           </button>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-8">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-12 lg:gap-x-16">
         <!-- 出网接口行 -->
         <div
           v-for="row in ifaceRows"
           :key="row.id"
           class="flex items-center justify-between gap-3 py-2.5"
         >
-          <div class="flex items-center gap-3 min-w-0">
-            <div class="w-28 shrink-0">
-              <div class="text-sm font-medium leading-none">{{ row.name }}</div>
-              <div class="text-xs text-muted-foreground font-mono mt-1 truncate">{{ row.endpoint }}</div>
-            </div>
+          <div class="flex flex-col min-w-0">
+            <div class="text-sm font-medium leading-none truncate">{{ row.name }}</div>
+            <div class="text-xs text-muted-foreground font-mono mt-1 truncate">{{ row.endpoint }}</div>
           </div>
           <div class="flex items-center gap-3 shrink-0">
             <LatencyBars :history="row.history" />
@@ -1004,42 +1009,42 @@ async function submitImportOrChained() {
           :key="row.host"
           class="flex items-center justify-between gap-3 py-2.5"
         >
-          <div class="flex items-center gap-2 min-w-0">
-            <div class="w-28 shrink-0">
-              <div class="text-sm font-medium leading-none">{{ row.name }}</div>
-              <div class="text-xs text-muted-foreground font-mono mt-1 truncate">{{ row.host }}</div>
-            </div>
-            <!-- 出网接口 switch -->
-            <div
-              class="shrink-0 inline-flex items-center rounded-full bg-muted p-0.5 text-xs"
-              role="group"
-              :aria-label="`${row.name} 测速接口`"
-            >
-              <button
-                @click="switchSiteIface(row, 'cf')"
-                :aria-pressed="row.iface === 'cf'"
-                :class="[
-                  'px-2 py-0.5 rounded-full text-[11px] transition-all duration-150 cursor-pointer',
-                  row.iface === 'cf'
-                    ? 'bg-card text-foreground font-medium shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground',
-                ]"
+          <div class="flex flex-col min-w-0">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="text-sm font-medium leading-none truncate">{{ row.name }}</span>
+              <!-- 出网接口 switch：紧随网站名 -->
+              <div
+                class="shrink-0 inline-flex items-center rounded-full bg-muted p-0.5 text-xs"
+                role="group"
+                :aria-label="`${row.name} 测速接口`"
               >
-                CF
-              </button>
-              <button
-                @click="switchSiteIface(row, 'vercel')"
-                :aria-pressed="row.iface === 'vercel'"
-                :class="[
-                  'px-2 py-0.5 rounded-full text-[11px] transition-all duration-150 cursor-pointer',
-                  row.iface === 'vercel'
-                    ? 'bg-card text-foreground font-medium shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground',
-                ]"
-              >
-                Vercel
-              </button>
+                <button
+                  @click="switchSiteIface(row, 'cf')"
+                  :aria-pressed="row.iface === 'cf'"
+                  :class="[
+                    'px-1.5 py-0.5 rounded-full text-[10px] leading-none transition-all duration-150 cursor-pointer',
+                    row.iface === 'cf'
+                      ? 'bg-card text-foreground font-medium shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                  ]"
+                >
+                  CF
+                </button>
+                <button
+                  @click="switchSiteIface(row, 'vercel')"
+                  :aria-pressed="row.iface === 'vercel'"
+                  :class="[
+                    'px-1.5 py-0.5 rounded-full text-[10px] leading-none transition-all duration-150 cursor-pointer',
+                    row.iface === 'vercel'
+                      ? 'bg-card text-foreground font-medium shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground',
+                  ]"
+                >
+                  Vercel
+                </button>
+              </div>
             </div>
+            <div class="text-xs text-muted-foreground font-mono mt-1 truncate">{{ row.host }}</div>
           </div>
           <div class="flex items-center gap-3 shrink-0">
             <LatencyBars :history="row.history" />
@@ -1059,7 +1064,20 @@ async function submitImportOrChained() {
         </div>
         </div>
 
-        <p class="text-xs text-muted-foreground pt-2">每 10 分钟自动测速，柱条仅保留近 2 小时；绿 ≤ 800ms，黄 ≤ 2000ms，红为超时或失败。</p>
+        <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-2 text-xs text-muted-foreground">
+          <span>每 10 分钟自动测速，柱条仅保留近 2 小时</span>
+          <div class="flex items-center gap-3 text-[11px]">
+            <span class="inline-flex items-center gap-1.5">
+              <span class="h-2 w-2 rounded-full bg-emerald-500"></span>≤ 800ms
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="h-2 w-2 rounded-full bg-amber-500"></span>≤ 2000ms
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="h-2 w-2 rounded-full bg-red-500"></span>超时或失败
+            </span>
+          </div>
+        </div>
       </section>
     </div>
   </div>
