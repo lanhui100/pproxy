@@ -2,6 +2,7 @@
 // relay 模式采用 CF 官方文档规范：sock.readable.pipeTo(WritableStream) +
 // ws message → writer.write（此前手搓 for-await/双闭包模式触发本地 workerd 崩溃）。
 import { connect } from 'cloudflare:sockets'
+import { shouldBlockColo, parseBlockedColos } from './gate-policy.mjs'
 
 const ALLOWED_PORTS = new Set([443]) // 80 明文透传默认禁用（M6 spec R8/F12）
 const MAX_NAME_LEN = 253
@@ -66,6 +67,16 @@ export default {
       if (!validHost(req.host) || !ALLOWED_PORTS.has(port)) {
         server.send(JSON.stringify({ ok: false, reason: 'acl denied' }))
         server.close(1008, 'acl denied')
+        return
+      }
+      // colo 门禁（spec render-gate-egress §3.3）：Google 系 host ∧ colo 黑名单 → 秒拒，
+      // 客户端（桌面端 engine_tunnel）denied fallover 自动落到 Render 美区兜底。
+      // 非 Google host 任何 colo 放行，防全量流量倾泻到兜底出口。
+      const coloReason = shouldBlockColo(request.cf?.colo, req.host, parseBlockedColos(env.BLOCKED_COLOS))
+      if (coloReason) {
+        console.log('[gate] colo blocked', coloReason, req.host)
+        server.send(JSON.stringify({ ok: false, reason: coloReason }))
+        server.close(1008, coloReason)
         return
       }
       try {
