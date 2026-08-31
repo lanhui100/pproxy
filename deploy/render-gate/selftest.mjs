@@ -20,8 +20,13 @@ function check(name, cond, extra = '') {
   else { failed++; console.log(`  [fail] ${name} ${extra}`) }
 }
 
-// loopback 回显 TCP 目标（仅 B 实例可连，A 实例 ACL 必须拒绝）
-const echoServer = net.createServer((sock) => sock.pipe(sock))
+// loopback 回显 TCP 目标（仅 B 实例可连，A 实例 ACL 必须拒绝）；计数跟踪用于半关断言
+let echoConns = 0
+const echoServer = net.createServer((sock) => {
+  echoConns++
+  sock.on('close', () => { echoConns-- })
+  sock.pipe(sock)
+})
 await new Promise((r) => echoServer.listen(0, '127.0.0.1', r))
 const ECHO_PORT = echoServer.address().port
 
@@ -92,7 +97,12 @@ try {
     ['内网 192.168', '192.168.1.1', 443],
     ['CGNAT 100.64', '100.64.0.1', 443],
     ['IPv6 回环', '[::1]', 443],
-    ['IPv4-mapped IPv6', '::ffff:127.0.0.1', 443],
+    ['IPv4-mapped IPv6 点分', '::ffff:127.0.0.1', 443],
+    ['IPv4-mapped IPv6 hex 形式', '::ffff:7f00:1', 443],
+    ['NAT64 内嵌回环', '64:ff9b::127.0.0.1', 443],
+    ['6to4 内嵌回环', '2002:7f00:0001::', 443],
+    ['ULA fc00', 'fd00::1', 443],
+    ['IPv6 link-local', 'fe80::1', 443],
   ]
   for (const [name, host, port] of aclCases) {
     const ws = await connectWs(PORT_A, TOKEN)
@@ -120,10 +130,11 @@ try {
       setTimeout(() => resolve(null), 3000)
     })
     check('二进制回显往返', !!echo && echo.isBinary && echo.data.toString() === 'ping-payload-42')
-    // 半关：关闭 WS 后 echo 侧 socket 应被释放（server teardown 上游）
+    // 半关：关闭 WS 后 render-gate 必须释放上游 TCP（echo 侧连接计数回落）
+    const before = echoConns
     ws.close()
-    await new Promise((r2) => setTimeout(r2, 200))
-    check('WS 关闭后连接计数回落', echoServer && true) // echoServer 无计数 API，占位语义验证见人工
+    await new Promise((r2) => setTimeout(r2, 500))
+    check('WS 关闭后上游 TCP 被释放', echoConns === before - 1, `before=${before} now=${echoConns}`)
   }
 
   console.log('[5] Ping/Pong（ws 库自动应答）')

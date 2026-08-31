@@ -9,15 +9,17 @@
 
 ## 0. 状态与断点
 
-**状态**：阶段 0 — spec 编写与审核
-**Next Action**：T0 双审核 → T1 实现 render-gate + worker colo 门禁 → T2 测试门禁 → T3 用户在 Render 建站 + dev 实测
+**状态**：阶段 2 完成，待阶段 3（用户 Render 建站 + 实测）
+**当前断点**：代码全部入库（`ec17e1a` + 安全回改），selftest 28/28、gate-policy 28/28 全过。
+**Next Action**：T3 —— 用户按 `deploy/render-gate/README.md` 在 Render 建站（Oregon/Free）→ 配置双 gate URL → 执行 §T3 验收三步。
+**Resume Hint**：恢复时读本节 + §4 门禁表；独立代码审核因子代理基础设施故障降级为主会话独立 pass（§8.2 如实标注）。
 
 | 阶段 | 内容 | 状态 |
 |------|------|------|
-| 阶段 0 | spec + 双对抗审核 | 进行中 |
-| 阶段 1 | `deploy/render-gate/` + CF worker colo 门禁 + 单测/自检 | Pending |
-| 阶段 2 | 测试门禁（node 自检 + cargo test）+ 双代码审核 | Pending |
-| 阶段 3 | Render 建站（用户操作）+ 配置接入 + agy 实测 | Pending |
+| 阶段 0 | spec + 双对抗审核（架构 1 路完成；安全 2 路中途失败，降级主会话 pass） | **Done** |
+| 阶段 1 | `deploy/render-gate/` + CF worker colo 门禁 + 单测/自检 | **Done** |
+| 阶段 2 | 测试门禁（selftest 28/28、gate-policy 28/28、cargo 回归）+ 代码审核 | **Done**（降级口径见 §8.2） |
+| 阶段 3 | Render 建站（用户操作）+ 配置接入 + agy 实测 | **Pending（用户操作）** |
 
 ## 1. 背景（取证结论）
 
@@ -154,4 +156,16 @@ agy → CONNECT → pproxy 桌面端
 | P2-4 | Blueprint/免费行为未验证 | **采纳**：T3 前置核实（render.yaml 仅为便利，手动建站路径为主） |
 | P3 | 归账偏差误导、域名可达性入门禁 | **采纳**：§7.2 排障提示 + T3① |
 
-安全 reviewer 两次子代理运行均中途失败，按 dev-team 规则降级：安全维度由主会话独立 pass 兜底并已在 §5 落地（恒定时间比对、失败锁定、SSRF 双重校验、日志零 token）；T2 代码审核阶段将再派一路独立安全 reviewer，若仍失败则在收口记录中如实标注。
+安全 reviewer 两次子代理运行均中途失败，按 dev-team 规则降级：安全维度由主会话独立 pass 兜底并已在 §5 落地（恒定时间比对、失败锁定、SSRF 双重校验、日志零 token）；T2 代码审核阶段再派两路子代理（正确性/安全）仍均中途失败（基础设施故障，非审核结论），最终由主会话独立代码审核 pass 兜底，发现并已修复 4 项（见 §8.2）。**独立对抗审核在本任务实际未达成，如实标注；阶段 3 实测后建议补派一轮 reviewer 复审 `ec17e1a` 及安全回改 diff。**
+
+### 8.2 代码审核（T2，主会话独立 pass，2026-08-31）
+
+| # | 发现 | 级别 | 处置 |
+|---|------|------|------|
+| 1 | `clientIp` 取 XFF 最左值 → 客户端可伪造头绕过锁定/诬陷他人；应取最右（Render 反代追加的真实 IP） | P1 | **已修复** + 注释 |
+| 2 | `authFails` Map 无上限 → 伪造源 IP 旋转可撑爆内存 | P1 | **已修复**（10k 上限，超限整体重置） |
+| 3 | IPv6 私网封禁绕过：`::ffff:7f00:1`（hex 形式 v4-mapped，Node/OS 真实映射到 127.0.0.1）、NAT64 `64:ff9b::/96`、6to4 `2002::/16` 内嵌 IPv4 未拦截 | P0（SSRF 绕过） | **已修复**（三类内嵌地址解析后按 v4 判定）+ 5 条新 selftest 用例 |
+| 4 | selftest "WS 关闭后连接计数回落" 为恒真占位断言（放水） | P1 | **已修复**（echo 连接计数真实断言半关释放） |
+| 5 | 预存失败：`cmd::sync::tests::sync_roundtrip_url_safe_and_replay_protection` 在本机失败（res1 import Err）——本次变更零 Rust 改动；`pony-desktop` 进程持有 `~/.pony/state.db` 致环境冲突，判定预存/环境问题，非本次引入 | P2 | 未修复（非本 spec 范围）；复现条件已记录 |
+
+审核后门禁：selftest 28/28 pass（含 5 条 IPv6 绕过 + 真实半关断言）、gate-policy 28/28 pass、`cargo test --workspace` 除上述预存失败外全绿、worker.js 语法校验通过。

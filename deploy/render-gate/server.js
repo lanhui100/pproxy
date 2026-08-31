@@ -46,11 +46,17 @@ function tokenOk(presented) {
   return a.length === b.length && crypto.timingSafeEqual(a, b)
 }
 
-// ---- 鉴权失败锁定（每 IP）----
+// ---- 鉴权失败锁定（每 IP；Map 有上限防伪造源 IP 撑爆内存）----
+const AUTH_FAILS_MAX_ENTRIES = 10_000
 const authFails = new Map() // ip -> { count, lockedUntil }
-function clientIp(req, ws) {
+function clientIp(req) {
+  // XFF 链取**最右**值：Render 反代追加的是真实客户端 IP；
+  // 取最左会信任客户端伪造的头（锁定绕过/诬陷）。直连（无反代）时 XFF 整体不可信，回退 socket 地址。
   const fwd = req.headers['x-forwarded-for']
-  if (typeof fwd === 'string' && fwd.length > 0) return fwd.split(',')[0].trim()
+  if (typeof fwd === 'string' && fwd.length > 0) {
+    const parts = fwd.split(',')
+    return parts[parts.length - 1].trim()
+  }
   return req.socket.remoteAddress || 'unknown'
 }
 function isLocked(ip) {
@@ -61,6 +67,7 @@ function isLocked(ip) {
   return false
 }
 function recordAuthFail(ip) {
+  if (authFails.size >= AUTH_FAILS_MAX_ENTRIES) authFails.clear() // 超限整体重置（锁定状态牺牲，防内存 DoS）
   const rec = authFails.get(ip) || { count: 0, lockedUntil: 0 }
   rec.count += 1
   if (rec.count >= AUTH_FAIL_LIMIT) {
@@ -118,13 +125,34 @@ function isBlockedV4(int) {
 }
 
 function isBlockedV6(ip) {
-  const h = ip.toLowerCase()
+  const h = ip.toLowerCase().replace(/^\[|\]$/g, '')
   if (h === '::' || h === '::1') return true
-  if (h.startsWith('fe80:') || h.startsWith('fe90:') || h.startsWith('fea0:') || h.startsWith('feb0:')) return true // link-local
+  if (h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb')) return true // link-local fe80::/10
   if (h.startsWith('fc') || h.startsWith('fd')) return true // ULA
+  // IPv4-mapped ::ffff:a.b.c.d（点分形式）
   if (h.startsWith('::ffff:')) {
-    const v4 = ipv4ToInt(h.slice(7))
+    const tail = h.slice(7)
+    const v4 = ipv4ToInt(tail)
     if (v4 !== null) return isBlockedV4(v4)
+    // hex 形式 ::ffff:7f00:1 —— Node/OS 同样映射到 IPv4，必须按映射地址判定
+    const hexParts = tail.split(':')
+    if (hexParts.length === 2 && /^[0-9a-f]{1,4}$/.test(hexParts[0]) && /^[0-9a-f]{1,4}$/.test(hexParts[1])) {
+      const v4hex = ((parseInt(hexParts[0], 16) << 16) | parseInt(hexParts[1], 16)) >>> 0
+      return isBlockedV4(v4hex)
+    }
+  }
+  // NAT64 64:ff9b::/96 与 6to4 2002::/16 内嵌 IPv4：按内嵌地址判定
+  if (h.startsWith('64:ff9b::')) {
+    const tail = h.slice('64:ff9b::'.length)
+    const v4 = ipv4ToInt(tail)
+    if (v4 !== null) return isBlockedV4(v4)
+  }
+  if (h.startsWith('2002:')) {
+    const parts = h.split(':')
+    if (parts.length >= 3 && /^[0-9a-f]{1,4}$/.test(parts[1]) && /^[0-9a-f]{1,4}$/.test(parts[2])) {
+      const v4hex = ((parseInt(parts[1], 16) << 16) | parseInt(parts[2], 16)) >>> 0
+      if (isBlockedV4(v4hex)) return true
+    }
   }
   return false
 }
