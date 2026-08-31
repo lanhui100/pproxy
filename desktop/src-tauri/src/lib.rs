@@ -80,8 +80,9 @@ pub fn run() {
       proxy::sysproxy::cleanup_stale();
       init_watch_from_file();
       let current_mode = load_proxy_mode_from_file();
+      let on = ENGINE_ON.load(AOrd::SeqCst);
       let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
-      let toggle = CheckMenuItem::with_id(app, "proxy_toggle", "系统代理: 已启用", true, ENGINE_ON.load(AOrd::SeqCst), None::<&str>)?;
+      let toggle = CheckMenuItem::with_id(app, "proxy_toggle", if on { "系统代理: 已启用" } else { "系统代理: 已停用" }, true, on, None::<&str>)?;
       let mode_wl = CheckMenuItem::with_id(app, "mode_whitelist", "  白名单模式 (智能分流)", true, current_mode == proxy::pac::ProxyMode::Whitelist, None::<&str>)?;
       let mode_gb = CheckMenuItem::with_id(app, "mode_global", "  全局模式 (全部流量)", true, current_mode == proxy::pac::ProxyMode::Global, None::<&str>)?;
       let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -136,6 +137,23 @@ pub fn run() {
       }
       let handle = app.handle().clone();
       let _ = handle.emit("proxy-ready", serde_json::json!({"ready": true, "mode": match current_mode { proxy::pac::ProxyMode::Whitelist => "whitelist", proxy::pac::ProxyMode::Global => "global" }}));
+      // 启动自启：默认开启智能模式代理 (auto_proxy 缺省为 true)
+      let auto_handle = app.handle().clone();
+      tauri::async_runtime::spawn(async move {
+        let cfg = app_config_get();
+        let auto_proxy = cfg.get("auto_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
+        if auto_proxy {
+          let res = tauri::async_runtime::spawn_blocking({
+            let app = auto_handle.clone();
+            move || proxy_enable_inner(app)
+          }).await;
+          match res {
+            Ok(Ok(())) => log::info!("Auto-enabled proxy on startup in smart mode"),
+            Ok(Err(e)) => log::info!("Auto-enable proxy skipped or pending config: {e}"),
+            Err(e) => log::warn!("Auto-enable task join error: {e}"),
+          }
+        }
+      });
       // 流量统计周期落盘（60s）：进程崩溃最多损失一个周期的计数
       tauri::async_runtime::spawn(async move {
         loop {
@@ -841,10 +859,9 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
     }
 }
 
-/// 按选定出网接口（cf / vercel）拨测指定站点：经对应 gate 隧道完成 WS 升级 +
-/// 首帧 {"host":443} 握手，gate 回 {"ok":true} 即证明目标经该出口可达。
-/// 与引擎同一条建连路径、同一枚隧道令牌——绝不打 HTTP 数据面
-/// （其 PROXY_SECRET 为服务端密钥，桌面端不持有，曾全部误报「出口鉴权失败」）。
+/// 按选定出网接口（cf / vercel）拨测指定站点：
+/// - 方案 A（Direct 独立加速）：经对应 gate 隧道热态长连接测物理往返延迟（RTT）；
+/// - 方案 B（Chained 远端代理）：经 TCP 握手测本地到用户自建服务器的真实物理往返延迟（RTT）。
 #[tauri::command]
 async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::Value, String> {
     let host = host.trim().trim_start_matches("https://").trim_start_matches("http://")
@@ -855,6 +872,56 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
     {
         return Err("非法域名".into());
     }
+
+    let cfg_json = app_config_get();
+    let mode_type = cfg_json.get("mode_type").and_then(|v| v.as_str()).unwrap_or("direct");
+
+    // 方案 B：Chained 远端代理模式
+    if mode_type == "chained" {
+        let raw_host = cfg_json.get("remote_host").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if raw_host.is_empty() {
+            return Err("未配置远端代理服务器地址".into());
+        }
+        let bare = raw_host
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let host_port = if bare.contains(':') { bare.to_string() } else { format!("{bare}:8899") };
+
+        let started = std::time::Instant::now();
+        let dial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        match tokio::time::timeout_at(dial_deadline, tokio::net::TcpStream::connect(&host_port)).await {
+            Ok(Ok(_)) => {
+                let ms = started.elapsed().as_millis() as u64;
+                return Ok(serde_json::json!({
+                    "site": host,
+                    "iface": "chained",
+                    "ok": true,
+                    "ms": ms,
+                }));
+            }
+            Ok(Err(e)) => {
+                return Ok(serde_json::json!({
+                    "site": host,
+                    "iface": "chained",
+                    "ok": false,
+                    "ms": 0,
+                    "error": e.to_string(),
+                }));
+            }
+            Err(_) => {
+                return Ok(serde_json::json!({
+                    "site": host,
+                    "iface": "chained",
+                    "ok": false,
+                    "ms": 0,
+                    "error": "timeout",
+                }));
+            }
+        }
+    }
+
+    // 方案 A：Direct 独立中继隧道模式
     let gate = match iface.as_str() {
         "cf" => GATE_WS_URL,
         // Vercel gate（deploy/vercel-gate-worker，挂载 /api/ws；vgate CNAME → cname.vercel.com）
@@ -1144,11 +1211,54 @@ mod tests {
     }
 
     #[test]
-    fn test_app_config_set_and_get() {
-        let res = app_config_set(serde_json::json!({"auto_proxy": true, "dont_ask": true}));
+    fn test_app_config_and_proxy_mode_defaults() {
+        // 验证 auto_proxy 与 proxy_mode 的缺省逻辑
+        let res = app_config_set(serde_json::json!({"auto_proxy": true, "proxy_mode": "whitelist"}));
         assert!(res.is_ok());
         let got = app_config_get();
         assert_eq!(got["auto_proxy"], true);
+        assert_eq!(load_proxy_mode_from_file(), proxy::pac::ProxyMode::Whitelist);
+
+        // 验证 ProxyMode 解析回退
+        let mode_parsed: proxy::pac::ProxyMode = "unknown".parse().unwrap_or(proxy::pac::ProxyMode::Whitelist);
+        assert_eq!(mode_parsed, proxy::pac::ProxyMode::Whitelist);
+        let mode_global: proxy::pac::ProxyMode = "global".parse().unwrap_or(proxy::pac::ProxyMode::Whitelist);
+        assert_eq!(mode_global, proxy::pac::ProxyMode::Global);
+
+        // 验证 auto_proxy 在未显式设为 false 时默认解析为 true
+        let empty_cfg = serde_json::json!({});
+        let auto_proxy = empty_cfg.get("auto_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
+        assert!(auto_proxy);
+
+        let disabled_cfg = serde_json::json!({"auto_proxy": false});
+        let auto_proxy_disabled = disabled_cfg.get("auto_proxy").and_then(|v| v.as_bool()).unwrap_or(true);
+        assert!(!auto_proxy_disabled);
+    }
+
+    #[tokio::test]
+    async fn test_proxy_test_site_via_chained_mode() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let _ = socket.write_all(b"OK").await;
+            }
+        });
+
+        let _ = app_config_set(serde_json::json!({
+            "mode_type": "chained",
+            "remote_host": addr.to_string(),
+        }));
+
+        let res = proxy_test_site_via("cf".into(), "google.com".into()).await.unwrap();
+        assert_eq!(res["ok"], true);
+        assert_eq!(res["iface"], "chained");
+        assert!(res["ms"].as_u64().is_some());
+
+        // 还原回 direct
+        let _ = app_config_set(serde_json::json!({
+            "mode_type": "direct"
+        }));
     }
 
     #[test]
