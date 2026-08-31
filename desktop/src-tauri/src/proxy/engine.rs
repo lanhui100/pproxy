@@ -74,6 +74,14 @@ pub struct EngineStats {
     pub tunneled: AtomicU64,
     pub direct: AtomicU64,
     pub errors: std::sync::atomic::AtomicU64,
+    /// 隧道出网按出口归账的字节/连接计数：CF gate 与 Vercel gate 分别统计，
+    /// 供「Cloudflare / Vercel 用量」展示；直连与 chained 上游不消耗两家额度，不计入。
+    pub cf_up: AtomicU64,
+    pub cf_down: AtomicU64,
+    pub cf_reqs: AtomicU64,
+    pub vercel_up: AtomicU64,
+    pub vercel_down: AtomicU64,
+    pub vercel_reqs: AtomicU64,
     pub last_error: std::sync::Mutex<Option<String>>,
 }
 
@@ -249,7 +257,7 @@ async fn handle_conn(
             let upstream = cfg.upstream.borrow().clone();
             let result = match upstream {
                 Some(u) => super::engine_upstream::connect_and_relay(stream, parsed, &head, &u).await,
-                None => super::engine_tunnel::connect_and_relay(stream, parsed, &head, cfg).await,
+                None => super::engine_tunnel::connect_and_relay(stream, parsed, &head, cfg, stats).await,
             };
             match result {
                 Ok(()) => Ok(()),

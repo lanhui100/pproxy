@@ -136,6 +136,13 @@ pub fn run() {
       }
       let handle = app.handle().clone();
       let _ = handle.emit("proxy-ready", serde_json::json!({"ready": true, "mode": match current_mode { proxy::pac::ProxyMode::Whitelist => "whitelist", proxy::pac::ProxyMode::Global => "global" }}));
+      // 流量统计周期落盘（60s）：进程崩溃最多损失一个周期的计数
+      tauri::async_runtime::spawn(async move {
+        loop {
+          tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+          traffic_flush();
+        }
+      });
       Ok(())
     })
     .on_window_event(|window, event| {
@@ -162,6 +169,7 @@ pub fn run() {
       proxy_auto_config_get, proxy_auto_config_set, app_config_get, app_config_set,
       proxy_bypass_hosts,
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
+      proxy_traffic_stats, proxy_test_egress, proxy_test_site_via,
       open_external_url,
     ])
     .build(ctx)
@@ -527,6 +535,7 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
         let rx_tunnel = ensure_tunnel_watch().subscribe();
         let rx_upstream = ensure_upstream_watch().subscribe();
         let stats = std::sync::Arc::new(proxy::engine::EngineStats::default());
+        let _ = ENGINE_STATS.set(stats.clone());
         let rx_clone = rx.clone();
         let handle = tauri::async_runtime::spawn(async move {
             let cfg = proxy::engine::EngineConfig {
@@ -576,6 +585,7 @@ fn proxy_disable_inner(app: tauri::AppHandle) -> Result<(), String> {
     }
     *SNAPSHOT.lock().unwrap_or_else(|p| p.into_inner()) = None;
     let _was_on = ENGINE_ON.swap(false, AOrd::SeqCst);
+    traffic_flush();
     sync_tray_and_emit(&app, false);
     Ok(())
 }
@@ -642,6 +652,234 @@ async fn proxy_test_sites() -> Result<Vec<serde_json::Value>, String> {
 
     let results = futures_util::future::join_all(tasks).await;
     Ok(results)
+}
+
+// ---- 流量统计（CF / Vercel 双出口用量）：引擎原子计数 + 周期持久化 ----
+// 口径：按隧道建连实际命中的 gate 端点归账；直连与 chained 上游不消耗两家额度，不计入。
+static ENGINE_STATS: OnceLock<std::sync::Arc<proxy::engine::EngineStats>> = OnceLock::new();
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
+struct EgressBucket {
+    reqs: u64,
+    up: u64,
+    down: u64,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
+struct TrafficPersist {
+    /// 本地日期 YYYY-MM-DD；与今天不一致时：旧「今日」并入 7 日历史后清零（跨天 rollover）
+    date: String,
+    today_cf: EgressBucket,
+    today_vercel: EgressBucket,
+    total_cf: EgressBucket,
+    total_vercel: EgressBucket,
+    /// 已结束的最近若干天（不含今天），最多 6 条；展示时与今日拼成 7 天柱状图
+    history: Vec<DayEntry>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
+struct DayEntry {
+    date: String,
+    cf: EgressBucket,
+    vercel: EgressBucket,
+}
+
+static TRAFFIC_STATE: std::sync::Mutex<Option<TrafficPersist>> = std::sync::Mutex::new(None);
+/// 已并入 TRAFFIC_STATE 的引擎原子读数基线（仅进程内存，绝不持久化——
+/// 重启后引擎原子归零，若把旧基线落盘会把新一轮计数全部吞掉）。
+/// 顺序：(cf_up, cf_down, cf_reqs, vercel_up, vercel_down, vercel_reqs)
+static TRAFFIC_BASE: std::sync::Mutex<Option<(u64, u64, u64, u64, u64, u64)>> = std::sync::Mutex::new(None);
+
+fn traffic_path() -> std::path::PathBuf { data_dir().join("traffic.json") }
+
+fn today_str() -> String { chrono::Local::now().format("%Y-%m-%d").to_string() }
+
+/// 合并引擎原子计数增量，返回当日 + 累计 + 历史快照（不碰磁盘）。
+fn traffic_snapshot() -> TrafficPersist {
+    use std::sync::atomic::Ordering::Relaxed;
+    let cur = match ENGINE_STATS.get() {
+        Some(s) => (
+            s.cf_up.load(Relaxed),
+            s.cf_down.load(Relaxed),
+            s.cf_reqs.load(Relaxed),
+            s.vercel_up.load(Relaxed),
+            s.vercel_down.load(Relaxed),
+            s.vercel_reqs.load(Relaxed),
+        ),
+        None => (0, 0, 0, 0, 0, 0),
+    };
+    let mut guard = TRAFFIC_STATE.lock().unwrap_or_else(|p| p.into_inner());
+    let mut st = guard.take().unwrap_or_else(|| {
+        std::fs::read_to_string(traffic_path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<TrafficPersist>(&s).ok())
+            .unwrap_or_default()
+    });
+    let today = today_str();
+    if st.date != today {
+        // rollover：把旧今日归档（有内容才归档），仅保留最近 6 个已结束天
+        if !st.date.is_empty()
+            && (st.today_cf.reqs > 0 || st.today_cf.up > 0 || st.today_cf.down > 0
+                || st.today_vercel.reqs > 0 || st.today_vercel.up > 0 || st.today_vercel.down > 0)
+        {
+            st.history.push(DayEntry {
+                date: st.date.clone(),
+                cf: st.today_cf.clone(),
+                vercel: st.today_vercel.clone(),
+            });
+            let keep = st.history.len().saturating_sub(6);
+            if keep > 0 {
+                st.history.drain(0..keep);
+            }
+        }
+        st.date = today;
+        st.today_cf = EgressBucket::default();
+        st.today_vercel = EgressBucket::default();
+    }
+    let mut base = TRAFFIC_BASE.lock().unwrap_or_else(|p| p.into_inner());
+    let b = base.unwrap_or(cur);
+    let d = (
+        cur.0.saturating_sub(b.0),
+        cur.1.saturating_sub(b.1),
+        cur.2.saturating_sub(b.2),
+        cur.3.saturating_sub(b.3),
+        cur.4.saturating_sub(b.4),
+        cur.5.saturating_sub(b.5),
+    );
+    if d != (0, 0, 0, 0, 0, 0) {
+        st.today_cf.up += d.0;
+        st.today_cf.down += d.1;
+        st.today_cf.reqs += d.2;
+        st.today_vercel.up += d.3;
+        st.today_vercel.down += d.4;
+        st.today_vercel.reqs += d.5;
+        st.total_cf.up += d.0;
+        st.total_cf.down += d.1;
+        st.total_cf.reqs += d.2;
+        st.total_vercel.up += d.3;
+        st.total_vercel.down += d.4;
+        st.total_vercel.reqs += d.5;
+    }
+    *base = Some(cur);
+    let snap = st.clone();
+    *guard = Some(st);
+    snap
+}
+
+/// 把当前快照落盘（tmp + rename，与 app_config 同一防半截写口径）。
+fn traffic_flush() {
+    let snap = traffic_snapshot();
+    let dir = data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let tmp = dir.join("traffic.json.tmp");
+    if std::fs::write(&tmp, serde_json::to_string(&snap).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, traffic_path());
+    }
+}
+
+fn bucket_json(b: &EgressBucket) -> serde_json::Value {
+    serde_json::json!({ "requests": b.reqs, "bytes_up": b.up, "bytes_down": b.down })
+}
+
+/// CF / Vercel 出网用量：今日 / 累计 / 近 7 日（含今天，按日期升序）。
+#[tauri::command]
+fn proxy_traffic_stats() -> serde_json::Value {
+    let s = traffic_snapshot();
+    let mut history: Vec<serde_json::Value> = s
+        .history
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "date": d.date,
+                "cf": bucket_json(&d.cf),
+                "vercel": bucket_json(&d.vercel),
+            })
+        })
+        .collect();
+    history.push(serde_json::json!({
+        "date": s.date,
+        "cf": bucket_json(&s.today_cf),
+        "vercel": bucket_json(&s.today_vercel),
+    }));
+    serde_json::json!({
+        "today": { "cf": bucket_json(&s.today_cf), "vercel": bucket_json(&s.today_vercel) },
+        "total": { "cf": bucket_json(&s.total_cf), "vercel": bucket_json(&s.total_vercel) },
+        "history": history,
+    })
+}
+
+/// 出网接口联通性拨测：CF 数据面 / Vercel 函数。
+/// ok 口径 = 拿到 HTTP 响应且状态 < 500（4xx 说明边缘可达，仅鉴权/参数缺失）。
+#[tauri::command]
+async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
+    let url = match iface.as_str() {
+        "cf" => "https://edge.ponyjob.top/",
+        "vercel" => "https://vedge.ponyjob.top/api/proxy",
+        _ => return Err("未知接口：仅支持 cf / vercel".into()),
+    };
+    let started = std::time::Instant::now();
+    let client = tauri_plugin_http::reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+    match client.get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            Ok(serde_json::json!({
+                "iface": iface,
+                "ok": status < 500,
+                "ms": started.elapsed().as_millis() as u64,
+                "status": status,
+            }))
+        }
+        Err(e) => Ok(serde_json::json!({
+            "iface": iface,
+            "ok": false,
+            "ms": started.elapsed().as_millis() as u64,
+            "error": if e.is_timeout() { "timeout".to_string() } else { e.to_string() },
+        })),
+    }
+}
+
+/// 按选定出网接口（cf / vercel）拨测指定站点：经对应 gate 隧道完成 WS 升级 +
+/// 首帧 {"host":443} 握手，gate 回 {"ok":true} 即证明目标经该出口可达。
+/// 与引擎同一条建连路径、同一枚隧道令牌——绝不打 HTTP 数据面
+/// （其 PROXY_SECRET 为服务端密钥，桌面端不持有，曾全部误报「出口鉴权失败」）。
+#[tauri::command]
+async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::Value, String> {
+    let host = host.trim().trim_start_matches("https://").trim_start_matches("http://")
+        .trim_end_matches('/').to_lowercase();
+    if host.is_empty()
+        || host.len() > 253
+        || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        return Err("非法域名".into());
+    }
+    let gate = match iface.as_str() {
+        "cf" => GATE_WS_URL,
+        // Vercel gate（deploy/vercel-gate-worker，挂载 /api/ws；vgate CNAME → cname.vercel.com）
+        "vercel" => "wss://vgate.ponyjob.top/api/ws",
+        _ => return Err("未知接口：仅支持 cf / vercel".into()),
+    };
+    let token = cred_get_impl(CREDENTIAL_USER_TUNNEL)
+        .ok()
+        .flatten()
+        .ok_or_else(|| "未配置授权码：请先在「设置」完善方案 A 配置".to_string())?;
+    match proxy::engine_tunnel::probe_via_gate(gate, &token, &host, 443).await {
+        Ok(ms) => Ok(serde_json::json!({
+            "site": host,
+            "iface": iface,
+            "ok": true,
+            "ms": ms,
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "site": host,
+            "iface": iface,
+            "ok": false,
+            "ms": 0,
+            "error": e,
+        })),
+    }
 }
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 #[tauri::command]

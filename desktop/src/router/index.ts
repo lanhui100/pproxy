@@ -5,11 +5,11 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'dashboard', component: () => import('@/views/DashboardView.vue') },
-    { path: '/core', name: 'core', component: () => import('@/views/CoreView.vue') },
     { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
     // 兼容历史路径重定向
-    { path: '/proxy', redirect: '/core' },
-    { path: '/routes', redirect: '/core' },
+    { path: '/core', redirect: '/settings' },
+    { path: '/proxy', redirect: '/settings' },
+    { path: '/routes', redirect: '/settings' },
     { path: '/tokens', redirect: '/settings' },
     { path: '/usage', redirect: '/' },
   ],

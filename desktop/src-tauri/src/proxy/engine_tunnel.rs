@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::engine::{EngineConfig, Kind, ReqHead};
+use super::engine::{EngineConfig, EngineStats, Kind, ReqHead};
 
 fn io(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("tunnel: {e}"))
@@ -94,10 +94,11 @@ async fn try_establish_url(
 }
 
 /// 建连阶段：支持多中继端点自动切换（CF 节点不可达/被拒时无缝回退备用 Vercel/Node 节点）。
+/// 返回成功使用的端点 URL，供流量统计按出口（CF/Vercel）归账。
 async fn establish(
     cfg: &EngineConfig,
     parsed: &ReqHead,
-) -> Result<WsPair, std::io::Error> {
+) -> Result<(WsPair, String), std::io::Error> {
     let (url_raw, token) = {
         let (u, t) = cfg.tunnel.borrow().clone();
         (
@@ -115,7 +116,7 @@ async fn establish(
     let mut last_err = None;
     for u in &urls {
         match try_establish_url(u, &token, parsed).await {
-            Ok(pair) => return Ok(pair),
+            Ok(pair) => return Ok((pair, (*u).to_string())),
             Err(e) => {
                 log::warn!("tunnel establish on {u} for {} failed: {e}", parsed.host);
                 last_err = Some(e);
@@ -126,18 +127,60 @@ async fn establish(
     Err(last_err.unwrap_or_else(|| io("no valid tunnel urls configured")))
 }
 
+/// 出口归账口径：gate 端点域名含 vercel/vgate → Vercel 出口，其余（gate.ponyjob.top 等）→ CF。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Egress {
+    Cf,
+    Vercel,
+}
+
+pub fn classify_egress(url: &str) -> Egress {
+    if url.contains("vercel") || url.contains("vgate") {
+        Egress::Vercel
+    } else {
+        Egress::Cf
+    }
+}
+
+/// 站点拨测（仪表盘「链接状态」）：经指定 gate 端点完成 WS 升级 + 首帧 {"host","port"}，
+/// 等到 {"ok":true} 即证明目标经该出口可达。与引擎同一条建连路径、同一枚隧道令牌，
+/// 绝不经过 HTTP 数据面（其 PROXY_SECRET 为服务端密钥，桌面端不持有）。
+pub async fn probe_via_gate(url: &str, token: &str, host: &str, port: u16) -> Result<u64, String> {
+    let parsed = ReqHead {
+        kind: Kind::Connect,
+        host: host.to_string(),
+        port,
+    };
+    let started = std::time::Instant::now();
+    let (ws_tx, ws_rx) = try_establish_url(url, token, &parsed)
+        .await
+        .map_err(|e| e.to_string())?;
+    let ms = started.elapsed().as_millis() as u64;
+    drop(ws_tx);
+    drop(ws_rx);
+    Ok(ms)
+}
+
 pub async fn connect_and_relay(
     mut client: TcpStream,
     parsed: ReqHead,
     head: &str,
     cfg: &EngineConfig,
+    stats: &EngineStats,
 ) -> std::io::Result<()> {
     // 建连阶段可重试（尚未向客户端写 200，浏览器感知不到）；重试前给
     // gate/edge 一点恢复时间。relay 一旦开始（已写 200）不再重试。
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..RETRY {
         match establish(cfg, &parsed).await {
-            Ok((mut ws_tx, ws_rx)) => {
+            Ok(((mut ws_tx, ws_rx), used_url)) => {
+                // 按实际命中的 gate 端点归账（CF/Vercel 出口分别计数）
+                let egress = classify_egress(&used_url);
+                match egress {
+                    Egress::Cf => &stats.cf_reqs,
+                    Egress::Vercel => &stats.vercel_reqs,
+                }
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // 4) CONNECT → 客户端回 200；absolute-form → 注入重写首行
                 if parsed.kind == Kind::Connect {
                     client
@@ -150,7 +193,7 @@ pub async fn connect_and_relay(
                         .await
                         .map_err(io)?;
                 }
-                return relay(client, ws_tx, ws_rx).await;
+                return relay(client, ws_tx, ws_rx, stats, egress).await;
             }
             Err(e) => {
                 last_err = Some(e);
@@ -177,6 +220,8 @@ async fn relay(
     client: TcpStream,
     mut ws_tx: futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>,
     mut ws_rx: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>,
+    stats: &EngineStats,
+    egress: Egress,
 ) -> std::io::Result<()> {
     let (mut cr, mut cw) = client.into_split();
     let mut buf = [0u8; 8192];
@@ -186,12 +231,24 @@ async fn relay(
             n = cr.read(&mut buf) => {
                 let n = n?;
                 if n == 0 { break; }
+                match egress {
+                    Egress::Cf => &stats.cf_up,
+                    Egress::Vercel => &stats.vercel_up,
+                }
+                .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 ws_tx.send(Message::Binary(buf[..n].to_vec())).await.map_err(io)?;
             }
             // WS（隧道入口） → 客户端
             msg = ws_rx.next() => {
                 match msg {
-                    Some(Ok(Message::Binary(b))) => { cw.write_all(&b).await?; }
+                    Some(Ok(Message::Binary(b))) => {
+                        match egress {
+                            Egress::Cf => &stats.cf_down,
+                            Egress::Vercel => &stats.vercel_down,
+                        }
+                        .fetch_add(b.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                        cw.write_all(&b).await?;
+                    }
                     Some(Ok(Message::Ping(p))) => { ws_tx.send(Message::Pong(p)).await.map_err(io)?; }
                     Some(Ok(Message::Close(_))) => break,
                     Some(Err(e)) => return Err(io(e)),
@@ -292,7 +349,7 @@ mod tests {
         assert!(result.is_ok(), "次端点应接住首端点的拒绝: {result:?}");
 
         // 落在次端点后中继应双向可用：发 PING 收 PING（次端点回显）
-        let (mut ws_tx, mut ws_rx) = result.unwrap();
+        let ((mut ws_tx, mut ws_rx), _used) = result.unwrap();
         ws_tx.send(Message::Binary(b"PING".to_vec())).await.unwrap();
         let reply = tokio::time::timeout(std::time::Duration::from_secs(3), ws_rx.next())
             .await

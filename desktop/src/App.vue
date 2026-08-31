@@ -2,7 +2,7 @@
 import type { Component } from 'vue'
 import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Gauge, Globe, Settings } from '@lucide/vue'
+import { Gauge, Settings } from '@lucide/vue'
 
 import ToastHost from '@/components/common/ToastHost.vue'
 import { checkForUpdate, updateAvailable } from '@/composables/useUpdater'
@@ -22,7 +22,6 @@ interface NavItem {
 
 const nav: NavItem[] = [
   { to: '/', label: '仪表盘', icon: Gauge },
-  { to: '/core', label: '代理与服务', icon: Globe },
   { to: '/settings', label: '设置', icon: Settings, badge: 'update' },
 ]
 

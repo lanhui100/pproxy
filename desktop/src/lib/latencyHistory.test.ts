@@ -1,11 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   appendLatencyPoint,
   formatSlotTooltip,
   getLatencyTone,
+  loadLatencySeries,
   padLatencySlots,
+  saveLatencySeries,
+  WINDOW_MS,
   type LatencyPoint,
 } from './latencyHistory'
+
+// vitest 运行于 node 环境：为持久化用例提供最小内存 localStorage
+const memStore = new Map<string, string>()
+vi.stubGlobal('localStorage', {
+  getItem: (k: string) => memStore.get(k) ?? null,
+  setItem: (k: string, v: string) => void memStore.set(k, v),
+  removeItem: (k: string) => void memStore.delete(k),
+})
 
 describe('getLatencyTone', () => {
   it('正常延迟 <= 800ms 返回 ok (绿)', () => {
@@ -37,6 +48,50 @@ describe('appendLatencyPoint', () => {
     expect(hist.length).toBe(12)
     expect(hist[0]?.ms).toBe(103)
     expect(hist[11]?.ms).toBe(114)
+  })
+
+  it('丢弃 2 小时窗口外的旧点（相对最新采样点）', () => {
+    let hist: LatencyPoint[] = [{ ts: 0, ok: true, ms: 100 }]
+    hist = appendLatencyPoint(hist, { ts: WINDOW_MS + 60_000, ok: true, ms: 200 })
+    expect(hist.length).toBe(1)
+    expect(hist[0]?.ms).toBe(200)
+  })
+
+  it('间隔小于 150 秒的点合并更新而不是新增', () => {
+    let hist: LatencyPoint[] = [{ ts: 1_000_000, ok: true, ms: 100 }]
+    hist = appendLatencyPoint(hist, { ts: 1_000_000 + 60_000, ok: false })
+    expect(hist.length).toBe(1)
+    expect(hist[0]?.ok).toBe(false)
+  })
+})
+
+describe('时序持久化', () => {
+  it('保存后可按 key 读回', () => {
+    const now = Date.now()
+    const hist: LatencyPoint[] = [
+      { ts: now - 600_000, ok: true, ms: 123 },
+      { ts: now, ok: false, err: 'timeout' },
+    ]
+    saveLatencySeries('test-key', hist)
+    const loaded = loadLatencySeries('test-key')
+    expect(loaded.length).toBe(2)
+    expect(loaded[0]?.ms).toBe(123)
+    expect(loaded[1]?.ok).toBe(false)
+  })
+
+  it('读取时丢弃 2 小时窗口外的旧记录', () => {
+    const now = Date.now()
+    saveLatencySeries('test-stale', [
+      { ts: now - WINDOW_MS - 60_000, ok: true, ms: 100 },
+      { ts: now, ok: true, ms: 200 },
+    ])
+    const loaded = loadLatencySeries('test-stale')
+    expect(loaded.length).toBe(1)
+    expect(loaded[0]?.ms).toBe(200)
+  })
+
+  it('未知 key 返回空数组', () => {
+    expect(loadLatencySeries('no-such-key')).toEqual([])
   })
 })
 

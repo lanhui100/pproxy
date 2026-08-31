@@ -32,7 +32,7 @@ const BAR_COLOR: Record<LatencyTone, string> = {
 </script>
 
 <template>
-  <div class="inline-flex items-center gap-0.5" role="group" aria-label="近 1 小时连通性时序">
+  <div class="inline-flex items-center gap-0.5" role="group" aria-label="近 2 小时连通性时序">
     <div
       v-for="(slot, idx) in slots"
       :key="idx"

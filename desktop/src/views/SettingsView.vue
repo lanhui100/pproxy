@@ -4,9 +4,11 @@ import {
   Download,
   ExternalLink,
   LifeBuoy,
+  Plus,
   RefreshCw,
   Server,
   Share2,
+  ShieldCheck,
   Sparkles,
   Zap,
 } from '@lucide/vue'
@@ -31,9 +33,73 @@ import {
   loadTunnelConfig,
   saveTunnelConfig,
 } from '@/lib/config'
-import { openExternalUrl } from '@/lib/urls'
+import { cleanDomainInput, openExternalUrl } from '@/lib/urls'
 
 const toast = useToast()
+
+// ---- 自定义加速域名名单（白名单）----
+const whitelistEntries = ref<string[]>([])
+const newWhitelistEntry = ref('')
+const isAddingDomain = ref(false)
+
+async function refreshWhitelist(): Promise<void> {
+  if (!isTauri()) {
+    if (whitelistEntries.value.length === 0) {
+      whitelistEntries.value = ['openai.com', 'anthropic.com', 'github.com']
+    }
+    return
+  }
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const wl = await invoke<string[]>('proxy_whitelist_get')
+    whitelistEntries.value = wl
+  } catch (e: any) {
+    console.error('Failed to load whitelist:', e)
+  }
+}
+
+async function addWhitelistEntry(domainToAdd?: string): Promise<void> {
+  const raw = domainToAdd || newWhitelistEntry.value
+  const v = cleanDomainInput(raw)
+  if (!v) {
+    toast.error('域名格式不正确', '请输入合法的域名（如 google.com）或网址')
+    return
+  }
+  if (whitelistEntries.value.includes(v)) {
+    if (!domainToAdd) toast.error('域名已在加速名单中', `${v} 已存在`)
+    return
+  }
+  const next = [...whitelistEntries.value, v]
+  isAddingDomain.value = true
+  try {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('proxy_whitelist_set', { entries: next })
+    }
+    whitelistEntries.value = next
+    if (!domainToAdd) newWhitelistEntry.value = ''
+    toast.success(`已添加 ${v}`, '加速名单已实时生效')
+  } catch (e: any) {
+    toast.error('添加失败', typeof e === 'string' ? e : e?.message || String(e))
+  } finally {
+    isAddingDomain.value = false
+  }
+}
+
+async function removeWhitelistEntry(i: number): Promise<void> {
+  const target = whitelistEntries.value[i]
+  const next = whitelistEntries.value.filter((_, idx) => idx !== i)
+  try {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('proxy_whitelist_set', { entries: next })
+    }
+    whitelistEntries.value = next
+    if (target) toast.success(`已移除 ${target}`)
+  } catch (e: any) {
+    toast.error('移除失败', typeof e === 'string' ? e : e?.message || String(e))
+  }
+}
 
 // ---- 隧道中继（方案 A 出网通道：WS 端点 + 令牌；曾因无配置入口导致令牌无法修复）----
 const tunnelUrlInput = ref('')
@@ -92,6 +158,7 @@ const importSyncUri = ref('')
 
 onMounted(async () => {
   void refreshTunnel()
+  void refreshWhitelist()
 
   if (isTauri()) {
     try {
@@ -100,6 +167,11 @@ onMounted(async () => {
       currentMode.value = cfg.mode_type === 'chained' ? 'chained' : 'direct'
       remoteHost.value = cfg.remote_host || ''
       remoteUser.value = cfg.username || ''
+
+      const { listen } = await import('@tauri-apps/api/event')
+      await listen('proxy-whitelist-updated', () => {
+        void refreshWhitelist()
+      })
     } catch {}
   }
 })
@@ -297,6 +369,62 @@ async function triggerRescue() {
             {{ isSaving ? '保存中...' : '保存配置' }}
           </Button>
         </div>
+      </CardContent>
+    </Card>
+
+    <!-- 自定义加速域名名单（白名单） -->
+    <Card class="border-border shadow-sm">
+      <CardHeader class="pb-3">
+        <div class="flex items-center justify-between">
+          <CardTitle class="text-base flex items-center gap-2">
+            <ShieldCheck class="h-4 w-4 text-emerald-600" />
+            自定义加速域名名单（白名单）
+          </CardTitle>
+          <span class="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground font-mono">
+            {{ whitelistEntries.length }} 个自定义
+          </span>
+        </div>
+        <CardDescription>
+          智能分流模式下生效。添加主域名（如 google.com）将自动覆盖全部子域名与地区域名；常用海外站点已默认内置。
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-3">
+        <div class="flex gap-2">
+          <Input
+            v-model="newWhitelistEntry"
+            placeholder="输入需要加速的域名或网址，如 huggingface.co"
+            class="text-xs font-mono"
+            @keyup.enter="addWhitelistEntry()"
+          />
+          <Button
+            size="sm"
+            class="text-xs h-9 shrink-0"
+            :disabled="!newWhitelistEntry.trim() || isAddingDomain"
+            @click="addWhitelistEntry()"
+          >
+            <Plus class="h-3.5 w-3.5 mr-1" />
+            {{ isAddingDomain ? '添加中…' : '添加域名' }}
+          </Button>
+        </div>
+
+        <div v-if="whitelistEntries.length" class="flex flex-wrap gap-1.5 pt-1">
+          <span
+            v-for="(e, i) in whitelistEntries"
+            :key="e"
+            class="inline-flex items-center gap-1.5 rounded-full bg-muted/80 px-2.5 py-1 text-xs text-foreground/80 border border-border/50 shadow-xs font-mono"
+          >
+            {{ e }}
+            <button
+              type="button"
+              class="rounded-full text-muted-foreground hover:text-rose-500 leading-none p-0.5 cursor-pointer ml-0.5 text-sm"
+              title="移除"
+              @click="removeWhitelistEntry(i)"
+            >
+              ×
+            </button>
+          </span>
+        </div>
+        <p v-else class="text-xs text-muted-foreground">名单为空，可在上方输入框添加自定义域名</p>
       </CardContent>
     </Card>
 

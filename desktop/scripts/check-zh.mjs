@@ -18,6 +18,7 @@ const WHITELIST_WORDS = new Set([
   'Hugging', 'Face', 'Twitter', 'Pony', 'Proxy', 'Vercel', 'Worker', 'PowerShell', 'bash', 'cURL', 'SDK', 'Code', 'Cursor', 'NextChat', 'Chatbox', 'Python', 'CF',
   // 技术 token（界面允许保留的）
   'token', 'admin', 'base_url', 'API', 'APIs', 'URL', 'URLs', 'ID', 'id', 'OS', 'HTTP', 'Cloudflare', 'ms', 'YOUR_TOKEN', 'YOUR_API_KEY', 'lt', 'gt',
+  'pproxy', 'user', 'sync', 'export', 'add',
 ])
 
 // 允许纯英文存在的 .ts 文件名片段（技术模块，不直接承载用户文案）
@@ -48,7 +49,7 @@ function templateTextNodes(source) {
 
 const violations = []
 
-for (const name of ['DashboardView.vue', 'CoreView.vue', 'SettingsView.vue']) {
+for (const name of ['DashboardView.vue', 'SettingsView.vue']) {
   const file = join(ROOT, 'views', name)
   let source
   try {

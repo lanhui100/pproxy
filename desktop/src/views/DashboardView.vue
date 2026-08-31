@@ -1,22 +1,26 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   CheckCircle2,
   ExternalLink,
-  LifeBuoy,
   Power,
   RefreshCw,
   Server,
-  ShieldCheck,
   Sparkles,
   Zap,
 } from '@lucide/vue'
+import LatencyBars from '@/components/common/LatencyBars.vue'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useToast } from '@/composables/useToast'
 import { isTauri } from '@/lib/config'
+import {
+  appendLatencyPoint,
+  loadLatencySeries,
+  saveLatencySeries,
+  type LatencyPoint,
+} from '@/lib/latencyHistory'
 import { openExternalUrl } from '@/lib/urls'
 
 const toast = useToast()
@@ -46,22 +50,303 @@ const remoteUser = ref('')
 const remotePass = ref('')
 const isSubmitting = ref(false)
 
-// 常用 AI 服务连通性测试
-const testResults = ref<
-  Array<{ name: string; host: string; status: 'idle' | 'testing' | 'ok' | 'fail'; latency?: number }>
->([
-  { name: 'Google', host: 'google.com', status: 'idle' },
-  { name: 'GitHub', host: 'github.com', status: 'idle' },
-  { name: 'X', host: 'x.com', status: 'idle' },
-  { name: 'OpenAI', host: 'openai.com', status: 'idle' },
-  { name: 'Anthropic', host: 'anthropic.com', status: 'idle' },
+// ---- 用量统计（引擎本地计数：按 gate 端点拆分 CF / Vercel 双出口，含近 7 日历史）----
+interface TrafficBucket {
+  requests: number
+  bytes_up: number
+  bytes_down: number
+}
+interface DayUsage {
+  date: string
+  cf: TrafficBucket
+  vercel: TrafficBucket
+}
+interface TrafficStats {
+  today: { cf: TrafficBucket; vercel: TrafficBucket }
+  total: { cf: TrafficBucket; vercel: TrafficBucket }
+  history: DayUsage[]
+}
+const traffic = ref<TrafficStats | null>(null)
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`
+  return `${(n / 1024 ** 3).toFixed(2)} GB`
+}
+
+function bucketBytes(b: TrafficBucket): number {
+  return b.bytes_up + b.bytes_down
+}
+
+/** 近 7 日柱状图数据：高度相对最大日归一（百分比）；缺勤日期补零保持 7 根柱 */
+const weekBars = computed(() => {
+  const days = traffic.value?.history ?? []
+  const byDate = new Map(days.map((d) => [d.date, d]))
+  const list: { date: string; cf: number; vercel: number }[] = []
+  for (let i = 6; i >= 0; i--) {
+    const date = new Date(Date.now() - i * 24 * 3600 * 1000)
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    const d = byDate.get(key)
+    list.push({
+      date: key,
+      cf: d ? bucketBytes(d.cf) : 0,
+      vercel: d ? bucketBytes(d.vercel) : 0,
+    })
+  }
+  const max = Math.max(1, ...list.map((d) => d.cf + d.vercel))
+  return list.map((d) => ({
+    ...d,
+    label: d.date.slice(5).replace('-', '/'),
+    cfPct: (d.cf / max) * 100,
+    vercelPct: (d.vercel / max) * 100,
+  }))
+})
+
+/** 占比环：今日 CF / Vercel 流量份额；今日为空时回落到累计口径 */
+const shareDonut = computed(() => {
+  if (!traffic.value) return { cfPct: 0, vercelPct: 0, total: 0, source: 'today' as const }
+  const tCf = bucketBytes(traffic.value.today.cf)
+  const tV = bucketBytes(traffic.value.today.vercel)
+  const cf = tCf + tV > 0 ? tCf : bucketBytes(traffic.value.total.cf)
+  const vercel = tCf + tV > 0 ? tV : bucketBytes(traffic.value.total.vercel)
+  const sum = cf + vercel
+  if (sum === 0) return { cfPct: 0, vercelPct: 0, total: 0, source: 'today' as const }
+  return {
+    cfPct: (cf / sum) * 100,
+    vercelPct: (vercel / sum) * 100,
+    total: sum,
+    source: tCf + tV > 0 ? ('today' as const) : ('total' as const),
+  }
+})
+
+const todayTotals = computed(() => {
+  if (!traffic.value) return { bytes: 0, requests: 0 }
+  const t = traffic.value.today
+  return {
+    bytes: bucketBytes(t.cf) + bucketBytes(t.vercel),
+    requests: t.cf.requests + t.vercel.requests,
+  }
+})
+
+const totalBytes = computed(() => {
+  if (!traffic.value) return 0
+  return bucketBytes(traffic.value.total.cf) + bucketBytes(traffic.value.total.vercel)
+})
+
+async function refreshTraffic(): Promise<void> {
+  if (!isTauri()) {
+    const day = 24 * 3600 * 1000
+    const mk = (ago: number, cfB: number, vB: number): DayUsage => ({
+      date: new Date(Date.now() - ago * day).toISOString().slice(0, 10),
+      cf: { requests: Math.round(cfB / 400_000), bytes_up: Math.round(cfB * 0.08), bytes_down: cfB },
+      vercel: { requests: Math.round(vB / 500_000), bytes_up: Math.round(vB * 0.06), bytes_down: vB },
+    })
+    traffic.value = {
+      today: {
+        cf: { requests: 96, bytes_up: 2_400_000, bytes_down: 38_000_000 },
+        vercel: { requests: 32, bytes_up: 800_000, bytes_down: 12_000_000 },
+      },
+      total: {
+        cf: { requests: 3100, bytes_up: 72_000_000, bytes_down: 960_000_000 },
+        vercel: { requests: 1110, bytes_up: 24_000_000, bytes_down: 280_000_000 },
+      },
+      history: [
+        mk(6, 60_000_000, 8_000_000),
+        mk(5, 96_000_000, 20_000_000),
+        mk(4, 40_000_000, 30_000_000),
+        mk(3, 120_000_000, 12_000_000),
+        mk(2, 88_000_000, 44_000_000),
+        mk(1, 140_000_000, 26_000_000),
+        mk(0, 38_000_000, 12_000_000),
+      ],
+    }
+    return
+  }
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    traffic.value = await invoke<TrafficStats>('proxy_traffic_stats')
+  } catch (e) {
+    console.error('Failed to load traffic stats:', e)
+  }
+}
+
+// ---- 链接状态（接口 + 常用站点；10 分钟轮询，仅显示近 2 小时时序）----
+type Iface = 'cf' | 'vercel'
+
+interface IfaceRow {
+  id: Iface
+  name: string
+  endpoint: string
+  history: LatencyPoint[]
+  testing: boolean
+}
+interface SiteRow {
+  name: string
+  host: string
+  iface: Iface
+  history: LatencyPoint[]
+  testing: boolean
+}
+
+const ifaceRows = ref<IfaceRow[]>([
+  { id: 'cf', name: 'Cloudflare 接口', endpoint: 'edge.ponyjob.top', history: [], testing: false },
+  { id: 'vercel', name: 'Vercel 接口', endpoint: 'vedge.ponyjob.top', history: [], testing: false },
 ])
 
-onMounted(async () => {
-  await refreshStatus()
-  if (isRunning.value) {
-    runSiteTests()
+const siteRows = ref<SiteRow[]>([
+  { name: 'Google', host: 'google.com', iface: 'cf', history: [], testing: false },
+  { name: 'GitHub', host: 'github.com', iface: 'cf', history: [], testing: false },
+  { name: 'X', host: 'x.com', iface: 'cf', history: [], testing: false },
+  { name: 'OpenAI', host: 'openai.com', iface: 'vercel', history: [], testing: false },
+  { name: 'Anthropic', host: 'anthropic.com', iface: 'cf', history: [], testing: false },
+])
+
+const IFACE_CHOICE_PREFIX = 'pony-site-iface:'
+
+function siteSeriesKey(host: string, iface: Iface): string {
+  return `site:${host}:${iface}`
+}
+
+function loadAllHistories(): void {
+  for (const row of ifaceRows.value) {
+    row.history = loadLatencySeries(`iface:${row.id}`)
   }
+  for (const row of siteRows.value) {
+    try {
+      const saved = localStorage.getItem(IFACE_CHOICE_PREFIX + row.host)
+      if (saved === 'cf' || saved === 'vercel') row.iface = saved
+    } catch { /* 忽略 */ }
+    row.history = loadLatencySeries(siteSeriesKey(row.host, row.iface))
+  }
+}
+
+function switchSiteIface(row: SiteRow, iface: Iface): void {
+  if (row.iface === iface) return
+  saveLatencySeries(siteSeriesKey(row.host, row.iface), row.history)
+  row.iface = iface
+  try {
+    localStorage.setItem(IFACE_CHOICE_PREFIX + row.host, iface)
+  } catch { /* 忽略 */ }
+  row.history = loadLatencySeries(siteSeriesKey(row.host, iface))
+  void testSiteRow(row)
+}
+
+async function probeEgress(iface: Iface): Promise<LatencyPoint> {
+  if (!isTauri()) {
+    await new Promise((r) => setTimeout(r, 300))
+    const ms = Math.floor(Math.random() * 600) + 120
+    return { ts: Date.now(), ok: true, ms }
+  }
+  const { invoke } = await import('@tauri-apps/api/core')
+  const r = await invoke<{ ok: boolean; ms: number; error?: string }>('proxy_test_egress', { iface })
+  return { ts: Date.now(), ok: r.ok, ms: r.ms, err: r.error }
+}
+
+async function probeSite(host: string, iface: Iface): Promise<LatencyPoint> {
+  if (!isTauri()) {
+    await new Promise((r) => setTimeout(r, 400))
+    const ms = Math.floor(Math.random() * 900) + 150
+    return { ts: Date.now(), ok: true, ms }
+  }
+  const { invoke } = await import('@tauri-apps/api/core')
+  const r = await invoke<{ ok: boolean; ms: number; error?: string }>('proxy_test_site_via', {
+    iface,
+    host,
+  })
+  return { ts: Date.now(), ok: r.ok, ms: r.ms, err: r.error }
+}
+
+async function testIfaceRow(row: IfaceRow): Promise<void> {
+  if (row.testing) return
+  row.testing = true
+  try {
+    const point = await probeEgress(row.id)
+    row.history = appendLatencyPoint(row.history, point)
+    saveLatencySeries(`iface:${row.id}`, row.history)
+  } catch (e) {
+    row.history = appendLatencyPoint(row.history, { ts: Date.now(), ok: false, err: String(e) })
+  } finally {
+    row.testing = false
+  }
+}
+
+async function testSiteRow(row: SiteRow): Promise<void> {
+  if (row.testing) return
+  row.testing = true
+  try {
+    const point = await probeSite(row.host, row.iface)
+    row.history = appendLatencyPoint(row.history, point)
+    saveLatencySeries(siteSeriesKey(row.host, row.iface), row.history)
+  } catch (e) {
+    row.history = appendLatencyPoint(row.history, { ts: Date.now(), ok: false, err: String(e) })
+  } finally {
+    row.testing = false
+  }
+}
+
+const isTestingAll = ref(false)
+
+async function runAllTests(): Promise<void> {
+  if (isTestingAll.value || !isConfigured.value) return
+  isTestingAll.value = true
+  try {
+    await Promise.all([
+      ...ifaceRows.value.map((r) => testIfaceRow(r)),
+      ...siteRows.value.map((r) => testSiteRow(r)),
+    ])
+  } finally {
+    isTestingAll.value = false
+  }
+}
+
+function latestPoint(history: LatencyPoint[]): LatencyPoint | undefined {
+  return history[history.length - 1]
+}
+
+function latestText(history: LatencyPoint[]): string {
+  const p = latestPoint(history)
+  if (!p) return '—'
+  if (!p.ok) return '失败'
+  return `${p.ms ?? 0}ms`
+}
+
+function latestClass(history: LatencyPoint[]): string {
+  const p = latestPoint(history)
+  if (!p) return 'text-muted-foreground'
+  if (!p.ok) return 'text-rose-600'
+  const ms = p.ms ?? 0
+  if (ms <= 800) return 'text-emerald-600'
+  if (ms <= 2000) return 'text-amber-600'
+  return 'text-rose-600'
+}
+
+// 状态弱化文字（按钮之下）
+const statusText = computed(() => {
+  if (!isRunning.value) return '加速已停止，点击上方按钮即可开启'
+  return proxyMode.value === 'whitelist'
+    ? '智能分流中：国内网络直连，海外服务经加速通道'
+    : '全局加速中：全部网络流量经加速通道'
+})
+
+// 轮询：测速 10 分钟一轮（对齐 2 小时 12 根柱条）；用量 60 秒一刷
+const POLL_TEST_MS = 10 * 60 * 1000
+const POLL_TRAFFIC_MS = 60 * 1000
+let testTimer: ReturnType<typeof setInterval> | undefined
+let trafficTimer: ReturnType<typeof setInterval> | undefined
+
+onMounted(async () => {
+  loadAllHistories()
+  await refreshStatus()
+  void refreshTraffic()
+  void runAllTests()
+  testTimer = setInterval(() => void runAllTests(), POLL_TEST_MS)
+  trafficTimer = setInterval(() => void refreshTraffic(), POLL_TRAFFIC_MS)
+})
+
+onUnmounted(() => {
+  if (testTimer) clearInterval(testTimer)
+  if (trafficTimer) clearInterval(trafficTimer)
 })
 
 async function refreshStatus() {
@@ -107,7 +392,6 @@ async function toggleProxy() {
         return
       }
       toast.success('智能加速已开启！')
-      runSiteTests()
     }
   } catch (e: any) {
     toast.error(typeof e === 'string' ? e : e?.message || '操作失败')
@@ -126,63 +410,6 @@ async function setProxyMode(mode: 'whitelist' | 'global') {
     toast.success(mode === 'whitelist' ? '已切换至智能分流模式' : '已切换至全局加速模式')
   } catch (e: any) {
     toast.error('切换模式失败')
-  }
-}
-
-async function runSiteTests() {
-  for (const item of testResults.value) {
-    item.status = 'testing'
-  }
-  if (!isTauri()) {
-    setTimeout(() => {
-      for (const item of testResults.value) {
-        item.status = 'ok'
-        item.latency = Math.floor(Math.random() * 80) + 120
-      }
-    }, 800)
-    return
-  }
-  try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    const results = (await invoke('proxy_test_sites')) as Array<{ site: string; ok: boolean; ms: number }>
-    for (const r of results) {
-      const match = testResults.value.find(
-        (t) => r.site.toLowerCase().includes(t.host.toLowerCase()) || t.host.toLowerCase().includes(r.site.toLowerCase())
-      )
-      if (match) {
-        match.status = r.ok ? 'ok' : 'fail'
-        match.latency = r.ms
-      }
-    }
-    // 后端返回的站点若未命中本地列表（列表漂移），不得永久停留「测速中」，兜底为失败
-    for (const item of testResults.value) {
-      if (item.status === 'testing') {
-        item.status = 'fail'
-        item.latency = undefined
-      }
-    }
-  } catch (e) {
-    // 测速失败要如实展示，绝不伪装成 ok（曾经的假绿会误导用户以为链路畅通）
-    for (const item of testResults.value) {
-      item.status = 'fail'
-      item.latency = undefined
-    }
-    toast.error('测速失败', String(e))
-  }
-}
-
-async function triggerRescue() {
-  if (!isTauri()) {
-    toast.success('网络已恢复直连！')
-    return
-  }
-  try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    const msg = (await invoke('proxy_rescue')) as string
-    isRunning.value = false
-    toast.success(msg || '网络急救成功，已恢复系统直连！')
-  } catch (e: any) {
-    toast.error('急救失败：' + (typeof e === 'string' ? e : e?.message))
   }
 }
 
@@ -268,9 +495,9 @@ async function submitImportOrChained() {
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto p-6 space-y-6 max-w-4xl mx-auto">
-    <!-- 未配置向导卡片（零代码小白专属） -->
-    <div v-if="!isConfigured" class="space-y-6">
+  <div class="h-full overflow-y-auto p-6 max-w-4xl mx-auto">
+    <!-- 未配置向导（零代码小白专属） -->
+    <div v-if="!isConfigured" class="space-y-8">
       <div class="text-center py-4">
         <h1 class="text-2xl font-bold tracking-tight text-foreground">欢迎使用 Pony Proxy</h1>
         <p class="text-sm text-muted-foreground mt-1">请选择适合您的加速连接方案，1 分钟内即可完成配置</p>
@@ -280,10 +507,10 @@ async function submitImportOrChained() {
         <button
           @click="setupTab = 'direct'"
           :class="[
-            'p-5 text-left rounded-xl border-2 transition-all flex flex-col justify-between',
+            'p-5 text-left rounded-xl transition-all flex flex-col justify-between',
             setupTab === 'direct'
-              ? 'border-primary bg-primary/5 shadow-sm'
-              : 'border-border bg-card hover:border-muted-foreground/30',
+              ? 'bg-card shadow-sm ring-1 ring-primary'
+              : 'bg-card/60 hover:bg-card',
           ]"
         >
           <div class="flex items-center gap-3">
@@ -303,10 +530,10 @@ async function submitImportOrChained() {
         <button
           @click="setupTab = 'chained'"
           :class="[
-            'p-5 text-left rounded-xl border-2 transition-all flex flex-col justify-between',
+            'p-5 text-left rounded-xl transition-all flex flex-col justify-between',
             setupTab === 'chained'
-              ? 'border-primary bg-primary/5 shadow-sm'
-              : 'border-border bg-card hover:border-muted-foreground/30',
+              ? 'bg-card shadow-sm ring-1 ring-primary'
+              : 'bg-card/60 hover:bg-card',
           ]"
         >
           <div class="flex items-center gap-3">
@@ -325,229 +552,323 @@ async function submitImportOrChained() {
       </div>
 
       <!-- 方案 A 表单 -->
-      <Card v-if="setupTab === 'direct'" class="border-border shadow-sm">
-        <CardContent class="p-6 space-y-4">
-          <div class="flex items-center justify-between">
-            <Label class="text-sm font-medium">Cloudflare API Token 授权码</Label>
-            <button
-              type="button"
-              @click="openExternalUrl('https://dash.cloudflare.com/profile/api-tokens')"
-              class="text-xs text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
-            >
-              点击直达获取 Token <ExternalLink class="h-3 w-3" />
-            </button>
-          </div>
-          <Input
-            v-model="cfToken"
-            type="password"
-            placeholder="粘贴您的 Cloudflare API Token"
-            class="font-mono text-sm"
-          />
-          <p class="text-xs text-muted-foreground">
-            💡 提示：用于自动在云端部署个人加速节点，凭据将安全保存在本机 Windows 凭据管理器中，绝不上报。
-          </p>
-          <div class="pt-2">
-            <Button
-              @click="submitDirectSetup"
-              :disabled="isSubmitting || !cfToken.trim()"
-              class="w-full h-11 text-sm font-semibold"
-            >
-              <Zap v-if="!isSubmitting" class="h-4 w-4 mr-2" />
-              <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
-              {{ isSubmitting ? '正在初始化加速节点...' : '一键开启个人独立加速' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <!-- 方案 B 表单 -->
-      <Card v-if="setupTab === 'chained'" class="border-border shadow-sm">
-        <CardContent class="p-6 space-y-5">
-          <div class="space-y-2">
-            <Label class="text-sm font-medium">方式 1：粘贴一键连接口令 (最快捷)</Label>
-            <Input
-              v-model="syncUriInput"
-              placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
-              class="font-mono text-xs"
-            />
-            <p class="text-xs text-muted-foreground">
-              可直接粘贴从 Linux Server（运行 <code>pproxy user add</code> 或 <code>pproxy sync export</code>）导出的口令。
-            </p>
-          </div>
-
-          <div class="relative flex items-center py-2">
-            <div class="flex-grow border-t border-border"></div>
-            <span class="flex-shrink mx-4 text-xs text-muted-foreground uppercase">或者手动填写参数</span>
-            <div class="flex-grow border-t border-border"></div>
-          </div>
-
-          <div class="grid grid-cols-2 gap-4">
-            <div class="col-span-2 space-y-1.5">
-              <Label class="text-xs">代理服务器地址 (如 192.168.1.100:8899)</Label>
-              <Input v-model="remoteHost" placeholder="IP 或域名 : 端口" class="text-sm" />
-            </div>
-            <div class="space-y-1.5">
-              <Label class="text-xs">用户名</Label>
-              <Input v-model="remoteUser" placeholder="用户名" class="text-sm" />
-            </div>
-            <div class="space-y-1.5">
-              <Label class="text-xs">密码</Label>
-              <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" />
-            </div>
-          </div>
-
-          <div class="pt-2">
-            <Button
-              @click="submitImportOrChained"
-              :disabled="isSubmitting || (!syncUriInput.trim() && !remoteHost.trim())"
-              class="w-full h-11 text-sm font-semibold"
-            >
-              <Server v-if="!isSubmitting" class="h-4 w-4 mr-2" />
-              <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
-              {{ isSubmitting ? '正在验证连接...' : '连接远端代理并开启' }}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-
-    <!-- 已配置：极简傻瓜主界面 -->
-    <div v-else class="space-y-6">
-      <!-- 核心大开关卡片 -->
-      <Card class="overflow-hidden border-border shadow-sm">
-        <div
-          :class="[
-            'p-8 flex items-center justify-between transition-colors',
-            isRunning ? 'bg-emerald-500/10' : 'bg-muted/40',
-          ]"
-        >
-          <div class="space-y-1">
-            <div class="flex items-center gap-2.5">
-              <span
-                :class="[
-                  'h-3.5 w-3.5 rounded-full inline-block animate-pulse',
-                  isRunning ? 'bg-emerald-500 shadow-sm shadow-emerald-500/50' : 'bg-muted-foreground/40',
-                ]"
-              ></span>
-              <h2 class="text-2xl font-bold tracking-tight">
-                {{ isRunning ? '智能加速已开启' : '加速已停止' }}
-              </h2>
-            </div>
-            <p class="text-sm text-muted-foreground">
-              {{
-                isRunning
-                  ? proxyMode === 'whitelist'
-                    ? '🎯 智能分流中：国内网络直连，海外 AI 服务极速出网'
-                    : '🌐 全局加速中：全部网络流量已接管加速'
-                  : '点击右侧按钮即可一键恢复加速'
-              }}
-            </p>
-          </div>
-
-          <Button
-            @click="toggleProxy"
-            :class="[
-              'h-16 px-8 rounded-2xl text-base font-bold transition-all shadow-md flex items-center gap-3',
-              isRunning
-                ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/25'
-                : 'bg-primary hover:bg-primary/90 text-primary-foreground',
-            ]"
-          >
-            <Power class="h-6 w-6" />
-            {{ isRunning ? '已开启' : '一键开启' }}
-          </Button>
-        </div>
-
-        <!-- 模式切换与急救栏 -->
-        <div class="bg-card px-8 py-4 border-t border-border flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <span class="text-xs font-medium text-muted-foreground mr-1">加速模式:</span>
-            <button
-              @click="setProxyMode('whitelist')"
-              :class="[
-                'px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                proxyMode === 'whitelist'
-                  ? 'bg-primary text-primary-foreground shadow-sm'
-                  : 'bg-muted hover:bg-muted/80 text-muted-foreground',
-              ]"
-            >
-              智能分流 (推荐)
-            </button>
-            <button
-              @click="setProxyMode('global')"
-              :class="[
-                'px-3 py-1.5 rounded-lg text-xs font-medium transition-all',
-                proxyMode === 'global'
-                  ? 'bg-primary text-primary-foreground shadow-sm'
-                  : 'bg-muted hover:bg-muted/80 text-muted-foreground',
-              ]"
-            >
-              全局加速
-            </button>
-          </div>
-
-          <!-- 网络急救箱 -->
+      <div v-if="setupTab === 'direct'" class="bg-card rounded-xl p-6 space-y-4">
+        <div class="flex items-center justify-between">
+          <Label class="text-sm font-medium">Cloudflare API Token 授权码</Label>
           <button
-            @click="triggerRescue"
-            title="如果电脑无法上网或代理异常，点击此按钮可一键恢复网络直连"
-            class="text-xs text-amber-600 hover:text-amber-700 hover:bg-amber-500/10 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 font-medium"
+            type="button"
+            @click="openExternalUrl('https://dash.cloudflare.com/profile/api-tokens')"
+            class="text-xs text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
           >
-            <LifeBuoy class="h-4 w-4" />
-            网络急救箱 (一键还原)
+            点击直达获取 Token <ExternalLink class="h-3 w-3" />
           </button>
         </div>
-      </Card>
+        <Input
+          v-model="cfToken"
+          type="password"
+          placeholder="粘贴您的 Cloudflare API Token"
+          class="font-mono text-sm"
+        />
+        <p class="text-xs text-muted-foreground">
+          💡 提示：用于自动在云端部署个人加速节点，凭据将安全保存在本机 Windows 凭据管理器中，绝不上报。
+        </p>
+        <div class="pt-2">
+          <Button
+            @click="submitDirectSetup"
+            :disabled="isSubmitting || !cfToken.trim()"
+            class="w-full h-11 text-sm font-semibold"
+          >
+            <Zap v-if="!isSubmitting" class="h-4 w-4 mr-2" />
+            <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
+            {{ isSubmitting ? '正在初始化加速节点...' : '一键开启个人独立加速' }}
+          </Button>
+        </div>
+      </div>
 
-      <!-- AI 常用服务实时状态卡片 -->
-      <Card class="border-border shadow-sm">
-        <CardContent class="p-6 space-y-4">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <ShieldCheck class="h-5 w-5 text-primary" />
-              <h3 class="font-semibold text-sm">常用 AI 与海外服务实时连通性</h3>
+      <!-- 方案 B 表单 -->
+      <div v-if="setupTab === 'chained'" class="bg-card rounded-xl p-6 space-y-5">
+        <div class="space-y-2">
+          <Label class="text-sm font-medium">方式 1：粘贴一键连接口令 (最快捷)</Label>
+          <Input
+            v-model="syncUriInput"
+            placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
+            class="font-mono text-xs"
+          />
+          <p class="text-xs text-muted-foreground">
+            可直接粘贴从 Linux Server（运行 <code>pproxy user add</code> 或 <code>pproxy sync export</code>）导出的口令。
+          </p>
+        </div>
+
+        <div class="relative flex items-center py-2">
+          <div class="flex-grow border-t border-border"></div>
+          <span class="flex-shrink mx-4 text-xs text-muted-foreground uppercase">或者手动填写参数</span>
+          <div class="flex-grow border-t border-border"></div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <div class="col-span-2 space-y-1.5">
+            <Label class="text-xs">代理服务器地址 (如 192.168.1.100:8899)</Label>
+            <Input v-model="remoteHost" placeholder="IP 或域名 : 端口" class="text-sm" />
+          </div>
+          <div class="space-y-1.5">
+            <Label class="text-xs">用户名</Label>
+            <Input v-model="remoteUser" placeholder="用户名" class="text-sm" />
+          </div>
+          <div class="space-y-1.5">
+            <Label class="text-xs">密码</Label>
+            <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" />
+          </div>
+        </div>
+
+        <div class="pt-2">
+          <Button
+            @click="submitImportOrChained"
+            :disabled="isSubmitting || (!syncUriInput.trim() && !remoteHost.trim())"
+            class="w-full h-11 text-sm font-semibold"
+          >
+            <Server v-if="!isSubmitting" class="h-4 w-4 mr-2" />
+            <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
+            {{ isSubmitting ? '正在验证连接...' : '连接远端代理并开启' }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 已配置：极简主界面 -->
+    <div v-else class="space-y-10">
+      <!-- 头部主控：圆形电源按钮 + 模式 switch + 弱化状态文字 -->
+      <section class="flex flex-col items-center pt-8">
+        <button
+          @click="toggleProxy"
+          :title="isRunning ? '点击关闭加速' : '点击开启加速'"
+          :aria-label="isRunning ? '加速运行中，点击关闭' : '加速已停止，点击开启'"
+          :class="[
+            'h-20 w-20 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer',
+            isRunning
+              ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25 hover:bg-emerald-600'
+              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',
+          ]"
+        >
+          <Power class="h-8 w-8" />
+        </button>
+
+        <!-- 加速模式 switch：智能 / 全局 -->
+        <div class="mt-6 inline-flex items-center rounded-full bg-muted p-1" role="group" aria-label="加速模式">
+          <button
+            @click="setProxyMode('whitelist')"
+            :aria-pressed="proxyMode === 'whitelist'"
+            :class="[
+              'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer',
+              proxyMode === 'whitelist'
+                ? 'bg-card text-foreground font-medium shadow-sm'
+                : 'text-muted-foreground hover:text-foreground',
+            ]"
+          >
+            智能
+          </button>
+          <button
+            @click="setProxyMode('global')"
+            :aria-pressed="proxyMode === 'global'"
+            :class="[
+              'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer',
+              proxyMode === 'global'
+                ? 'bg-card text-foreground font-medium shadow-sm'
+                : 'text-muted-foreground hover:text-foreground',
+            ]"
+          >
+            全局
+          </button>
+        </div>
+
+        <p class="mt-3 text-xs text-muted-foreground">{{ statusText }}</p>
+      </section>
+
+      <!-- 用量统计：近 7 日双出口柱状图 + 占比环 + 指标 -->
+      <section class="space-y-4">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm font-semibold">用量统计</h3>
+          <div class="flex items-center gap-4 text-xs text-muted-foreground">
+            <span class="inline-flex items-center gap-1.5">
+              <span class="h-2.5 w-2.5 rounded-sm bg-[#f6821f]"></span>Cloudflare
+            </span>
+            <span class="inline-flex items-center gap-1.5">
+              <span class="h-2.5 w-2.5 rounded-sm bg-foreground/80"></span>Vercel
+            </span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-[1fr_auto] items-center gap-8">
+          <!-- 近 7 日流量柱状图（堆叠：CF 橙 + Vercel 墨） -->
+          <div>
+            <div class="flex items-end gap-2 h-28">
+              <div
+                v-for="day in weekBars"
+                :key="day.date"
+                class="flex-1 flex flex-col justify-end h-full group"
+                :title="`${day.date}\nCloudflare ${formatBytes(day.cf)}\nVercel ${formatBytes(day.vercel)}`"
+              >
+                <div class="w-full rounded-t-md bg-muted/50 flex flex-col-reverse overflow-hidden" style="height: 100%">
+                  <div class="bg-[#f6821f] transition-all duration-300" :style="{ height: day.cfPct + '%' }"></div>
+                  <div class="bg-foreground/80 transition-all duration-300" :style="{ height: day.vercelPct + '%' }"></div>
+                </div>
+              </div>
             </div>
-            <Button variant="ghost" size="sm" @click="runSiteTests" class="h-8 text-xs gap-1">
-              <RefreshCw class="h-3.5 w-3.5" />
-              重新测速
-            </Button>
+            <div class="flex gap-2 mt-1.5">
+              <span
+                v-for="day in weekBars"
+                :key="day.date"
+                class="flex-1 text-center text-[10px] text-muted-foreground tabular-nums"
+              >
+                {{ day.label }}
+              </span>
+            </div>
           </div>
 
-          <div class="grid grid-cols-2 gap-3 pt-1">
-            <div
-              v-for="site in testResults"
-              :key="site.name"
-              class="p-3.5 rounded-xl border border-border/70 bg-card flex items-center justify-between"
-            >
-              <div class="space-y-0.5">
-                <div class="text-sm font-medium">{{ site.name }}</div>
-                <div class="text-xs text-muted-foreground">{{ site.host }}</div>
+          <!-- 出口占比环 -->
+          <div class="flex items-center gap-5">
+            <div class="relative h-28 w-28">
+              <svg viewBox="0 0 42 42" class="h-full w-full -rotate-90">
+                <circle cx="21" cy="21" r="15.9155" fill="none" class="stroke-muted" stroke-width="5" />
+                <circle
+                  v-if="shareDonut.cfPct > 0"
+                  cx="21" cy="21" r="15.9155" fill="none"
+                  stroke="#f6821f" stroke-width="5" stroke-linecap="round"
+                  :stroke-dasharray="`${shareDonut.cfPct} 100`"
+                />
+                <circle
+                  v-if="shareDonut.vercelPct > 0"
+                  cx="21" cy="21" r="15.9155" fill="none"
+                  class="stroke-foreground/80" stroke-width="5" stroke-linecap="round"
+                  :stroke-dasharray="`${shareDonut.vercelPct} 100`"
+                  :stroke-dashoffset="-shareDonut.cfPct"
+                />
+              </svg>
+              <div class="absolute inset-0 flex flex-col items-center justify-center">
+                <span class="text-sm font-semibold tabular-nums">{{ formatBytes(shareDonut.total) }}</span>
+                <span class="text-[10px] text-muted-foreground">{{ shareDonut.source === 'today' ? '今日' : '累计' }}</span>
+              </div>
+            </div>
+            <div class="space-y-2 text-xs">
+              <div class="flex items-center gap-2">
+                <span class="h-2.5 w-2.5 rounded-full bg-[#f6821f]"></span>
+                <span class="text-muted-foreground">Cloudflare</span>
+                <span class="font-medium tabular-nums">{{ shareDonut.cfPct.toFixed(0) }}%</span>
               </div>
               <div class="flex items-center gap-2">
-                <span
-                  v-if="site.status === 'ok'"
-                  class="text-xs font-mono font-medium px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-600 flex items-center gap-1"
-                >
-                  <span class="h-1.5 w-1.5 rounded-full bg-emerald-500 inline-block"></span>
-                  {{ site.latency }}ms
-                </span>
-                <span
-                  v-else-if="site.status === 'testing'"
-                  class="text-xs text-muted-foreground animate-pulse"
-                >
-                  测速中...
-                </span>
-                <span
-                  v-else-if="site.status === 'fail'"
-                  class="text-xs font-medium px-2 py-0.5 rounded-full bg-rose-500/10 text-rose-600"
-                >
-                  无法连接
-                </span>
-                <span v-else class="text-xs text-muted-foreground">—</span>
+                <span class="h-2.5 w-2.5 rounded-full bg-foreground/80"></span>
+                <span class="text-muted-foreground">Vercel</span>
+                <span class="font-medium tabular-nums">{{ shareDonut.vercelPct.toFixed(0) }}%</span>
+              </div>
+              <div class="pt-1 text-muted-foreground">
+                今日请求 <span class="text-foreground font-medium tabular-nums">{{ todayTotals.requests }}</span>
+                 · 累计 <span class="text-foreground font-medium tabular-nums">{{ formatBytes(totalBytes) }}</span>
               </div>
             </div>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+        <p class="text-xs text-muted-foreground">按出口归账：Cloudflare 与 Vercel 分别统计，按日本地计数，柱条为近 7 日流量。</p>
+      </section>
+
+      <!-- 链接状态：接口 + 常用站点连通性 -->
+      <section class="space-y-1">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm font-semibold">链接状态</h3>
+          <button
+            @click="runAllTests"
+            :disabled="isTestingAll"
+            title="全部重新测速"
+            aria-label="全部重新测速"
+            class="h-8 w-8 inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw class="h-4 w-4" :class="{ 'animate-spin': isTestingAll }" />
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-8">
+        <!-- 出网接口行 -->
+        <div
+          v-for="row in ifaceRows"
+          :key="row.id"
+          class="flex items-center gap-3 py-2.5"
+        >
+          <div class="w-32 shrink-0">
+            <div class="text-sm">{{ row.name }}</div>
+            <div class="text-xs text-muted-foreground">{{ row.endpoint }}</div>
+          </div>
+          <div class="flex-1 min-w-0">
+            <LatencyBars :history="row.history" />
+          </div>
+          <span class="w-14 shrink-0 text-right text-xs font-mono tabular-nums" :class="latestClass(row.history)">
+            {{ latestText(row.history) }}
+          </span>
+          <button
+            @click="testIfaceRow(row)"
+            :disabled="row.testing"
+            title="立即测速"
+            :aria-label="`立即测速 ${row.name}`"
+            class="h-7 w-7 shrink-0 inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': row.testing }" />
+          </button>
+        </div>
+
+        <!-- 常用站点行 -->
+        <div
+          v-for="row in siteRows"
+          :key="row.host"
+          class="flex items-center gap-3 py-2.5"
+        >
+          <div class="w-32 shrink-0">
+            <div class="text-sm">{{ row.name }}</div>
+            <div class="text-xs text-muted-foreground">{{ row.host }}</div>
+          </div>
+          <div class="flex-1 min-w-0">
+            <LatencyBars :history="row.history" />
+          </div>
+          <!-- 出网接口 switch -->
+          <div class="shrink-0 inline-flex items-center rounded-full bg-muted p-0.5 text-xs" role="group" :aria-label="`${row.name} 测速接口`">
+            <button
+              @click="switchSiteIface(row, 'cf')"
+              :aria-pressed="row.iface === 'cf'"
+              :class="[
+                'px-2 py-1 rounded-full transition-all duration-150 cursor-pointer',
+                row.iface === 'cf'
+                  ? 'bg-card text-foreground font-medium shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              ]"
+            >
+              CF
+            </button>
+            <button
+              @click="switchSiteIface(row, 'vercel')"
+              :aria-pressed="row.iface === 'vercel'"
+              :class="[
+                'px-2 py-1 rounded-full transition-all duration-150 cursor-pointer',
+                row.iface === 'vercel'
+                  ? 'bg-card text-foreground font-medium shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              ]"
+            >
+              Vercel
+            </button>
+          </div>
+          <span class="w-14 shrink-0 text-right text-xs font-mono tabular-nums" :class="latestClass(row.history)">
+            {{ latestText(row.history) }}
+          </span>
+          <button
+            @click="testSiteRow(row)"
+            :disabled="row.testing"
+            title="立即测速"
+            :aria-label="`立即测速 ${row.name}`"
+            class="h-7 w-7 shrink-0 inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': row.testing }" />
+          </button>
+        </div>
+        </div>
+
+        <p class="text-xs text-muted-foreground pt-2">每 10 分钟自动测速，柱条仅保留近 2 小时；绿 ≤ 800ms，黄 ≤ 2000ms，红为超时或失败。</p>
+      </section>
     </div>
   </div>
 </template>
