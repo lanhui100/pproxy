@@ -5,6 +5,7 @@ import {
   formatBytes,
   formatCount,
   localDateKey,
+  localHourKey,
   niceScale,
 } from './usageChart'
 
@@ -72,8 +73,15 @@ describe('localDateKey', () => {
   })
 })
 
+describe('localHourKey', () => {
+  it('使用本地时区年月日加小时，补齐前导零', () => {
+    const d = new Date(2025, 0, 5, 9, 30) // 本地 2025-01-05 09:30
+    expect(localHourKey(d)).toBe('2025-01-05 09:00')
+  })
+})
+
 describe('buildMergedUsageChart', () => {
-  it('生成单根经典用量柱模型', () => {
+  it('生成单根经典用量柱模型（7天维度）', () => {
     const days = [
       { date: '2026-08-25', label: '25', cfReq: 10, vReq: 5, cfBytes: 1000, vBytes: 500 },
       { date: '2026-08-26', label: '26', cfReq: 20, vReq: 8, cfBytes: 2000, vBytes: 800 },
@@ -91,4 +99,31 @@ describe('buildMergedUsageChart', () => {
     expect(m.bars[2].title).toContain('调用次数: 42 次')
     expect(m.baselineY).toBe(56) // 6 + (72 - 6 - 16)
   })
+
+  it('生成 24 小时维度模型，抽样 label 仅包含非空项', () => {
+    const hours = Array.from({ length: 24 }, (_, i) => {
+      const h = String(i).padStart(2, '0')
+      // 仅每 6 小时及最后一小时显示 label
+      const label = i === 23 ? '现在' : i % 6 === 0 ? `${h}:00` : ''
+      return {
+        date: `2026-08-31 ${h}:00`,
+        label,
+        cfReq: i * 2,
+        vReq: i,
+        cfBytes: i * 1000,
+        vBytes: i * 500,
+      }
+    })
+    const m = buildMergedUsageChart(hours, 320, 72)
+    expect(m.bars.length).toBe(24)
+    // 00:00, 06:00, 12:00, 18:00, 现在 -> 共 5 个标签
+    expect(m.days.length).toBe(5)
+    expect(m.days[0].label).toBe('00:00')
+    expect(m.days[4].label).toBe('现在')
+    expect(m.days[4].isToday).toBe(true)
+    expect(m.bars[23].bytes).toBe(23 * 1500)
+    // 柱宽适应 24 根柱紧凑居中
+    expect(m.bars[0].w).toBeLessThanOrEqual(6)
+  })
 })
+

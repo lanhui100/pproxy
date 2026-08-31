@@ -31,7 +31,7 @@ import {
   generateSpeedWaveform,
   type SpeedSample,
 } from '@/lib/speedTracker'
-import { buildMergedUsageChart, formatBytes, localDateKey } from '@/lib/usageChart'
+import { buildMergedUsageChart, formatBytes, localDateKey, localHourKey } from '@/lib/usageChart'
 
 const toast = useToast()
 
@@ -60,7 +60,7 @@ const remoteUser = ref('')
 const remotePass = ref('')
 const isSubmitting = ref(false)
 
-// ---- 用量统计（引擎本地计数：按 gate 端点拆分 CF / Vercel 双出口，含近 7 日历史）----
+// ---- 用量统计（引擎本地计数：按 gate 端点拆分 CF / Vercel 双出口，含近 7 日与近 24 小时历史）----
 interface TrafficBucket {
   requests: number
   bytes_up: number
@@ -71,12 +71,19 @@ interface DayUsage {
   cf: TrafficBucket
   vercel: TrafficBucket
 }
+interface HourUsage {
+  hour: string
+  cf: TrafficBucket
+  vercel: TrafficBucket
+}
 interface TrafficStats {
   today: { cf: TrafficBucket; vercel: TrafficBucket }
   total: { cf: TrafficBucket; vercel: TrafficBucket }
   history: DayUsage[]
+  hourly?: HourUsage[]
 }
 const traffic = ref<TrafficStats | null>(null)
+const usageDimension = ref<'7d' | '24h'>('7d')
 
 function bucketBytes(b: TrafficBucket): number {
   return b.bytes_up + b.bytes_down
@@ -111,11 +118,45 @@ const weekDays = computed<UsageDay[]>(() => {
   return list
 })
 
+/** 近 24 小时双出口用量：缺勤小时补零保持 24 根柱，抽样标轴 */
+const hourItems = computed<UsageDay[]>(() => {
+  const hours = traffic.value?.hourly ?? []
+  const byHour = new Map(hours.map((h) => [h.hour, h]))
+  const list: UsageDay[] = []
+  const now = Date.now()
+  const oneHour = 3600 * 1000
+  for (let i = 23; i >= 0; i--) {
+    const d = new Date(now - i * oneHour)
+    const key = localHourKey(d)
+    const h = byHour.get(key)
+    const hh = String(d.getHours()).padStart(2, '0')
+    let label = ''
+    if (i === 0) {
+      label = '现在'
+    } else if (d.getHours() % 6 === 0) {
+      label = `${hh}:00`
+    }
+    list.push({
+      date: key,
+      label,
+      cfReq: h?.cf.requests ?? 0,
+      vReq: h?.vercel.requests ?? 0,
+      cfBytes: h ? bucketBytes(h.cf) : 0,
+      vBytes: h ? bucketBytes(h.vercel) : 0,
+    })
+  }
+  return list
+})
+
+const activeUsageItems = computed(() => {
+  return usageDimension.value === '7d' ? weekDays.value : hourItems.value
+})
+
 /**
  * 极简合并用量图模型：无纵轴、无横线、紧凑间距、调用次数直观可见、合并实时网速波形
  */
 const mergedChart = computed(() => {
-  return buildMergedUsageChart(weekDays.value, 320, 72)
+  return buildMergedUsageChart(activeUsageItems.value, 320, 72)
 })
 
 const todayTotals = computed(() => {
@@ -147,8 +188,14 @@ async function refreshTraffic(): Promise<void> {
   const now = Date.now()
   if (!isTauri()) {
     const day = 24 * 3600 * 1000
+    const hour = 3600 * 1000
     const mk = (ago: number, cfB: number, vB: number): DayUsage => ({
       date: localDateKey(new Date(Date.now() - ago * day)),
+      cf: { requests: Math.round(cfB / 400_000), bytes_up: Math.round(cfB * 0.08), bytes_down: cfB },
+      vercel: { requests: Math.round(vB / 500_000), bytes_up: Math.round(vB * 0.06), bytes_down: vB },
+    })
+    const mkHour = (ago: number, cfB: number, vB: number): HourUsage => ({
+      hour: localHourKey(new Date(Date.now() - ago * hour)),
       cf: { requests: Math.round(cfB / 400_000), bytes_up: Math.round(cfB * 0.08), bytes_down: cfB },
       vercel: { requests: Math.round(vB / 500_000), bytes_up: Math.round(vB * 0.06), bytes_down: vB },
     })
@@ -156,6 +203,17 @@ async function refreshTraffic(): Promise<void> {
     const mockDownDelta = isRunning.value ? Math.floor(Math.random() * 800_000) + 120_000 : 0
     const mockUpDelta = isRunning.value ? Math.floor(mockDownDelta * 0.08) : 0
     const baseTodayDown = 38_000_000 + (traffic.value ? 0 : 0)
+
+    const hourlyMock: HourUsage[] = []
+    for (let i = 23; i >= 1; i--) {
+      const baseB = ((i % 5) + 1) * 2_500_000
+      hourlyMock.push(mkHour(i, baseB, Math.round(baseB * 0.3)))
+    }
+    hourlyMock.push({
+      hour: localHourKey(new Date(now)),
+      cf: { requests: 96, bytes_up: 2_400_000 + mockUpDelta, bytes_down: baseTodayDown + mockDownDelta },
+      vercel: { requests: 32, bytes_up: 800_000, bytes_down: 12_000_000 },
+    })
 
     traffic.value = {
       today: {
@@ -175,6 +233,7 @@ async function refreshTraffic(): Promise<void> {
         mk(1, 140_000_000, 26_000_000),
         mk(0, 38_000_000, 12_000_000),
       ],
+      hourly: hourlyMock,
     }
 
     if (isRunning.value) {
@@ -827,7 +886,7 @@ async function submitImportOrChained() {
             :viewBox="`0 0 ${mergedChart.W} ${mergedChart.H}`"
             class="w-full h-auto select-none overflow-visible"
             role="img"
-            aria-label="近 7 日用量统计与实时网速"
+            :aria-label="usageDimension === '7d' ? '近 7 日用量统计与实时网速' : '近 24 小时用量统计与实时网速'"
           >
             <!-- 实时网速波形（底部对齐日期上方基准线，左右边距全宽贴合） -->
             <path
@@ -843,7 +902,7 @@ async function submitImportOrChained() {
               stroke-linecap="round"
             />
 
-            <!-- 7 日经典用量单柱（CF 橙黄色，紧凑居中） -->
+            <!-- 经典用量单柱（CF 橙黄色，紧凑居中） -->
             <rect
               v-for="(b, i) in mergedChart.bars"
               :key="'b' + i"
@@ -858,7 +917,7 @@ async function submitImportOrChained() {
               <title>{{ b.title }}</title>
             </rect>
 
-            <!-- X 轴极简日期标签（数字 + “今天”，位于基准线下方） -->
+            <!-- X 轴极简日期/时间标签，位于基准线下方 -->
             <text
               v-for="(d, i) in mergedChart.days"
               :key="'d' + i"
@@ -874,14 +933,46 @@ async function submitImportOrChained() {
             </text>
           </svg>
 
-          <!-- 底部图例栏：近 7 日用量与实时网速 -->
+          <!-- 底部图例栏：用量维度切换（7天 / 24h）与实时网速图例 -->
           <div class="flex items-center justify-between gap-3 text-[11px] text-muted-foreground pt-0.5">
-            <span class="text-[10px] text-muted-foreground/70">
-              近 7 日用量
-            </span>
+            <!-- 7天 / 24h 维度 switch -->
+            <div
+              class="shrink-0 inline-flex items-center rounded-full bg-muted p-0.5 text-xs"
+              role="group"
+              aria-label="用量统计维度"
+            >
+              <button
+                type="button"
+                @click="usageDimension = '7d'"
+                :aria-pressed="usageDimension === '7d'"
+                :class="[
+                  'px-2 py-0.5 rounded-full text-[10px] leading-none transition-all duration-150 cursor-pointer',
+                  usageDimension === '7d'
+                    ? 'bg-card text-foreground font-medium shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                ]"
+              >
+                7天
+              </button>
+              <button
+                type="button"
+                @click="usageDimension = '24h'"
+                :aria-pressed="usageDimension === '24h'"
+                :class="[
+                  'px-2 py-0.5 rounded-full text-[10px] leading-none transition-all duration-150 cursor-pointer',
+                  usageDimension === '24h'
+                    ? 'bg-card text-foreground font-medium shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                ]"
+              >
+                24h
+              </button>
+            </div>
+
+            <!-- 图例指标 -->
             <div class="flex items-center gap-3.5">
               <span class="inline-flex items-center gap-1.5">
-                <span class="h-2.5 w-2.5 rounded-xs bg-[#f6821f]"></span>近 7 日用量
+                <span class="h-2.5 w-2.5 rounded-xs bg-[#f6821f]"></span>{{ usageDimension === '7d' ? '近 7 日用量' : '近 24 小时用量' }}
               </span>
               <span class="inline-flex items-center gap-1.5">
                 <span class="inline-block h-0.5 w-3.5 rounded-full bg-primary/70"></span>实时网速

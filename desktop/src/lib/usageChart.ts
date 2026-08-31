@@ -62,6 +62,13 @@ export function localDateKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+/** 本地时区 YYYY-MM-DD HH:00（用于 24 小时维度分桶） */
+export function localHourKey(d: Date): string {
+  const date = localDateKey(d)
+  const hour = String(d.getHours()).padStart(2, '0')
+  return `${date} ${hour}:00`
+}
+
 export interface MergedUsageBar {
   x: number
   y: number
@@ -90,10 +97,10 @@ export interface MergedUsageChartModel {
 }
 
 /**
- * 构建极简单柱（经典 CF 橙黄色）7 日用量图模型
+ * 构建极简单柱（经典 CF 橙黄色）用量图模型（支持 7 日与 24 小时等不同维度）
  */
 export function buildMergedUsageChart(
-  days: { date: string; label: string; cfReq: number; vReq: number; cfBytes: number; vBytes: number }[],
+  items: { date: string; label: string; cfReq: number; vReq: number; cfBytes: number; vBytes: number }[],
   W = 320,
   H = 72,
 ): MergedUsageChartModel {
@@ -102,28 +109,29 @@ export function buildMergedUsageChart(
   const ph = H - T - B
   const baselineY = T + ph // 严格基准线（柱底与波形底部）
 
-  const dailyTotals = days.map((d) => ({
+  const totals = items.map((d) => ({
     ...d,
     totalBytes: d.cfBytes + d.vBytes,
     totalReqs: d.cfReq + d.vReq,
   }))
 
-  const maxBytes = Math.max(1, ...dailyTotals.map((d) => d.totalBytes))
-  const n = Math.max(1, days.length)
+  const maxBytes = Math.max(1, ...totals.map((d) => d.totalBytes))
+  const n = Math.max(1, items.length)
 
-  // 每天单根经典柱体（CF橙黄色，柱宽 8px，天间距 10px，紧凑居中）
-  const barW = 8
-  const dayGap = 10
+  // 区分 7 日与 24 小时排版：项数多于 7 时紧凑排列，居中显示
+  const isHourly = n > 7
+  const barW = isHourly ? 6 : 8
+  const dayGap = isHourly ? 4 : 10
   const totalSpan = n * barW + (n - 1) * dayGap
-  const startX = Math.max(6, (W - totalSpan) / 2)
+  const startX = Math.max(4, (W - totalSpan) / 2)
 
   const bars: MergedUsageBar[] = []
   const dayLabels: MergedUsageDay[] = []
 
-  dailyTotals.forEach((d, i) => {
+  totals.forEach((d, i) => {
     const barX = startX + i * (barW + dayGap)
     const cx = barX + barW / 2
-    const isToday = i === days.length - 1
+    const isToday = i === items.length - 1
 
     const barH = d.totalBytes > 0 ? Math.max(2, (d.totalBytes / maxBytes) * ph) : 0
 
@@ -137,11 +145,23 @@ export function buildMergedUsageChart(
       title: `${d.date}\n总用量: ${formatBytes(d.totalBytes)}\n调用次数: ${d.totalReqs} 次 (CF: ${d.cfReq} · Vercel: ${d.vReq})`,
     })
 
-    dayLabels.push({
-      label: isToday ? '今天' : d.label,
-      x: cx,
-      isToday,
-    })
+    // 对于 7 天模式，最后一项默认显示“今天”；对于 24 小时模式，最后一项若无 label 则显示“现在”；空 label 则跳过
+    let label = d.label
+    if (isToday) {
+      if (isHourly) {
+        label = label || '现在'
+      } else {
+        label = label === '今天' || !label || /^\d+$/.test(label) ? '今天' : label
+      }
+    }
+
+    if (label && label.trim() !== '') {
+      dayLabels.push({
+        label,
+        x: cx,
+        isToday,
+      })
+    }
   })
 
   return {
