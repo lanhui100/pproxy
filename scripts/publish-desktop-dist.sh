@@ -12,21 +12,25 @@
 #     <latest.json>  更新清单；platforms.windows-x86_64.url 的文件名段决定分发哪个
 #                    产物（单一事实来源）。tauri 产物名带空格（Pony Proxy_X.Y.Z_…），
 #                    分发名统一点号（Pony.Proxy_X.Y.Z_…），脚本自动按两种名字定位。
-#   token 来源：dev 主机 ~/pproxy/.pproxy.env 的 PPROXY_VERCEL_TOKEN
+#   token 来源：GitHub Secrets `VERCEL_TOKEN` 或 dev 主机 ~/pproxy/.pproxy.env 的 PPROXY_VERCEL_TOKEN
 #
-# 流程：按 latest.json 定位 exe+sig → 暂存（点号命名）→ vercel link（幂等）→
-# vercel deploy --prod（纯静态目录，无函数）。latest.json 以 must-revalidate 提供，
-# updater 不会读到陈旧清单；每次发布整目录替换，目录内只保留当前版本。
+# 流程：按 latest.json 定位 exe+sig → 暂存（点号命名）→ 改写 latest.json 为 dl.ponyjob.top →
+# 生成 vercel.json 缓存策略 → vercel link → vercel deploy --prod（纯静态，无函数）。
 set -euo pipefail
 
 BUNDLE_DIR="${1:?usage: $0 <bundle-dir> <latest.json>}"
 LATEST_JSON="${2:?usage: $0 <bundle-dir> <latest.json>}"
-: "${VERCEL_TOKEN:?VERCEL_TOKEN 未设置（dev 主机 ~/pproxy/.pproxy.env: PPROXY_VERCEL_TOKEN）}"
+: "${VERCEL_TOKEN:?VERCEL_TOKEN 未设置（GitHub Secrets: VERCEL_TOKEN 或 ~/pproxy/.pproxy.env: PPROXY_VERCEL_TOKEN）}"
 
 [[ -f "$LATEST_JSON" ]] || { echo "latest.json 不存在: $LATEST_JSON"; exit 1; }
 
 # 分发文件名 = latest.json 引用的名字（点号命名，与 GitHub 资产一致）
-NAME=$(node -e "const j=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));const u=j.platforms['windows-x86_64']&&j.platforms['windows-x86_64'].url||'';console.log(u.split('/').pop())" "$LATEST_JSON")
+NAME=$(node -e "
+const j = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'));
+const u = (j.platforms && j.platforms['windows-x86_64'] && j.platforms['windows-x86_64'].url) || '';
+const rawName = u.split('/').pop() || '';
+console.log(rawName.replace(/\s+/g, '.'));
+" "$LATEST_JSON")
 [[ "$NAME" == *_x64-setup.exe ]] || { echo "latest.json 未指向 _x64-setup.exe: '$NAME'"; exit 1; }
 
 EXE=""
@@ -43,8 +47,54 @@ cp "$EXE" "$STAGE/$NAME"
 cp "$SIG" "$STAGE/$NAME.sig"
 cp "$LATEST_JSON" "$STAGE/latest.json"
 
+# 改写 $STAGE/latest.json 内各平台下载地址为 https://dl.ponyjob.top/<filename>
+node -e "
+const fs = require('fs');
+const p = process.argv[1];
+const host = process.argv[2];
+const d = JSON.parse(fs.readFileSync(p, 'utf8'));
+if (d.platforms) {
+  for (const plat of Object.values(d.platforms)) {
+    if (plat.url) {
+      const fn = plat.url.split('/').pop().replace(/\s+/g, '.');
+      plat.url = 'https://' + host + '/' + fn;
+    }
+  }
+}
+fs.writeFileSync(p, JSON.stringify(d, null, 2));
+" "$STAGE/latest.json" "dl.ponyjob.top"
+
+# 生成 vercel.json 缓存策略：latest.json 及时校验；exe 与 sig 边缘永久缓存
+cat > "$STAGE/vercel.json" << 'EOF'
+{
+  "headers": [
+    {
+      "source": "/latest.json",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/(.*\\.(?:exe|sig))",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    }
+  ]
+}
+EOF
+
 cd "$STAGE"
-npx --yes vercel@latest link --yes --project pony-dsk --token "$VERCEL_TOKEN" >/dev/null
+# 优先带 --scope pony7 link，若无团队权限则回退默认 scope
+npx --yes vercel@latest link --yes --project pony-dsk --scope pony7 --token "$VERCEL_TOKEN" 2>/dev/null || \
+  npx --yes vercel@latest link --yes --project pony-dsk --token "$VERCEL_TOKEN" >/dev/null
+
 npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
 
 echo "发布完成：https://dl.ponyjob.top/latest.json（$NAME）"
