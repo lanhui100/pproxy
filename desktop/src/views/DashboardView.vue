@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
-  CheckCircle2,
+  Check,
   ExternalLink,
   Power,
   RefreshCw,
   Server,
+  ShieldCheck,
   Sparkles,
   Zap,
 } from '@lucide/vue'
 import LatencyBars from '@/components/common/LatencyBars.vue'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useToast } from '@/composables/useToast'
@@ -496,7 +498,7 @@ async function setProxyMode(mode: 'whitelist' | 'global') {
 // ---- 向导提交 ----
 async function submitDirectSetup() {
   if (!cfToken.value.trim()) {
-    toast.error('请输入 Cloudflare API Token')
+    toast.error('请输入加速授权码')
     return
   }
   isSubmitting.value = true
@@ -576,141 +578,180 @@ async function submitImportOrChained() {
 
 <template>
   <div class="h-full overflow-y-auto p-6 max-w-4xl mx-auto">
-    <!-- 未配置向导（零代码小白专属） -->
-    <div v-if="!isConfigured" class="space-y-8">
-      <div class="text-center py-4">
+    <!-- 初始设置向导：选方案 → 填凭据 → 开启 -->
+    <div v-if="!isConfigured" class="space-y-6 py-2">
+      <div class="text-center space-y-2">
+        <span class="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
+          <Sparkles class="h-3 w-3" />
+          初始设置
+        </span>
         <h1 class="text-2xl font-bold tracking-tight text-foreground">欢迎使用 Pony Proxy</h1>
-        <p class="text-sm text-muted-foreground mt-1">请选择适合您的加速连接方案，1 分钟内即可完成配置</p>
+        <p class="text-sm text-muted-foreground">两步完成配置，立即开启加速</p>
       </div>
 
-      <div class="grid grid-cols-2 gap-4">
-        <button
-          @click="setupTab = 'direct'"
-          :class="[
-            'p-5 text-left rounded-xl transition-all flex flex-col justify-between',
-            setupTab === 'direct'
-              ? 'bg-card shadow-sm ring-1 ring-primary'
-              : 'bg-card/60 hover:bg-card',
-          ]"
-        >
-          <div class="flex items-center gap-3">
-            <div class="p-2.5 rounded-lg bg-primary/10 text-primary">
-              <Sparkles class="h-5 w-5" />
-            </div>
-            <div>
-              <div class="font-semibold text-base">方案 A：个人独立加速 (推荐)</div>
-              <div class="text-xs text-muted-foreground mt-0.5">本机自给自足，速度快、专属独立通道</div>
-            </div>
-          </div>
-          <div class="mt-4 text-xs text-primary font-medium flex items-center gap-1">
-            仅需一键授权出口 <CheckCircle2 class="h-3.5 w-3.5" />
-          </div>
-        </button>
-
-        <button
-          @click="setupTab = 'chained'"
-          :class="[
-            'p-5 text-left rounded-xl transition-all flex flex-col justify-between',
-            setupTab === 'chained'
-              ? 'bg-card shadow-sm ring-1 ring-primary'
-              : 'bg-card/60 hover:bg-card',
-          ]"
-        >
-          <div class="flex items-center gap-3">
-            <div class="p-2.5 rounded-lg bg-blue-500/10 text-blue-600">
-              <Server class="h-5 w-5" />
-            </div>
-            <div>
-              <div class="font-semibold text-base">方案 B：连接远端代理 / 跨端导入</div>
-              <div class="text-xs text-muted-foreground mt-0.5">连接自己的 Linux Server 或粘贴分享口令</div>
-            </div>
-          </div>
-          <div class="mt-4 text-xs text-blue-600 font-medium flex items-center gap-1">
-            支持一键粘贴连接口令 <Zap class="h-3.5 w-3.5" />
-          </div>
-        </button>
-      </div>
-
-      <!-- 方案 A 表单 -->
-      <div v-if="setupTab === 'direct'" class="bg-card rounded-xl p-6 space-y-4">
-        <div class="flex items-center justify-between">
-          <Label class="text-sm font-medium">Cloudflare API Token 授权码</Label>
+      <!-- 第 1 步：选择连接方式 -->
+      <div class="space-y-2">
+        <div class="text-xs font-medium text-muted-foreground">第 1 步 · 选择连接方式</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
-            type="button"
-            @click="openExternalUrl('https://dash.cloudflare.com/profile/api-tokens')"
-            class="text-xs text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
+            @click="setupTab = 'direct'"
+            :class="[
+              'relative rounded-xl border p-4 text-left transition-all',
+              setupTab === 'direct'
+                ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                : 'border-border bg-card hover:border-muted-foreground/40',
+            ]"
           >
-            点击直达获取 Token <ExternalLink class="h-3 w-3" />
+            <Check
+              v-if="setupTab === 'direct'"
+              class="absolute right-3 top-3 h-4 w-4 text-primary"
+            />
+            <div class="flex items-center gap-3">
+              <div
+                :class="[
+                  'rounded-lg p-2',
+                  setupTab === 'direct' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                ]"
+              >
+                <Sparkles class="h-4 w-4" />
+              </div>
+              <div>
+                <div class="text-sm font-semibold flex items-center gap-1.5">
+                  个人独立加速
+                  <span class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">推荐</span>
+                </div>
+                <div class="text-xs text-muted-foreground mt-0.5">粘贴授权码，开通 Cloudflare / Vercel 双出口</div>
+              </div>
+            </div>
+          </button>
+
+          <button
+            @click="setupTab = 'chained'"
+            :class="[
+              'relative rounded-xl border p-4 text-left transition-all',
+              setupTab === 'chained'
+                ? 'border-primary bg-primary/5 ring-1 ring-primary'
+                : 'border-border bg-card hover:border-muted-foreground/40',
+            ]"
+          >
+            <Check
+              v-if="setupTab === 'chained'"
+              class="absolute right-3 top-3 h-4 w-4 text-primary"
+            />
+            <div class="flex items-center gap-3">
+              <div
+                :class="[
+                  'rounded-lg p-2',
+                  setupTab === 'chained' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
+                ]"
+              >
+                <Server class="h-4 w-4" />
+              </div>
+              <div>
+                <div class="text-sm font-semibold">连接远端代理</div>
+                <div class="text-xs text-muted-foreground mt-0.5">粘贴同步口令，或连接自己的服务器</div>
+              </div>
+            </div>
           </button>
         </div>
-        <Input
-          v-model="cfToken"
-          type="password"
-          placeholder="粘贴您的 Cloudflare API Token"
-          class="font-mono text-sm"
-        />
-        <p class="text-xs text-muted-foreground">
-          💡 提示：用于自动在云端部署个人加速节点，凭据将安全保存在本机 Windows 凭据管理器中，绝不上报。
-        </p>
-        <div class="pt-2">
-          <Button
-            @click="submitDirectSetup"
-            :disabled="isSubmitting || !cfToken.trim()"
-            class="w-full h-11 text-sm font-semibold"
-          >
-            <Zap v-if="!isSubmitting" class="h-4 w-4 mr-2" />
-            <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
-            {{ isSubmitting ? '正在初始化加速节点...' : '一键开启个人独立加速' }}
-          </Button>
-        </div>
       </div>
 
-      <!-- 方案 B 表单 -->
-      <div v-if="setupTab === 'chained'" class="bg-card rounded-xl p-6 space-y-5">
-        <div class="space-y-2">
-          <Label class="text-sm font-medium">方式 1：粘贴一键连接口令 (最快捷)</Label>
-          <Input
-            v-model="syncUriInput"
-            placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
-            class="font-mono text-xs"
-          />
-          <p class="text-xs text-muted-foreground">
-            可直接粘贴从 Linux Server（运行 <code>pproxy user add</code> 或 <code>pproxy sync export</code>）导出的口令。
-          </p>
-        </div>
+      <!-- 第 2 步：完成授权 -->
+      <div class="space-y-2">
+        <div class="text-xs font-medium text-muted-foreground">第 2 步 · 完成授权</div>
 
-        <div class="relative flex items-center py-2">
-          <div class="flex-grow border-t border-border"></div>
-          <span class="flex-shrink mx-4 text-xs text-muted-foreground uppercase">或者手动填写参数</span>
-          <div class="flex-grow border-t border-border"></div>
-        </div>
+        <!-- 方案 A：授权码（一枚令牌同时开通 CF / Vercel 双出口） -->
+        <Card v-if="setupTab === 'direct'" class="border-border shadow-sm">
+          <CardHeader class="pb-3">
+            <CardTitle class="text-base">个人独立加速</CardTitle>
+            <CardDescription>一枚授权码同时开通 Cloudflare 与 Vercel 双出口，自动故障切换</CardDescription>
+          </CardHeader>
+          <CardContent class="space-y-3">
+            <div class="space-y-1.5">
+              <div class="flex items-center justify-between">
+                <Label class="text-xs font-medium">加速授权码</Label>
+                <button
+                  type="button"
+                  @click="openExternalUrl('https://dash.cloudflare.com/profile/api-tokens')"
+                  class="text-xs text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
+                >
+                  获取授权码 <ExternalLink class="h-3 w-3" />
+                </button>
+              </div>
+              <Input
+                v-model="cfToken"
+                type="password"
+                placeholder="粘贴授权码"
+                class="font-mono text-sm"
+              />
+            </div>
+            <p class="text-xs text-muted-foreground flex items-center gap-1.5">
+              <ShieldCheck class="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+              仅保存在本机系统凭据管理器，绝不上传
+            </p>
+            <Button
+              @click="submitDirectSetup"
+              :disabled="isSubmitting || !cfToken.trim()"
+              class="w-full h-11 text-sm font-semibold"
+            >
+              <Zap v-if="!isSubmitting" class="h-4 w-4 mr-2" />
+              <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
+              {{ isSubmitting ? '正在初始化…' : '开启加速' }}
+            </Button>
+          </CardContent>
+        </Card>
 
-        <div class="grid grid-cols-2 gap-4">
-          <div class="col-span-2 space-y-1.5">
-            <Label class="text-xs">代理服务器地址 (如 192.168.1.100:8899)</Label>
-            <Input v-model="remoteHost" placeholder="IP 或域名 : 端口" class="text-sm" />
-          </div>
-          <div class="space-y-1.5">
-            <Label class="text-xs">用户名</Label>
-            <Input v-model="remoteUser" placeholder="用户名" class="text-sm" />
-          </div>
-          <div class="space-y-1.5">
-            <Label class="text-xs">密码</Label>
-            <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" />
-          </div>
-        </div>
+        <!-- 方案 B：口令导入或手动连接 -->
+        <Card v-if="setupTab === 'chained'" class="border-border shadow-sm">
+          <CardHeader class="pb-3">
+            <CardTitle class="text-base">连接远端代理</CardTitle>
+            <CardDescription>粘贴同步口令，或手动填写服务器参数</CardDescription>
+          </CardHeader>
+          <CardContent class="space-y-4">
+            <div class="space-y-1.5">
+              <Label class="text-xs font-medium">一键连接口令</Label>
+              <Input
+                v-model="syncUriInput"
+                placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
+                class="font-mono text-xs"
+              />
+              <p class="text-xs text-muted-foreground">
+                由 Linux Server 的 <code>pproxy user add</code> 或 <code>pproxy sync export</code> 导出
+              </p>
+            </div>
 
-        <div class="pt-2">
-          <Button
-            @click="submitImportOrChained"
-            :disabled="isSubmitting || (!syncUriInput.trim() && !remoteHost.trim())"
-            class="w-full h-11 text-sm font-semibold"
-          >
-            <Server v-if="!isSubmitting" class="h-4 w-4 mr-2" />
-            <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
-            {{ isSubmitting ? '正在验证连接...' : '连接远端代理并开启' }}
-          </Button>
-        </div>
+            <div class="relative flex items-center">
+              <div class="flex-grow border-t border-border"></div>
+              <span class="flex-shrink mx-4 text-xs text-muted-foreground">或手动填写</span>
+              <div class="flex-grow border-t border-border"></div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+              <div class="col-span-2 space-y-1.5">
+                <Label class="text-xs">服务器地址</Label>
+                <Input v-model="remoteHost" placeholder="IP 或域名 : 端口，如 192.168.1.100:8899" class="text-sm" />
+              </div>
+              <div class="space-y-1.5">
+                <Label class="text-xs">用户名</Label>
+                <Input v-model="remoteUser" placeholder="用户名" class="text-sm" />
+              </div>
+              <div class="space-y-1.5">
+                <Label class="text-xs">密码</Label>
+                <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" />
+              </div>
+            </div>
+
+            <Button
+              @click="submitImportOrChained"
+              :disabled="isSubmitting || (!syncUriInput.trim() && !remoteHost.trim())"
+              class="w-full h-11 text-sm font-semibold"
+            >
+              <Server v-if="!isSubmitting" class="h-4 w-4 mr-2" />
+              <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
+              {{ isSubmitting ? '正在验证连接…' : '连接并开启加速' }}
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     </div>
 
