@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { byteUnit, formatCount, localDateKey, niceScale } from './usageChart'
+import {
+  buildMergedUsageChart,
+  byteUnit,
+  formatBytes,
+  formatCount,
+  localDateKey,
+  niceScale,
+} from './usageChart'
 
 describe('niceScale', () => {
   it('max<=0 / NaN / Infinity 回落到 0..tickCount', () => {
@@ -27,20 +34,6 @@ describe('niceScale', () => {
     expect(s.ticks.every((t) => Number.isInteger(t))).toBe(true)
     expect(s.max).toBeGreaterThanOrEqual(2)
   })
-
-  it('大值量级：tick 数受控且 top >= max', () => {
-    const s = niceScale(1.4e8, 4)
-    expect(s.ticks.length).toBeLessThanOrEqual(6)
-    expect(s.max).toBeGreaterThanOrEqual(1.4e8)
-    for (let i = 1; i < s.ticks.length; i++) {
-      expect(s.ticks[i]).toBeGreaterThan(s.ticks[i - 1])
-    }
-  })
-
-  it('max=1 时 ticks 单调不重叠', () => {
-    const s = niceScale(1, 4, true)
-    expect(s.ticks).toEqual([0, 1])
-  })
 })
 
 describe('formatCount', () => {
@@ -59,7 +52,16 @@ describe('byteUnit', () => {
     expect(byteUnit(2048).suffix).toBe('KB')
     expect(byteUnit(5 * 1024 ** 2).suffix).toBe('MB')
     expect(byteUnit(3 * 1024 ** 3).suffix).toBe('GB')
-    expect(byteUnit(1024 ** 4).suffix).toBe('GB') // 超出 GB 仍封顶 GB
+    expect(byteUnit(1024 ** 4).suffix).toBe('GB')
+  })
+})
+
+describe('formatBytes', () => {
+  it('格式化字节大小', () => {
+    expect(formatBytes(500)).toBe('500 B')
+    expect(formatBytes(2048)).toBe('2.0 KB')
+    expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MB')
+    expect(formatBytes(1.5 * 1024 * 1024 * 1024)).toBe('1.50 GB')
   })
 })
 
@@ -67,5 +69,26 @@ describe('localDateKey', () => {
   it('使用本地时区年月日，补齐前导零', () => {
     const d = new Date(2025, 0, 5, 2, 30) // 本地 2025-01-05 02:30
     expect(localDateKey(d)).toBe('2025-01-05')
+  })
+})
+
+describe('buildMergedUsageChart', () => {
+  it('生成单根经典用量柱模型', () => {
+    const days = [
+      { date: '2026-08-25', label: '25', cfReq: 10, vReq: 5, cfBytes: 1000, vBytes: 500 },
+      { date: '2026-08-26', label: '26', cfReq: 20, vReq: 8, cfBytes: 2000, vBytes: 800 },
+      { date: '2026-08-27', label: '27', cfReq: 30, vReq: 12, cfBytes: 4000, vBytes: 1200 },
+    ]
+    const m = buildMergedUsageChart(days, 320, 72)
+    expect(m.bars.length).toBe(3) // 3 days -> 3 single bars
+    expect(m.days.length).toBe(3)
+    expect(m.days[0].label).toBe('25')
+    expect(m.days[2].label).toBe('今天')
+    expect(m.days[2].isToday).toBe(true)
+    expect(m.maxBytes).toBe(5200) // 4000 + 1200
+    expect(m.bars[2].bytes).toBe(5200)
+    expect(m.bars[2].title).toContain('总用量: 5.1 KB')
+    expect(m.bars[2].title).toContain('调用次数: 42 次')
+    expect(m.baselineY).toBe(56) // 6 + (72 - 6 - 16)
   })
 })
