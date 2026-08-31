@@ -50,11 +50,13 @@ describe('appendLatencyPoint', () => {
     expect(hist[11]?.ms).toBe(114)
   })
 
-  it('丢弃 2 小时窗口外的旧点（相对最新采样点）', () => {
+  it('跨较长时间间隔依然连续保留历史采样点（不因绝对时间清空）', () => {
     let hist: LatencyPoint[] = [{ ts: 0, ok: true, ms: 100 }]
+    // 即使间隔超过 2 小时，依然连续推入
     hist = appendLatencyPoint(hist, { ts: WINDOW_MS + 60_000, ok: true, ms: 200 })
-    expect(hist.length).toBe(1)
-    expect(hist[0]?.ms).toBe(200)
+    expect(hist.length).toBe(2)
+    expect(hist[0]?.ms).toBe(100)
+    expect(hist[1]?.ms).toBe(200)
   })
 
   it('间隔小于 150 秒的点合并更新而不是新增', () => {
@@ -79,15 +81,16 @@ describe('时序持久化', () => {
     expect(loaded[1]?.ok).toBe(false)
   })
 
-  it('读取时丢弃 2 小时窗口外的旧记录', () => {
+  it('读取时保留跨会话历史点（不因超过 2 小时而被强行清空）', () => {
     const now = Date.now()
-    saveLatencySeries('test-stale', [
-      { ts: now - WINDOW_MS - 60_000, ok: true, ms: 100 },
+    saveLatencySeries('test-persisted', [
+      { ts: now - WINDOW_MS - 3_600_000, ok: true, ms: 100 },
       { ts: now, ok: true, ms: 200 },
     ])
-    const loaded = loadLatencySeries('test-stale')
-    expect(loaded.length).toBe(1)
-    expect(loaded[0]?.ms).toBe(200)
+    const loaded = loadLatencySeries('test-persisted')
+    expect(loaded.length).toBe(2)
+    expect(loaded[0]?.ms).toBe(100)
+    expect(loaded[1]?.ms).toBe(200)
   })
 
   it('未知 key 返回空数组', () => {

@@ -22,6 +22,7 @@ import {
   type LatencyPoint,
 } from '@/lib/latencyHistory'
 import { openExternalUrl } from '@/lib/urls'
+import { byteUnit, formatCount, localDateKey, niceScale } from '@/lib/usageChart'
 
 const toast = useToast()
 
@@ -79,44 +80,124 @@ function bucketBytes(b: TrafficBucket): number {
   return b.bytes_up + b.bytes_down
 }
 
-/** 近 7 日柱状图数据：高度相对最大日归一（百分比）；缺勤日期补零保持 7 根柱 */
-const weekBars = computed(() => {
+interface UsageDay {
+  date: string
+  label: string
+  cfReq: number
+  vReq: number
+  cfBytes: number
+  vBytes: number
+}
+
+/** 近 7 日双出口用量：缺勤日期补零保持 7 天 */
+const weekDays = computed<UsageDay[]>(() => {
   const days = traffic.value?.history ?? []
   const byDate = new Map(days.map((d) => [d.date, d]))
-  const list: { date: string; cf: number; vercel: number }[] = []
+  const list: UsageDay[] = []
   for (let i = 6; i >= 0; i--) {
-    const date = new Date(Date.now() - i * 24 * 3600 * 1000)
-    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    const key = localDateKey(new Date(Date.now() - i * 24 * 3600 * 1000))
     const d = byDate.get(key)
     list.push({
       date: key,
-      cf: d ? bucketBytes(d.cf) : 0,
-      vercel: d ? bucketBytes(d.vercel) : 0,
+      label: key.slice(8),
+      cfReq: d?.cf.requests ?? 0,
+      vReq: d?.vercel.requests ?? 0,
+      cfBytes: d ? bucketBytes(d.cf) : 0,
+      vBytes: d ? bucketBytes(d.vercel) : 0,
     })
   }
-  const max = Math.max(1, ...list.map((d) => d.cf + d.vercel))
-  return list.map((d) => ({
-    ...d,
-    label: d.date.slice(5).replace('-', '/'),
-    cfPct: (d.cf / max) * 100,
-    vercelPct: (d.vercel / max) * 100,
-  }))
+  return list
 })
 
-/** 占比环：今日 CF / Vercel 流量份额；今日为空时回落到累计口径 */
-const shareDonut = computed(() => {
-  if (!traffic.value) return { cfPct: 0, vercelPct: 0, total: 0, source: 'today' as const }
-  const tCf = bucketBytes(traffic.value.today.cf)
-  const tV = bucketBytes(traffic.value.today.vercel)
-  const cf = tCf + tV > 0 ? tCf : bucketBytes(traffic.value.total.cf)
-  const vercel = tCf + tV > 0 ? tV : bucketBytes(traffic.value.total.vercel)
-  const sum = cf + vercel
-  if (sum === 0) return { cfPct: 0, vercelPct: 0, total: 0, source: 'today' as const }
+/**
+ * 双轴用量图模型：左轴调用次数（CF/Vercel 双柱），右轴调用量（CF/Vercel 双曲线）。
+ * 两轴独立 nice-scale，右轴按最大值动态选 B/KB/MB/GB 单位。
+ */
+const usageChart = computed(() => {
+  const W = 332
+  const H = 128
+  const L = 34
+  const R = 42
+  const T = 10
+  const B = 22
+  const pw = W - L - R
+  const ph = H - T - B
+
+  const days = weekDays.value
+  // 左轴调用次数：整数步长；右轴调用量：先按最大值选单位，再在单位空间内 nice-scale，刻度保持整数
+  const req = niceScale(Math.max(0, ...days.map((d) => Math.max(d.cfReq, d.vReq))), 4, true)
+  const maxBytes = Math.max(0, ...days.map((d) => Math.max(d.cfBytes, d.vBytes)))
+  const unit = byteUnit(maxBytes)
+  const bytInUnit = niceScale(maxBytes / unit.div)
+  const bytRawMax = bytInUnit.max * unit.div
+
+  const reqY = (v: number) => T + ph * (1 - v / req.max)
+  const bytY = (v: number) => T + ph * (1 - v / bytRawMax)
+
+  const n = days.length || 1
+  const groupW = pw / n
+  const barW = Math.min(8, groupW * 0.18)
+
+  // 曲线与柱同色（出口品牌色：CF 橙 / Vercel 墨），以更细线宽与数据点区分
+  const CF_LINE = '#f6821f'
+
+  const bars: { x: number; y: number; w: number; h: number; cf: boolean; title: string }[] = []
+  const cfPts: string[] = []
+  const vPts: string[] = []
+  const dots: { x: number; y: number; cf: boolean; title: string }[] = []
+
+  days.forEach((d, i) => {
+    const cx = L + groupW * (i + 0.5)
+    const cfH = (d.cfReq / req.max) * ph
+    const vH = (d.vReq / req.max) * ph
+    bars.push({
+      x: cx - barW - 1.5,
+      y: T + ph - cfH,
+      w: barW,
+      h: cfH,
+      cf: true,
+      title: `${d.date}\nCloudflare 调用 ${d.cfReq} 次`,
+    })
+    bars.push({
+      x: cx + 1.5,
+      y: T + ph - vH,
+      w: barW,
+      h: vH,
+      cf: false,
+      title: `${d.date}\nVercel 调用 ${d.vReq} 次`,
+    })
+    const yc = bytY(d.cfBytes)
+    const yv = bytY(d.vBytes)
+    cfPts.push(`${cx.toFixed(1)},${yc.toFixed(1)}`)
+    vPts.push(`${cx.toFixed(1)},${yv.toFixed(1)}`)
+    dots.push({ x: cx, y: yc, cf: true, title: `${d.date}\nCloudflare ${formatBytes(d.cfBytes)}` })
+    dots.push({ x: cx, y: yv, cf: false, title: `${d.date}\nVercel ${formatBytes(d.vBytes)}` })
+  })
+
+  const leftTicks = req.ticks.map((v) => ({ y: reqY(v), text: formatCount(v) }))
+  const rightTicks = bytInUnit.ticks.map((v) => ({
+    y: bytY(v * unit.div),
+    text: `${parseFloat(v.toFixed(1))}`,
+  }))
+
   return {
-    cfPct: (cf / sum) * 100,
-    vercelPct: (vercel / sum) * 100,
-    total: sum,
-    source: tCf + tV > 0 ? ('today' as const) : ('total' as const),
+    W,
+    H,
+    L,
+    R,
+    T,
+    B,
+    pw,
+    ph,
+    bars,
+    cfLine: cfPts.join(' '),
+    vLine: vPts.join(' '),
+    dots,
+    leftTicks,
+    rightTicks,
+    unitSuffix: unit.suffix,
+    cfLineColor: CF_LINE,
+    days,
   }
 })
 
@@ -138,7 +219,7 @@ async function refreshTraffic(): Promise<void> {
   if (!isTauri()) {
     const day = 24 * 3600 * 1000
     const mk = (ago: number, cfB: number, vB: number): DayUsage => ({
-      date: new Date(Date.now() - ago * day).toISOString().slice(0, 10),
+      date: localDateKey(new Date(Date.now() - ago * day)),
       cf: { requests: Math.round(cfB / 400_000), bytes_up: Math.round(cfB * 0.08), bytes_down: cfB },
       vercel: { requests: Math.round(vB / 500_000), bytes_up: Math.round(vB * 0.06), bytes_down: vB },
     })
@@ -171,7 +252,7 @@ async function refreshTraffic(): Promise<void> {
   }
 }
 
-// ---- 链接状态（接口 + 常用站点；10 分钟轮询，仅显示近 2 小时时序）----
+// ---- 连接状态（接口 + 常用站点；10 分钟轮询，仅显示近 2 小时时序）----
 type Iface = 'cf' | 'vercel'
 
 interface IfaceRow {
@@ -199,7 +280,6 @@ const siteRows = ref<SiteRow[]>([
   { name: 'GitHub', host: 'github.com', iface: 'cf', history: [], testing: false },
   { name: 'X', host: 'x.com', iface: 'cf', history: [], testing: false },
   { name: 'OpenAI', host: 'openai.com', iface: 'vercel', history: [], testing: false },
-  { name: 'Anthropic', host: 'anthropic.com', iface: 'cf', history: [], testing: false },
 ])
 
 const IFACE_CHOICE_PREFIX = 'pony-site-iface:'
@@ -636,143 +716,206 @@ async function submitImportOrChained() {
 
     <!-- 已配置：极简主界面 -->
     <div v-else class="space-y-10">
-      <!-- 头部主控：圆形电源按钮 + 模式 switch + 弱化状态文字 -->
-      <section class="flex flex-col items-center pt-8">
-        <button
-          @click="toggleProxy"
-          :title="isRunning ? '点击关闭加速' : '点击开启加速'"
-          :aria-label="isRunning ? '加速运行中，点击关闭' : '加速已停止，点击开启'"
-          :class="[
-            'h-20 w-20 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer',
-            isRunning
-              ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25 hover:bg-emerald-600'
-              : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',
-          ]"
-        >
-          <Power class="h-8 w-8" />
-        </button>
-
-        <!-- 加速模式 switch：智能 / 全局 -->
-        <div class="mt-6 inline-flex items-center rounded-full bg-muted p-1" role="group" aria-label="加速模式">
+      <!-- 头部：主控（电源按钮 + 模式）居左，用量统计横向并排 -->
+      <div class="flex items-center gap-24 pt-6">
+        <!-- 主控：圆形电源按钮 + 模式 switch + 弱化状态文字（整体居左） -->
+        <section class="flex flex-col items-center shrink-0 w-48">
           <button
-            @click="setProxyMode('whitelist')"
-            :aria-pressed="proxyMode === 'whitelist'"
+            @click="toggleProxy"
+            :title="isRunning ? '点击关闭加速' : '点击开启加速'"
+            :aria-label="isRunning ? '加速运行中，点击关闭' : '加速已停止，点击开启'"
             :class="[
-              'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer',
-              proxyMode === 'whitelist'
-                ? 'bg-card text-foreground font-medium shadow-sm'
-                : 'text-muted-foreground hover:text-foreground',
+              'h-20 w-20 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer',
+              isRunning
+                ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25 hover:bg-emerald-600'
+                : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',
             ]"
           >
-            智能
+            <Power class="h-8 w-8" />
           </button>
-          <button
-            @click="setProxyMode('global')"
-            :aria-pressed="proxyMode === 'global'"
-            :class="[
-              'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer',
-              proxyMode === 'global'
-                ? 'bg-card text-foreground font-medium shadow-sm'
-                : 'text-muted-foreground hover:text-foreground',
-            ]"
-          >
-            全局
-          </button>
-        </div>
 
-        <p class="mt-3 text-xs text-muted-foreground">{{ statusText }}</p>
-      </section>
-
-      <!-- 用量统计：近 7 日双出口柱状图 + 占比环 + 指标 -->
-      <section class="space-y-4">
-        <div class="flex items-center justify-between">
-          <h3 class="text-sm font-semibold">用量统计</h3>
-          <div class="flex items-center gap-4 text-xs text-muted-foreground">
-            <span class="inline-flex items-center gap-1.5">
-              <span class="h-2.5 w-2.5 rounded-sm bg-[#f6821f]"></span>Cloudflare
-            </span>
-            <span class="inline-flex items-center gap-1.5">
-              <span class="h-2.5 w-2.5 rounded-sm bg-foreground/80"></span>Vercel
-            </span>
+          <!-- 加速模式 switch：智能 / 全局 -->
+          <div class="mt-5 inline-flex items-center rounded-full bg-muted p-1" role="group" aria-label="加速模式">
+            <button
+              @click="setProxyMode('whitelist')"
+              :aria-pressed="proxyMode === 'whitelist'"
+              :class="[
+                'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer',
+                proxyMode === 'whitelist'
+                  ? 'bg-card text-foreground font-medium shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              ]"
+            >
+              智能
+            </button>
+            <button
+              @click="setProxyMode('global')"
+              :aria-pressed="proxyMode === 'global'"
+              :class="[
+                'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer',
+                proxyMode === 'global'
+                  ? 'bg-card text-foreground font-medium shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground',
+              ]"
+            >
+              全局
+            </button>
           </div>
-        </div>
 
-        <div class="grid grid-cols-[1fr_auto] items-center gap-8">
-          <!-- 近 7 日流量柱状图（堆叠：CF 橙 + Vercel 墨） -->
-          <div>
-            <div class="flex items-end gap-2 h-28">
-              <div
-                v-for="day in weekBars"
-                :key="day.date"
-                class="flex-1 flex flex-col justify-end h-full group"
-                :title="`${day.date}\nCloudflare ${formatBytes(day.cf)}\nVercel ${formatBytes(day.vercel)}`"
-              >
-                <div class="w-full rounded-t-md bg-muted/50 flex flex-col-reverse overflow-hidden" style="height: 100%">
-                  <div class="bg-[#f6821f] transition-all duration-300" :style="{ height: day.cfPct + '%' }"></div>
-                  <div class="bg-foreground/80 transition-all duration-300" :style="{ height: day.vercelPct + '%' }"></div>
-                </div>
-              </div>
-            </div>
-            <div class="flex gap-2 mt-1.5">
-              <span
-                v-for="day in weekBars"
-                :key="day.date"
-                class="flex-1 text-center text-[10px] text-muted-foreground tabular-nums"
-              >
-                {{ day.label }}
+          <p class="mt-3 text-xs text-muted-foreground text-center">{{ statusText }}</p>
+        </section>
+
+        <!-- 用量统计：近 7 日双轴图（左轴调用次数·双柱，右轴调用量·双曲线） -->
+        <section class="flex-1 min-w-0 space-y-2">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-semibold">
+              用量统计
+              <span class="ml-2 text-xs font-normal text-muted-foreground">
+                今日请求
+                <span class="text-foreground font-medium tabular-nums">{{ todayTotals.requests }}</span>
+                · 累计
+                <span class="text-foreground font-medium tabular-nums">{{ formatBytes(totalBytes) }}</span>
+              </span>
+            </h3>
+            <div class="flex items-center gap-3 text-[11px] text-muted-foreground">
+              <span class="inline-flex items-center gap-1.5">
+                <span class="h-2.5 w-2.5 rounded-sm bg-[#f6821f]"></span>CF 次数
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <span class="h-2.5 w-2.5 rounded-sm bg-foreground/80"></span>Vercel 次数
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <span class="inline-block h-0.5 w-3.5 rounded-full bg-[#f6821f]"></span>CF 流量
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <span class="inline-block h-0.5 w-3.5 rounded-full bg-foreground/80"></span>Vercel 流量
               </span>
             </div>
           </div>
 
-          <!-- 出口占比环 -->
-          <div class="flex items-center gap-5">
-            <div class="relative h-28 w-28">
-              <svg viewBox="0 0 42 42" class="h-full w-full -rotate-90">
-                <circle cx="21" cy="21" r="15.9155" fill="none" class="stroke-muted" stroke-width="5" />
-                <circle
-                  v-if="shareDonut.cfPct > 0"
-                  cx="21" cy="21" r="15.9155" fill="none"
-                  stroke="#f6821f" stroke-width="5" stroke-linecap="round"
-                  :stroke-dasharray="`${shareDonut.cfPct} 100`"
-                />
-                <circle
-                  v-if="shareDonut.vercelPct > 0"
-                  cx="21" cy="21" r="15.9155" fill="none"
-                  class="stroke-foreground/80" stroke-width="5" stroke-linecap="round"
-                  :stroke-dasharray="`${shareDonut.vercelPct} 100`"
-                  :stroke-dashoffset="-shareDonut.cfPct"
-                />
-              </svg>
-              <div class="absolute inset-0 flex flex-col items-center justify-center">
-                <span class="text-sm font-semibold tabular-nums">{{ formatBytes(shareDonut.total) }}</span>
-                <span class="text-[10px] text-muted-foreground">{{ shareDonut.source === 'today' ? '今日' : '累计' }}</span>
-              </div>
-            </div>
-            <div class="space-y-2 text-xs">
-              <div class="flex items-center gap-2">
-                <span class="h-2.5 w-2.5 rounded-full bg-[#f6821f]"></span>
-                <span class="text-muted-foreground">Cloudflare</span>
-                <span class="font-medium tabular-nums">{{ shareDonut.cfPct.toFixed(0) }}%</span>
-              </div>
-              <div class="flex items-center gap-2">
-                <span class="h-2.5 w-2.5 rounded-full bg-foreground/80"></span>
-                <span class="text-muted-foreground">Vercel</span>
-                <span class="font-medium tabular-nums">{{ shareDonut.vercelPct.toFixed(0) }}%</span>
-              </div>
-              <div class="pt-1 text-muted-foreground">
-                今日请求 <span class="text-foreground font-medium tabular-nums">{{ todayTotals.requests }}</span>
-                 · 累计 <span class="text-foreground font-medium tabular-nums">{{ formatBytes(totalBytes) }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-        <p class="text-xs text-muted-foreground">按出口归账：Cloudflare 与 Vercel 分别统计，按日本地计数，柱条为近 7 日流量。</p>
-      </section>
+          <svg
+            :viewBox="`0 0 ${usageChart.W} ${usageChart.H}`"
+            class="w-full h-auto select-none"
+            role="img"
+            aria-label="近 7 日双出口用量统计：柱状为调用次数，曲线为调用量"
+          >
+            <!-- 横向网格线（对齐左轴刻度） -->
+            <line
+              v-for="(t, i) in usageChart.leftTicks"
+              :key="'g' + i"
+              :x1="usageChart.L"
+              :x2="usageChart.L + usageChart.pw"
+              :y1="t.y"
+              :y2="t.y"
+              class="stroke-muted"
+              stroke-width="1"
+              :stroke-dasharray="i === 0 ? undefined : '3 4'"
+            />
 
-      <!-- 链接状态：接口 + 常用站点连通性 -->
+            <!-- 双柱：左轴调用次数 -->
+            <rect
+              v-for="(b, i) in usageChart.bars"
+              :key="'b' + i"
+              :x="b.x"
+              :y="b.y"
+              :width="b.w"
+              :height="b.h"
+              rx="2"
+              :fill="b.cf ? '#f6821f' : undefined"
+              :class="b.cf ? 'opacity-90' : 'fill-foreground/80'"
+            >
+              <title>{{ b.title }}</title>
+            </rect>
+
+            <!-- 双曲线：右轴调用量 -->
+            <polyline
+              :points="usageChart.cfLine"
+              fill="none"
+              :stroke="usageChart.cfLineColor"
+              stroke-width="0.75"
+              stroke-linejoin="round"
+              stroke-linecap="round"
+            />
+            <polyline
+              :points="usageChart.vLine"
+              fill="none"
+              class="stroke-foreground/80"
+              stroke-width="0.75"
+              stroke-linejoin="round"
+              stroke-linecap="round"
+            />
+            <circle
+              v-for="(d, i) in usageChart.dots"
+              :key="'d' + i"
+              :cx="d.x"
+              :cy="d.y"
+              r="1.25"
+              :fill="d.cf ? usageChart.cfLineColor : undefined"
+              :class="d.cf ? '' : 'fill-foreground/80'"
+            >
+              <title>{{ d.title }}</title>
+            </circle>
+
+            <!-- 左轴：调用次数 -->
+            <text
+              v-for="(t, i) in usageChart.leftTicks"
+              :key="'l' + i"
+              :x="usageChart.L - 6"
+              :y="t.y + 3"
+              text-anchor="end"
+              class="fill-muted-foreground/60 text-[8px] tabular-nums"
+            >
+              {{ t.text }}
+            </text>
+            <text
+              :x="usageChart.L - 6"
+              :y="usageChart.H - 6"
+              text-anchor="end"
+              class="fill-muted-foreground text-[8px]"
+            >
+              次数
+            </text>
+
+            <!-- 右轴：调用量（单位随最大值动态切换） -->
+            <text
+              v-for="(t, i) in usageChart.rightTicks"
+              :key="'r' + i"
+              :x="usageChart.L + usageChart.pw + 6"
+              :y="t.y + 3"
+              text-anchor="start"
+              class="fill-muted-foreground/60 text-[8px] tabular-nums"
+            >
+              {{ t.text }}
+            </text>
+            <text
+              :x="usageChart.L + usageChart.pw + 6"
+              :y="usageChart.H - 6"
+              text-anchor="start"
+              class="fill-muted-foreground text-[8px]"
+            >
+              {{ usageChart.unitSuffix }}
+            </text>
+
+            <!-- X 轴日期标签 -->
+            <text
+              v-for="(d, i) in usageChart.days"
+              :key="'x' + i"
+              :x="usageChart.L + usageChart.pw * ((i + 0.5) / (usageChart.days.length || 1))"
+              :y="usageChart.H - 6"
+              text-anchor="middle"
+              class="fill-muted-foreground/60 text-[8px] tabular-nums"
+            >
+              {{ d.label }}
+            </text>
+          </svg>
+
+        </section>
+      </div>
+
+      <!-- 连接状态：接口 + 常用站点连通性 -->
       <section class="space-y-1">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-sm font-semibold">链接状态</h3>
+          <h3 class="text-sm font-semibold">连接状态</h3>
           <button
             @click="runAllTests"
             :disabled="isTestingAll"
@@ -789,81 +932,89 @@ async function submitImportOrChained() {
         <div
           v-for="row in ifaceRows"
           :key="row.id"
-          class="flex items-center gap-3 py-2.5"
+          class="flex items-center justify-between gap-3 py-2.5"
         >
-          <div class="w-32 shrink-0">
-            <div class="text-sm">{{ row.name }}</div>
-            <div class="text-xs text-muted-foreground">{{ row.endpoint }}</div>
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="w-28 shrink-0">
+              <div class="text-sm font-medium leading-none">{{ row.name }}</div>
+              <div class="text-xs text-muted-foreground font-mono mt-1 truncate">{{ row.endpoint }}</div>
+            </div>
           </div>
-          <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-3 shrink-0">
             <LatencyBars :history="row.history" />
+            <span class="w-14 shrink-0 text-right text-xs font-mono tabular-nums" :class="latestClass(row.history)">
+              {{ latestText(row.history) }}
+            </span>
+            <button
+              @click="testIfaceRow(row)"
+              :disabled="row.testing"
+              title="立即测速"
+              :aria-label="`立即测速 ${row.name}`"
+              class="h-7 w-7 shrink-0 inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': row.testing }" />
+            </button>
           </div>
-          <span class="w-14 shrink-0 text-right text-xs font-mono tabular-nums" :class="latestClass(row.history)">
-            {{ latestText(row.history) }}
-          </span>
-          <button
-            @click="testIfaceRow(row)"
-            :disabled="row.testing"
-            title="立即测速"
-            :aria-label="`立即测速 ${row.name}`"
-            class="h-7 w-7 shrink-0 inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50"
-          >
-            <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': row.testing }" />
-          </button>
         </div>
 
         <!-- 常用站点行 -->
         <div
           v-for="row in siteRows"
           :key="row.host"
-          class="flex items-center gap-3 py-2.5"
+          class="flex items-center justify-between gap-3 py-2.5"
         >
-          <div class="w-32 shrink-0">
-            <div class="text-sm">{{ row.name }}</div>
-            <div class="text-xs text-muted-foreground">{{ row.host }}</div>
+          <div class="flex items-center gap-2 min-w-0">
+            <div class="w-28 shrink-0">
+              <div class="text-sm font-medium leading-none">{{ row.name }}</div>
+              <div class="text-xs text-muted-foreground font-mono mt-1 truncate">{{ row.host }}</div>
+            </div>
+            <!-- 出网接口 switch -->
+            <div
+              class="shrink-0 inline-flex items-center rounded-full bg-muted p-0.5 text-xs"
+              role="group"
+              :aria-label="`${row.name} 测速接口`"
+            >
+              <button
+                @click="switchSiteIface(row, 'cf')"
+                :aria-pressed="row.iface === 'cf'"
+                :class="[
+                  'px-2 py-0.5 rounded-full text-[11px] transition-all duration-150 cursor-pointer',
+                  row.iface === 'cf'
+                    ? 'bg-card text-foreground font-medium shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                ]"
+              >
+                CF
+              </button>
+              <button
+                @click="switchSiteIface(row, 'vercel')"
+                :aria-pressed="row.iface === 'vercel'"
+                :class="[
+                  'px-2 py-0.5 rounded-full text-[11px] transition-all duration-150 cursor-pointer',
+                  row.iface === 'vercel'
+                    ? 'bg-card text-foreground font-medium shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                ]"
+              >
+                Vercel
+              </button>
+            </div>
           </div>
-          <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-3 shrink-0">
             <LatencyBars :history="row.history" />
-          </div>
-          <!-- 出网接口 switch -->
-          <div class="shrink-0 inline-flex items-center rounded-full bg-muted p-0.5 text-xs" role="group" :aria-label="`${row.name} 测速接口`">
+            <span class="w-14 shrink-0 text-right text-xs font-mono tabular-nums" :class="latestClass(row.history)">
+              {{ latestText(row.history) }}
+            </span>
             <button
-              @click="switchSiteIface(row, 'cf')"
-              :aria-pressed="row.iface === 'cf'"
-              :class="[
-                'px-2 py-1 rounded-full transition-all duration-150 cursor-pointer',
-                row.iface === 'cf'
-                  ? 'bg-card text-foreground font-medium shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground',
-              ]"
+              @click="testSiteRow(row)"
+              :disabled="row.testing"
+              title="立即测速"
+              :aria-label="`立即测速 ${row.name}`"
+              class="h-7 w-7 shrink-0 inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50"
             >
-              CF
-            </button>
-            <button
-              @click="switchSiteIface(row, 'vercel')"
-              :aria-pressed="row.iface === 'vercel'"
-              :class="[
-                'px-2 py-1 rounded-full transition-all duration-150 cursor-pointer',
-                row.iface === 'vercel'
-                  ? 'bg-card text-foreground font-medium shadow-sm'
-                  : 'text-muted-foreground hover:text-foreground',
-              ]"
-            >
-              Vercel
+              <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': row.testing }" />
             </button>
           </div>
-          <span class="w-14 shrink-0 text-right text-xs font-mono tabular-nums" :class="latestClass(row.history)">
-            {{ latestText(row.history) }}
-          </span>
-          <button
-            @click="testSiteRow(row)"
-            :disabled="row.testing"
-            title="立即测速"
-            :aria-label="`立即测速 ${row.name}`"
-            class="h-7 w-7 shrink-0 inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-50"
-          >
-            <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': row.testing }" />
-          </button>
         </div>
         </div>
 
