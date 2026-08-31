@@ -687,8 +687,8 @@ struct DayEntry {
 static TRAFFIC_STATE: std::sync::Mutex<Option<TrafficPersist>> = std::sync::Mutex::new(None);
 /// 已并入 TRAFFIC_STATE 的引擎原子读数基线（仅进程内存，绝不持久化——
 /// 重启后引擎原子归零，若把旧基线落盘会把新一轮计数全部吞掉）。
-/// 顺序：(cf_up, cf_down, cf_reqs, vercel_up, vercel_down, vercel_reqs)
-static TRAFFIC_BASE: std::sync::Mutex<Option<(u64, u64, u64, u64, u64, u64)>> = std::sync::Mutex::new(None);
+type TrafficRawCounters = (u64, u64, u64, u64, u64, u64);
+static TRAFFIC_BASE: std::sync::Mutex<Option<TrafficRawCounters>> = std::sync::Mutex::new(None);
 
 fn traffic_path() -> std::path::PathBuf { data_dir().join("traffic.json") }
 
