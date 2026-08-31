@@ -24,7 +24,14 @@ import {
   type LatencyPoint,
 } from '@/lib/latencyHistory'
 import { openExternalUrl } from '@/lib/urls'
-import { byteUnit, formatCount, localDateKey, niceScale } from '@/lib/usageChart'
+import {
+  appendSpeedSample,
+  calculateSpeed,
+  formatSpeedParts,
+  generateSpeedWaveform,
+  type SpeedSample,
+} from '@/lib/speedTracker'
+import { buildMergedUsageChart, formatBytes, localDateKey } from '@/lib/usageChart'
 
 const toast = useToast()
 
@@ -71,13 +78,6 @@ interface TrafficStats {
 }
 const traffic = ref<TrafficStats | null>(null)
 
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`
-  return `${(n / 1024 ** 3).toFixed(2)} GB`
-}
-
 function bucketBytes(b: TrafficBucket): number {
   return b.bytes_up + b.bytes_down
 }
@@ -112,95 +112,10 @@ const weekDays = computed<UsageDay[]>(() => {
 })
 
 /**
- * 双轴用量图模型：左轴调用次数（CF/Vercel 双柱），右轴调用量（CF/Vercel 双曲线）。
- * 两轴独立 nice-scale，右轴按最大值动态选 B/KB/MB/GB 单位。
+ * 极简合并用量图模型：无纵轴、无横线、紧凑间距、调用次数直观可见、合并实时网速波形
  */
-const usageChart = computed(() => {
-  const W = 332
-  const H = 128
-  const L = 34
-  const R = 42
-  const T = 10
-  const B = 22
-  const pw = W - L - R
-  const ph = H - T - B
-
-  const days = weekDays.value
-  // 左轴调用次数：整数步长；右轴调用量：先按最大值选单位，再在单位空间内 nice-scale，刻度保持整数
-  const req = niceScale(Math.max(0, ...days.map((d) => Math.max(d.cfReq, d.vReq))), 4, true)
-  const maxBytes = Math.max(0, ...days.map((d) => Math.max(d.cfBytes, d.vBytes)))
-  const unit = byteUnit(maxBytes)
-  const bytInUnit = niceScale(maxBytes / unit.div)
-  const bytRawMax = bytInUnit.max * unit.div
-
-  const reqY = (v: number) => T + ph * (1 - v / req.max)
-  const bytY = (v: number) => T + ph * (1 - v / bytRawMax)
-
-  const n = days.length || 1
-  const groupW = pw / n
-  const barW = Math.min(8, groupW * 0.18)
-
-  // 曲线与柱同色（出口品牌色：CF 橙 / Vercel 墨），以更细线宽与数据点区分
-  const CF_LINE = '#f6821f'
-
-  const bars: { x: number; y: number; w: number; h: number; cf: boolean; title: string }[] = []
-  const cfPts: string[] = []
-  const vPts: string[] = []
-  const dots: { x: number; y: number; cf: boolean; title: string }[] = []
-
-  days.forEach((d, i) => {
-    const cx = L + groupW * (i + 0.5)
-    const cfH = (d.cfReq / req.max) * ph
-    const vH = (d.vReq / req.max) * ph
-    bars.push({
-      x: cx - barW - 1.5,
-      y: T + ph - cfH,
-      w: barW,
-      h: cfH,
-      cf: true,
-      title: `${d.date}\nCloudflare 调用 ${d.cfReq} 次`,
-    })
-    bars.push({
-      x: cx + 1.5,
-      y: T + ph - vH,
-      w: barW,
-      h: vH,
-      cf: false,
-      title: `${d.date}\nVercel 调用 ${d.vReq} 次`,
-    })
-    const yc = bytY(d.cfBytes)
-    const yv = bytY(d.vBytes)
-    cfPts.push(`${cx.toFixed(1)},${yc.toFixed(1)}`)
-    vPts.push(`${cx.toFixed(1)},${yv.toFixed(1)}`)
-    dots.push({ x: cx, y: yc, cf: true, title: `${d.date}\nCloudflare ${formatBytes(d.cfBytes)}` })
-    dots.push({ x: cx, y: yv, cf: false, title: `${d.date}\nVercel ${formatBytes(d.vBytes)}` })
-  })
-
-  const leftTicks = req.ticks.map((v) => ({ y: reqY(v), text: formatCount(v) }))
-  const rightTicks = bytInUnit.ticks.map((v) => ({
-    y: bytY(v * unit.div),
-    text: `${parseFloat(v.toFixed(1))}`,
-  }))
-
-  return {
-    W,
-    H,
-    L,
-    R,
-    T,
-    B,
-    pw,
-    ph,
-    bars,
-    cfLine: cfPts.join(' '),
-    vLine: vPts.join(' '),
-    dots,
-    leftTicks,
-    rightTicks,
-    unitSuffix: unit.suffix,
-    cfLineColor: CF_LINE,
-    days,
-  }
+const mergedChart = computed(() => {
+  return buildMergedUsageChart(weekDays.value, 320, 72)
 })
 
 const todayTotals = computed(() => {
@@ -217,7 +132,19 @@ const totalBytes = computed(() => {
   return bucketBytes(traffic.value.total.cf) + bucketBytes(traffic.value.total.vercel)
 })
 
+const currentSpeed = ref<{ up: number; down: number }>({ up: 0, down: 0 })
+const speedHistory = ref<SpeedSample[]>([])
+const prevTotals = ref<{ up: number; down: number; ts: number } | null>(null)
+
+const speedChart = computed(() => {
+  return generateSpeedWaveform(speedHistory.value, 320, 72, 24, 6, 16)
+})
+
+const speedDownParts = computed(() => formatSpeedParts(currentSpeed.value.down))
+const speedUpParts = computed(() => formatSpeedParts(currentSpeed.value.up))
+
 async function refreshTraffic(): Promise<void> {
+  const now = Date.now()
   if (!isTauri()) {
     const day = 24 * 3600 * 1000
     const mk = (ago: number, cfB: number, vB: number): DayUsage => ({
@@ -225,13 +152,18 @@ async function refreshTraffic(): Promise<void> {
       cf: { requests: Math.round(cfB / 400_000), bytes_up: Math.round(cfB * 0.08), bytes_down: cfB },
       vercel: { requests: Math.round(vB / 500_000), bytes_up: Math.round(vB * 0.06), bytes_down: vB },
     })
+
+    const mockDownDelta = isRunning.value ? Math.floor(Math.random() * 800_000) + 120_000 : 0
+    const mockUpDelta = isRunning.value ? Math.floor(mockDownDelta * 0.08) : 0
+    const baseTodayDown = 38_000_000 + (traffic.value ? 0 : 0)
+
     traffic.value = {
       today: {
-        cf: { requests: 96, bytes_up: 2_400_000, bytes_down: 38_000_000 },
+        cf: { requests: 96, bytes_up: 2_400_000 + mockUpDelta, bytes_down: baseTodayDown + mockDownDelta },
         vercel: { requests: 32, bytes_up: 800_000, bytes_down: 12_000_000 },
       },
       total: {
-        cf: { requests: 3100, bytes_up: 72_000_000, bytes_down: 960_000_000 },
+        cf: { requests: 3100, bytes_up: 72_000_000 + mockUpDelta, bytes_down: 960_000_000 + mockDownDelta },
         vercel: { requests: 1110, bytes_up: 24_000_000, bytes_down: 280_000_000 },
       },
       history: [
@@ -244,11 +176,33 @@ async function refreshTraffic(): Promise<void> {
         mk(0, 38_000_000, 12_000_000),
       ],
     }
+
+    if (isRunning.value) {
+      currentSpeed.value = { down: mockDownDelta, up: mockUpDelta }
+      speedHistory.value = appendSpeedSample(speedHistory.value, { down: mockDownDelta, up: mockUpDelta, ts: now })
+    } else {
+      currentSpeed.value = { down: 0, up: 0 }
+      speedHistory.value = appendSpeedSample(speedHistory.value, { down: 0, up: 0, ts: now })
+    }
     return
   }
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    traffic.value = await invoke<TrafficStats>('proxy_traffic_stats')
+    const stats = await invoke<TrafficStats>('proxy_traffic_stats')
+    traffic.value = stats
+
+    const totalUp = (stats.total.cf?.bytes_up ?? 0) + (stats.total.vercel?.bytes_up ?? 0)
+    const totalDown = (stats.total.cf?.bytes_down ?? 0) + (stats.total.vercel?.bytes_down ?? 0)
+
+    if (prevTotals.value && isRunning.value) {
+      const sp = calculateSpeed(prevTotals.value, { up: totalUp, down: totalDown, ts: now })
+      currentSpeed.value = sp
+      speedHistory.value = appendSpeedSample(speedHistory.value, { down: sp.down, up: sp.up, ts: now })
+    } else {
+      currentSpeed.value = { down: 0, up: 0 }
+      speedHistory.value = appendSpeedSample(speedHistory.value, { down: 0, up: 0, ts: now })
+    }
+    prevTotals.value = { up: totalUp, down: totalDown, ts: now }
   } catch (e) {
     console.error('Failed to load traffic stats:', e)
   }
@@ -420,11 +374,14 @@ const statusText = computed(() => {
     : '全部流量走加速'
 })
 
-// 轮询：测速 10 分钟一轮（对齐 2 小时 12 根柱条）；用量 60 秒一刷
+// 轮询：测速 10 分钟一轮（对齐 2 小时 12 根柱条）；用量与实时速率 1 秒一刷
 const POLL_TEST_MS = 10 * 60 * 1000
-const POLL_TRAFFIC_MS = 60 * 1000
+const POLL_TRAFFIC_MS = 1000
 let testTimer: ReturnType<typeof setInterval> | undefined
 let trafficTimer: ReturnType<typeof setInterval> | undefined
+let unlistenStatus: (() => void) | undefined
+let unlistenMode: (() => void) | undefined
+let unlistenReady: (() => void) | undefined
 
 onMounted(async () => {
   loadAllHistories()
@@ -433,11 +390,31 @@ onMounted(async () => {
   void runAllTests()
   testTimer = setInterval(() => void runAllTests(), POLL_TEST_MS)
   trafficTimer = setInterval(() => void refreshTraffic(), POLL_TRAFFIC_MS)
+
+  if (isTauri()) {
+    try {
+      const { listen } = await import('@tauri-apps/api/event')
+      unlistenStatus = await listen<{ on: boolean; mode?: 'whitelist' | 'global' }>('proxy-status-changed', (event) => {
+        isRunning.value = event.payload.on
+        if (event.payload.mode) proxyMode.value = event.payload.mode
+      })
+      unlistenMode = await listen<{ mode: 'whitelist' | 'global' }>('proxy-mode-changed', (event) => {
+        proxyMode.value = event.payload.mode
+      })
+      unlistenReady = await listen<{ ready?: boolean; on?: boolean; mode?: 'whitelist' | 'global' }>('proxy-ready', (event) => {
+        if (typeof event.payload.on === 'boolean') isRunning.value = event.payload.on
+        if (event.payload.mode) proxyMode.value = event.payload.mode
+      })
+    } catch {}
+  }
 })
 
 onUnmounted(() => {
   if (testTimer) clearInterval(testTimer)
   if (trafficTimer) clearInterval(trafficTimer)
+  if (unlistenStatus) unlistenStatus()
+  if (unlistenMode) unlistenMode()
+  if (unlistenReady) unlistenReady()
 })
 
 async function refreshStatus() {
@@ -765,11 +742,11 @@ async function submitImportOrChained() {
     </div>
 
     <!-- 已配置：极简主界面 -->
-    <div v-else class="space-y-10">
-      <!-- 头部：主控（电源按钮 + 模式）居左，用量统计横向并排 -->
-      <div class="flex items-center gap-24 pt-6">
-        <!-- 主控：圆形电源按钮 + 模式 switch + 弱化状态文字（整体居左） -->
-        <section class="flex flex-col items-center shrink-0 w-48">
+    <div v-else class="space-y-16">
+      <!-- 头部：主控在左侧空间居中，用量统计靠右收紧 -->
+      <div class="flex items-center justify-between gap-8 pt-4">
+        <!-- 主控：圆形电源按钮 + 模式 switch + 弱化状态文字（在左侧可用空间中完全居中） -->
+        <section class="flex-1 flex flex-col items-center justify-center">
           <button
             @click="toggleProxy"
             :title="isRunning ? '点击关闭加速' : '点击开启加速'"
@@ -815,147 +792,101 @@ async function submitImportOrChained() {
           <p class="mt-3 text-xs text-muted-foreground text-center">{{ statusText }}</p>
         </section>
 
-        <!-- 用量统计：近 7 日双轴图（左轴调用次数·双柱，右轴调用量·双曲线） -->
-        <section class="flex-1 min-w-0 space-y-2">
-          <h3 class="text-sm font-semibold">
-            用量统计
-            <span class="ml-2 text-xs font-normal text-muted-foreground">
-              今日请求
-              <span class="text-foreground font-medium tabular-nums">{{ todayTotals.requests }}</span>
-              · 累计
-              <span class="text-foreground font-medium tabular-nums">{{ formatBytes(totalBytes) }}</span>
-            </span>
-          </h3>
+        <!-- 用量统计：极简合并单图（左上角请求/累计，右上角定宽无小数实时速率） -->
+        <section class="w-[350px] shrink-0 ml-auto space-y-2">
+          <div class="flex items-center justify-between gap-1 whitespace-nowrap">
+            <!-- 左上角：今日请求与累计指标 -->
+            <div class="flex items-center gap-2.5 shrink-0">
+              <span class="inline-flex items-center gap-1 text-xs">
+                <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">今日请求</span>
+                <span class="text-foreground font-medium tabular-nums font-mono">{{ todayTotals.requests }}</span>
+              </span>
+              <span class="inline-flex items-center gap-1 text-xs">
+                <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">累计</span>
+                <span class="text-foreground font-medium tabular-nums font-mono">{{ formatBytes(totalBytes) }}</span>
+              </span>
+            </div>
+
+            <!-- 右上角：实时网速指标（无小数、三位数定宽、单位固定槽位，绝对不换行） -->
+            <div class="flex items-center shrink-0">
+              <span class="inline-flex items-center gap-1 text-xs">
+                <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shrink-0">实时</span>
+                <span class="inline-flex items-center font-mono text-xs tabular-nums text-foreground">
+                  <span class="text-muted-foreground">↓</span>
+                  <span class="inline-block w-6 text-right font-medium">{{ speedDownParts.val }}</span>
+                  <span class="inline-block w-7 text-left text-[10px] text-muted-foreground pl-0.5">{{ speedDownParts.unit }}</span>
+                  <span class="text-muted-foreground ml-1">↑</span>
+                  <span class="inline-block w-6 text-right font-medium">{{ speedUpParts.val }}</span>
+                  <span class="inline-block w-7 text-left text-[10px] text-muted-foreground pl-0.5">{{ speedUpParts.unit }}</span>
+                </span>
+              </span>
+            </div>
+          </div>
 
           <svg
-            :viewBox="`0 0 ${usageChart.W} ${usageChart.H}`"
-            class="w-full h-auto select-none"
+            :viewBox="`0 0 ${mergedChart.W} ${mergedChart.H}`"
+            class="w-full h-auto select-none overflow-visible"
             role="img"
-            aria-label="近 7 日双出口用量统计：柱状为调用次数，曲线为调用量"
+            aria-label="近 7 日用量统计与实时网速"
           >
-            <!-- 横向网格线（对齐左轴刻度） -->
-            <line
-              v-for="(t, i) in usageChart.leftTicks"
-              :key="'g' + i"
-              :x1="usageChart.L"
-              :x2="usageChart.L + usageChart.pw"
-              :y1="t.y"
-              :y2="t.y"
-              class="stroke-muted"
-              stroke-width="1"
-              :stroke-dasharray="i === 0 ? undefined : '3 4'"
+            <!-- 实时网速波形（底部对齐日期上方基准线，左右边距全宽贴合） -->
+            <path
+              :d="speedChart.area"
+              class="fill-primary/10 transition-all duration-300"
+            />
+            <polyline
+              :points="speedChart.points"
+              fill="none"
+              class="stroke-primary/40"
+              stroke-width="1.25"
+              stroke-linejoin="round"
+              stroke-linecap="round"
             />
 
-            <!-- 双柱：左轴调用次数 -->
+            <!-- 7 日经典用量单柱（CF 橙黄色，紧凑居中） -->
             <rect
-              v-for="(b, i) in usageChart.bars"
+              v-for="(b, i) in mergedChart.bars"
               :key="'b' + i"
               :x="b.x"
               :y="b.y"
               :width="b.w"
               :height="b.h"
               rx="2"
-              :fill="b.cf ? '#f6821f' : undefined"
-              :class="b.cf ? 'opacity-90' : 'fill-foreground/80'"
+              fill="#f6821f"
+              class="opacity-90 hover:opacity-100 transition-opacity cursor-pointer"
             >
               <title>{{ b.title }}</title>
             </rect>
 
-            <!-- 双曲线：右轴调用量 -->
-            <polyline
-              :points="usageChart.cfLine"
-              fill="none"
-              :stroke="usageChart.cfLineColor"
-              stroke-width="0.75"
-              stroke-linejoin="round"
-              stroke-linecap="round"
-            />
-            <polyline
-              :points="usageChart.vLine"
-              fill="none"
-              class="stroke-foreground/80"
-              stroke-width="0.75"
-              stroke-linejoin="round"
-              stroke-linecap="round"
-            />
-            <circle
-              v-for="(d, i) in usageChart.dots"
+            <!-- X 轴极简日期标签（数字 + “今天”，位于基准线下方） -->
+            <text
+              v-for="(d, i) in mergedChart.days"
               :key="'d' + i"
-              :cx="d.x"
-              :cy="d.y"
-              r="1.25"
-              :fill="d.cf ? usageChart.cfLineColor : undefined"
-              :class="d.cf ? '' : 'fill-foreground/80'"
-            >
-              <title>{{ d.title }}</title>
-            </circle>
-
-            <!-- 左轴：调用次数 -->
-            <text
-              v-for="(t, i) in usageChart.leftTicks"
-              :key="'l' + i"
-              :x="usageChart.L - 6"
-              :y="t.y + 3"
-              text-anchor="end"
-              class="fill-muted-foreground/60 text-[8px] tabular-nums"
-            >
-              {{ t.text }}
-            </text>
-            <text
-              :x="usageChart.L - 6"
-              :y="usageChart.H - 6"
-              text-anchor="end"
-              class="fill-muted-foreground text-[8px]"
-            >
-              次数
-            </text>
-
-            <!-- 右轴：调用量（单位随最大值动态切换） -->
-            <text
-              v-for="(t, i) in usageChart.rightTicks"
-              :key="'r' + i"
-              :x="usageChart.L + usageChart.pw + 6"
-              :y="t.y + 3"
-              text-anchor="start"
-              class="fill-muted-foreground/60 text-[8px] tabular-nums"
-            >
-              {{ t.text }}
-            </text>
-            <text
-              :x="usageChart.L + usageChart.pw + 6"
-              :y="usageChart.H - 6"
-              text-anchor="start"
-              class="fill-muted-foreground text-[8px]"
-            >
-              {{ usageChart.unitSuffix }}
-            </text>
-
-            <!-- X 轴日期标签 -->
-            <text
-              v-for="(d, i) in usageChart.days"
-              :key="'x' + i"
-              :x="usageChart.L + usageChart.pw * ((i + 0.5) / (usageChart.days.length || 1))"
-              :y="usageChart.H - 6"
+              :x="d.x"
+              :y="mergedChart.H - 2"
               text-anchor="middle"
-              class="fill-muted-foreground/60 text-[8px] tabular-nums"
+              :class="[
+                'text-[9px] tabular-nums transition-colors',
+                d.isToday ? 'fill-foreground font-semibold' : 'fill-muted-foreground/60',
+              ]"
             >
               {{ d.label }}
             </text>
           </svg>
 
-          <div class="flex items-center justify-end gap-3 text-[11px] text-muted-foreground">
-            <span class="inline-flex items-center gap-1.5">
-              <span class="h-2.5 w-2.5 rounded-sm bg-[#f6821f]"></span>CF 次数
+          <!-- 底部图例栏：近 7 日用量与实时网速 -->
+          <div class="flex items-center justify-between gap-3 text-[11px] text-muted-foreground pt-0.5">
+            <span class="text-[10px] text-muted-foreground/70">
+              近 7 日用量
             </span>
-            <span class="inline-flex items-center gap-1.5">
-              <span class="h-2.5 w-2.5 rounded-sm bg-foreground/80"></span>Vercel 次数
-            </span>
-            <span class="inline-flex items-center gap-1.5">
-              <span class="inline-block h-0.5 w-3.5 rounded-full bg-[#f6821f]"></span>CF 流量
-            </span>
-            <span class="inline-flex items-center gap-1.5">
-              <span class="inline-block h-0.5 w-3.5 rounded-full bg-foreground/80"></span>Vercel 流量
-            </span>
+            <div class="flex items-center gap-3.5">
+              <span class="inline-flex items-center gap-1.5">
+                <span class="h-2.5 w-2.5 rounded-xs bg-[#f6821f]"></span>近 7 日用量
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <span class="inline-block h-0.5 w-3.5 rounded-full bg-primary/70"></span>实时网速
+              </span>
+            </div>
           </div>
         </section>
       </div>
