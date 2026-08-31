@@ -872,35 +872,111 @@ fn proxy_traffic_stats() -> serde_json::Value {
     })
 }
 
-/// 出网接口联通性拨测：CF 数据面 / Vercel 函数。
-/// ok 口径 = 拿到 HTTP 响应且状态 < 500（4xx 说明边缘可达，仅鉴权/参数缺失）。
+/// 出网接口联通性与往返延迟（RTT）拨测：
+/// 与下方站点测试保持完全一致的测量口径（单物理往返 RTT，剥离冷建连应用层开销）：
+/// - 方案 A（Direct 独立加速）：经对应 gate 隧道热态 WS 发送 Ping 测到边缘节点的纯物理往返延迟（RTT）；
+///   若未配置授权码或 WS 建立失败，回退到 gate 端点的 TCP 握手 RTT；
+/// - 方案 B（Chained 远端代理）：测到用户自建服务器的真实物理 TCP 握手往返延迟（RTT）。
 #[tauri::command]
 async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
-    let url = match iface.as_str() {
-        "cf" => "https://edge.ponyjob.top/",
-        "vercel" => "https://vedge.ponyjob.top/api/proxy",
+    let cfg_json = app_config_get();
+    let mode_type = cfg_json.get("mode_type").and_then(|v| v.as_str()).unwrap_or("direct");
+
+    // 方案 B：Chained 远端代理模式
+    if mode_type == "chained" {
+        let raw_host = cfg_json.get("remote_host").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if raw_host.is_empty() {
+            return Err("未配置远端代理服务器地址".into());
+        }
+        let bare = raw_host
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let host_port = if bare.contains(':') { bare.to_string() } else { format!("{bare}:8899") };
+
+        let started = std::time::Instant::now();
+        let dial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        match tokio::time::timeout_at(dial_deadline, tokio::net::TcpStream::connect(&host_port)).await {
+            Ok(Ok(_)) => {
+                let ms = started.elapsed().as_millis() as u64;
+                return Ok(serde_json::json!({
+                    "iface": iface,
+                    "ok": true,
+                    "ms": ms,
+                }));
+            }
+            Ok(Err(e)) => {
+                return Ok(serde_json::json!({
+                    "iface": iface,
+                    "ok": false,
+                    "ms": 0,
+                    "error": e.to_string(),
+                }));
+            }
+            Err(_) => {
+                return Ok(serde_json::json!({
+                    "iface": iface,
+                    "ok": false,
+                    "ms": 0,
+                    "error": "timeout",
+                }));
+            }
+        }
+    }
+
+    // 方案 A：Direct 独立中继隧道模式
+    let gate = match iface.as_str() {
+        "cf" => GATE_WS_URL,
+        "vercel" => "wss://vgate.ponyjob.top/api/ws",
         _ => return Err("未知接口：仅支持 cf / vercel".into()),
     };
-    let started = std::time::Instant::now();
-    let client = tauri_plugin_http::reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|e| e.to_string())?;
-    match client.get(url).send().await {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            Ok(serde_json::json!({
-                "iface": iface,
-                "ok": status < 500,
-                "ms": started.elapsed().as_millis() as u64,
-                "status": status,
-            }))
+
+    let token = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten();
+    if let Some(ref tok) = token {
+        match proxy::engine_tunnel::probe_gate_rtt(gate, tok).await {
+            Ok(ms) => {
+                return Ok(serde_json::json!({
+                    "iface": iface,
+                    "ok": true,
+                    "ms": ms,
+                }));
+            }
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "iface": iface,
+                    "ok": false,
+                    "ms": 0,
+                    "error": e,
+                }));
+            }
         }
-        Err(e) => Ok(serde_json::json!({
+    }
+
+    // 未配置授权码时，按 TCP 握手 RTT 测试节点连通性
+    let host_port = match iface.as_str() {
+        "cf" => "gate.ponyjob.top:443",
+        "vercel" => "vgate.ponyjob.top:443",
+        _ => return Err("未知接口".into()),
+    };
+    let started = std::time::Instant::now();
+    let dial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    match tokio::time::timeout_at(dial_deadline, tokio::net::TcpStream::connect(host_port)).await {
+        Ok(Ok(_)) => Ok(serde_json::json!({
+            "iface": iface,
+            "ok": true,
+            "ms": started.elapsed().as_millis() as u64,
+        })),
+        Ok(Err(e)) => Ok(serde_json::json!({
             "iface": iface,
             "ok": false,
-            "ms": started.elapsed().as_millis() as u64,
-            "error": if e.is_timeout() { "timeout".to_string() } else { e.to_string() },
+            "ms": 0,
+            "error": e.to_string(),
+        })),
+        Err(_) => Ok(serde_json::json!({
+            "iface": iface,
+            "ok": false,
+            "ms": 0,
+            "error": "timeout",
         })),
     }
 }

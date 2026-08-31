@@ -286,8 +286,8 @@ interface SiteRow {
 }
 
 const ifaceRows = ref<IfaceRow[]>([
-  { id: 'cf', name: 'Cloudflare 接口', endpoint: 'edge.ponyjob.top', history: [], testing: false },
-  { id: 'vercel', name: 'Vercel 接口', endpoint: 'vedge.ponyjob.top', history: [], testing: false },
+  { id: 'cf', name: 'Cloudflare 接口', endpoint: 'gate.ponyjob.top', history: [], testing: false },
+  { id: 'vercel', name: 'Vercel 接口', endpoint: 'vgate.ponyjob.top', history: [], testing: false },
 ])
 
 const siteRows = ref<SiteRow[]>([
