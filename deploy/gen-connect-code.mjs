@@ -8,7 +8,7 @@
 // 输出：pony-gate://<base64url(JSON {"v":1,"u":url,"t":token})>
 // 口令含明文 token，与 token 同级机密，请通过安全渠道分发。
 
-const DEFAULT_URLS = 'wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws'
+const DEFAULT_URLS = 'wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws'
 
 const args = process.argv.slice(2)
 let urls = args[0] || DEFAULT_URLS

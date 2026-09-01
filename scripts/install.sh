@@ -61,7 +61,8 @@ fi
 mkdir -p "$INSTALL_DIR"
 
 # 3. 准备下载二进制
-DOWNLOAD_BASE="${PPROXY_DOWNLOAD_BASE:-https://get.ponyjob.top/dist}"
+GITHUB_RELEASE_BASE="https://github.com/lanhui100/pproxy/releases/latest/download"
+DOWNLOAD_BASE="${PPROXY_DOWNLOAD_BASE:-$GITHUB_RELEASE_BASE}"
 DOWNLOAD_URL="${DOWNLOAD_BASE}/${BINARY_NAME}"
 TMP_FILE="$(mktemp /tmp/pproxy.XXXXXX)"
 trap 'rm -f "$TMP_FILE"' EXIT INT TERM
@@ -77,10 +78,10 @@ else
 fi
 
 if ! curl -fSL $CURL_PROGRESS "$DOWNLOAD_URL" -o "$TMP_FILE"; then
-    echo -e "\n${YELLOW}[WARN] 主下载源连接失败，尝试从 GitHub Releases 镜像下载...${RESET}"
-    GITHUB_URL="https://github.com/lanhui100/pproxy/releases/latest/download/${BINARY_NAME}"
-    if ! curl -fSL $CURL_PROGRESS "$GITHUB_URL" -o "$TMP_FILE"; then
-        echo -e "${RED}[ERROR] 二进制下载失败，请检查网络连接或代理设置。${RESET}"
+    echo -e "\n${YELLOW}[WARN] 主下载源连接失败，尝试从 CDN 备用镜像源下载...${RESET}"
+    CDN_URL="https://get.ponyjob.top/dist/${BINARY_NAME}"
+    if ! curl -fSL $CURL_PROGRESS "$CDN_URL" -o "$TMP_FILE"; then
+        echo -e "${RED}[ERROR] 二进制下载失败，请检查网络连接或从 GitHub Releases 手动下载。${RESET}"
         exit 1
     fi
 fi
@@ -89,33 +90,49 @@ chmod +x "$TMP_FILE"
 mv "$TMP_FILE" "${INSTALL_DIR}/pproxy"
 echo -e "✓ 二进制已安装至: ${GREEN}${INSTALL_DIR}/pproxy${RESET}"
 
-# 4. PATH 环境变量自适应注入（非 Root 用户）
-if [ "$IS_ROOT" -eq 0 ]; then
-    PATH_UPDATED=0
-    if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-        for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-            if [ -f "$RC" ]; then
-                if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$RC"; then
-                    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$RC"
-                    PATH_UPDATED=1
-                fi
+# 4. PATH 环境变量与 Shell Wrapper 极速函数注入
+WRAPPER_BLOCK='# Pony Proxy Shell Integration
+if command -v pproxy >/dev/null 2>&1; then
+    pproxy() {
+        case "$1" in
+            on)
+                # 按需拉起后台守护进程（不强占开机自启）
+                systemctl --user is-active --quiet pproxy-server 2>/dev/null || systemctl --user start pproxy-server 2>/dev/null || true
+                eval "$(command pproxy on --eval)"
+                ;;
+            off)
+                eval "$(command pproxy off --eval)"
+                ;;
+            *)
+                command pproxy "$@"
+                ;;
+        esac
+    }
+fi'
+
+for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+    if [ -f "$RC" ]; then
+        if [ "$IS_ROOT" -eq 0 ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+            if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$RC"; then
+                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$RC"
             fi
-        done
-        if [ "$PATH_UPDATED" -eq 1 ]; then
-            echo -e "✓ 已将 ${INSTALL_DIR} 自动写入 Shell 配置文件 (.bashrc/.zshrc)"
+        fi
+        if ! grep -q '# Pony Proxy Shell Integration' "$RC"; then
+            echo -e "\n$WRAPPER_BLOCK" >> "$RC"
         fi
     fi
-fi
+done
+echo -e "✓ 已为当前用户注入极速 Shell 包装函数 (支持直接输入 pproxy on 自动拉起并注入环境)"
 
-# 5. Systemd 守护进程自适应配置（仅在系统真实运行 Systemd 时启用）
+# 5. Systemd 守护进程单元注册（按需手动唤醒，默认不设置开机自启）
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
     mkdir -p "$SYSTEMD_DIR"
-    SERVICE_FILE="${SYSTEMD_DIR}/pproxy.service"
+    SERVICE_FILE="${SYSTEMD_DIR}/pproxy-server.service"
 
     if [ "$IS_ROOT" -eq 1 ]; then
         cat <<EOF > "$SERVICE_FILE"
 [Unit]
-Description=Pony Proxy Standalone Daemon
+Description=Pony Proxy Admin & Data Gateway Daemon
 After=network.target
 
 [Service]
@@ -131,13 +148,11 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload || true
-        systemctl enable pproxy || true
-        systemctl restart pproxy || true
-        echo -e "✓ 已配置并启动 Systemd 系统服务 (0.0.0.0:8899 共享模式)"
+        echo -e "✓ 已注册 Systemd 系统服务 (按需运行，未设置开机自启)"
     else
         cat <<EOF > "$SERVICE_FILE"
 [Unit]
-Description=Pony Proxy User Daemon
+Description=Pony Proxy Admin & Data Gateway Daemon
 After=network.target
 
 [Service]
@@ -153,13 +168,10 @@ PrivateTmp=true
 WantedBy=default.target
 EOF
         systemctl --user daemon-reload || true
-        systemctl --user enable pproxy || true
-        systemctl --user restart pproxy || true
-        echo -e "✓ 已配置并启动 Systemd 用户服务 (127.0.0.1:8899 本机自用)"
+        echo -e "✓ 已注册 Systemd 用户服务 (按需运行，未设置开机自启)"
     fi
 else
     echo -e "ℹ 未检测到运行中的 Systemd 环境（如 Docker 容器），跳过守护进程注册。"
-    echo -e "  可使用前台命令直接启动: ${BLUE}pproxy serve${RESET}"
 fi
 
 # 6. 完成引导
@@ -167,10 +179,10 @@ echo -e "\n${BOLD}${GREEN}══════════════════
 echo -e "${BOLD}${GREEN}🎉 Pony Proxy 安装成功！${RESET}"
 echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════════════════${RESET}\n"
 
-echo -e "${BOLD}常用快捷命令：${RESET}"
-echo -e "  1. 开启终端代理:     ${BLUE}eval \"\$(pproxy on --eval)\"${RESET}"
-echo -e "  2. 关闭终端代理:     ${BLUE}eval \"\$(pproxy off --eval)\"${RESET}"
-echo -e "  3. 创建代理用户:     ${BLUE}pproxy user add <username>${RESET}"
-echo -e "  4. 跨端配置同步:     ${BLUE}pproxy sync import \"<同步口令>\"${RESET}"
-echo -e "  5. 代理健康诊断:     ${BLUE}pproxy doctor${RESET}"
-echo -e "  6. 服务状态查看:     ${BLUE}pproxy status${RESET}\n"
+echo -e "${BOLD}核心操作指南：${RESET}"
+echo -e "  1. 开启终端代理:     ${BLUE}pproxy on${RESET}   (自动拉起后台服务并注入当前 Shell，附带实时测速)"
+echo -e "  2. 关闭终端代理:     ${BLUE}pproxy off${RESET}  (就地清除当前 Shell 代理环境变量)"
+echo -e "  3. 代理状态与测速:   ${BLUE}pproxy status${RESET}"
+echo -e "  4. 全路由诊断体检:   ${BLUE}pproxy doctor${RESET}"
+echo -e "  5. 跨端加密配置同步: ${BLUE}pproxy sync export${RESET}\n"
+echo -e "💡 请执行 ${GREEN}source ~/.bashrc${RESET} 或重新打开终端以使 pproxy on 快捷函数立即生效。\n"

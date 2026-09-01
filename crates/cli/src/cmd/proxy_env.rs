@@ -322,7 +322,13 @@ pub fn status() -> Result<i32, String> {
         }
     }
 
-    println!();
+    // 实时外网连通性测速（Google & GitHub）
+    let data_plane = match config::load() {
+        Ok(cfg) => config::derive_data_plane(&cfg).unwrap_or_else(|_| "http://127.0.0.1:8899".to_string()),
+        Err(_) => "http://127.0.0.1:8899".to_string(),
+    };
+    print_connectivity_card(&data_plane);
+
     println!("开启代理:  pproxy on");
     println!("关闭代理:  pproxy off");
     println!("临时挂起:  eval \"$(pproxy env suspend)\"");
@@ -335,14 +341,97 @@ pub fn status() -> Result<i32, String> {
     Ok(EXIT_OK)
 }
 
+/// 代理外网连通性探测（Google & GitHub）
+pub fn probe_connectivity(data_plane: &str) -> Vec<(&'static str, Result<(u16, u128), String>)> {
+    let targets = [
+        ("Google", "https://www.google.com/generate_204"),
+        ("GitHub", "https://api.github.com/zen"),
+    ];
+
+    let proxy = match reqwest::Proxy::all(data_plane) {
+        Ok(p) => p,
+        Err(e) => {
+            return targets
+                .iter()
+                .map(|(name, _)| (*name, Err(format!("代理配置无效: {e}"))))
+                .collect();
+        }
+    };
+
+    let client = match reqwest::blocking::Client::builder()
+        .proxy(proxy)
+        .timeout(std::time::Duration::from_millis(2500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return targets
+                .iter()
+                .map(|(name, _)| (*name, Err(format!("创建探测客户端失败: {e}"))))
+                .collect();
+        }
+    };
+
+    targets
+        .iter()
+        .map(|(name, url)| {
+            let start = std::time::Instant::now();
+            let res = client
+                .get(*url)
+                .header("User-Agent", "pproxy-probe/1.0")
+                .send();
+            match res {
+                Ok(resp) => {
+                    let elapsed = start.elapsed().as_millis();
+                    (*name, Ok((resp.status().as_u16(), elapsed)))
+                }
+                Err(e) => {
+                    let elapsed = start.elapsed().as_millis();
+                    let err_msg = if e.is_timeout() {
+                        "超时 (Timeout)".to_string()
+                    } else if e.is_connect() {
+                        "无法连接代理端口".to_string()
+                    } else {
+                        format!("连接失败 ({elapsed}ms)")
+                    };
+                    (*name, Err(err_msg))
+                }
+            }
+        })
+        .collect()
+}
+
+/// 打印代理外网连通性测速卡片
+pub fn print_connectivity_card(data_plane: &str) {
+    eprintln!("┌─ 代理外网连通性测速 (Egress Probe) ────────────────");
+    let results = probe_connectivity(data_plane);
+    for (name, res) in results {
+        match res {
+            Ok((status, ms)) => {
+                let status_display = if (200..=299).contains(&status) || status == 301 || status == 302 {
+                    format!("\x1b[1;32m✓ {status} OK\x1b[0m")
+                } else {
+                    format!("\x1b[1;33m! HTTP {status}\x1b[0m")
+                };
+                eprintln!("│  🌐 {name:<8} {status_display} ({ms} ms)");
+            }
+            Err(err) => {
+                eprintln!("│  🌐 {name:<8} \x1b[1;31m✗ 失败\x1b[0m ({err})");
+            }
+        }
+    }
+    eprintln!("└────────────────────────────────────────────────────");
+}
+
 /// 开启环境代理（支持 --eval 直接输出 export/set 语句）。
 pub fn on(eval: bool) -> Result<i32, String> {
+    let data_plane = match config::load() {
+        Ok(cfg) => config::derive_data_plane(&cfg)
+            .unwrap_or_else(|_| "http://127.0.0.1:8899".to_string()),
+        Err(_) => "http://127.0.0.1:8899".to_string(),
+    };
+
     if eval {
-        let data_plane = match config::load() {
-            Ok(cfg) => config::derive_data_plane(&cfg)
-                .unwrap_or_else(|_| "http://127.0.0.1:8899".to_string()),
-            Err(_) => "http://127.0.0.1:8899".to_string(),
-        };
         let k8s_entries = detect_k8s_cluster_entries();
         let extra_no_proxy = if k8s_entries.is_empty() {
             String::new()
@@ -358,6 +447,10 @@ pub fn on(eval: bool) -> Result<i32, String> {
         println!("{}", shell.render_export("HTTP_PROXY", &data_plane));
         println!("{}", shell.render_export("HTTPS_PROXY", &data_plane));
         println!("{}", shell.render_export("NO_PROXY", &no_proxy));
+
+        // 连通性测速输出到 stderr，直接渲染在屏幕上，不影响 eval 命令解析
+        print_connectivity_card(&data_plane);
+
         Ok(EXIT_OK)
     } else {
         enable_proxy()

@@ -433,15 +433,19 @@ const TUNNEL_FILE: &str = "tunnel.json";
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
 /// 注意：与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
 const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
-/// 默认双 gate 端点（CF 主 + Vercel iad1 美区兜底）：裸 token 保存且无端点配置时自动补齐。
-const DEFAULT_TUNNEL_URLS: &str = "wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws";
+/// 默认双 gate 端点（Vercel iad1 美区主 + CF 低延迟兜底）：裸 token 保存且无端点配置时自动补齐。
+const DEFAULT_TUNNEL_URLS: &str = "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws";
 
 /// 旧配置迁移：早期版本把 HTTP 网关域名（edge.ponyjob.top）误当作 WS gate 端点，
 /// 且曾缺 /ws 路径。读到这类值一律映射到正确的 gate 端点（防止拨测超时/隧道连接失败）。
+/// 同时将旧版 CF 在前的默认端点自动迁移为 Vercel 美区优先，确保 Google/AI API 稳定出网。
 fn migrate_tunnel_url(url: &str) -> String {
     let t = url.trim();
     if t.starts_with("wss://edge.ponyjob.top") || t.starts_with("ws://edge.ponyjob.top") {
         return GATE_WS_URL.to_string();
+    }
+    if t == "wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws" {
+        return DEFAULT_TUNNEL_URLS.to_string();
     }
     t.to_string()
 }

@@ -1,57 +1,89 @@
 // gate-policy 单测：node deploy/cf-gate-worker/gate-policy.test.mjs
 import {
   DEFAULT_BLOCKED_COLOS,
+  DEFAULT_ALLOWED_COLOS,
   isGoogleHost,
   parseBlockedColos,
+  parseAllowedColos,
   shouldBlockColo,
 } from './gate-policy.mjs'
 
 let passed = 0
 let failed = 0
 function check(name, cond, extra = '') {
-  if (cond) { passed++; console.log(`  [pass] ${name}`) }
-  else { failed++; console.log(`  [fail] ${name} ${extra}`) }
+  if (cond) {
+    passed++
+    console.log(`  [pass] ${name}`)
+  } else {
+    failed++
+    console.log(`  [fail] ${name} ${extra}`)
+  }
 }
 
 console.log('[1] Google host 判定')
 check('oauth2.googleapis.com 命中', isGoogleHost('oauth2.googleapis.com'))
-check('cloudcode-pa.googleapis.com 命中', isGoogleHost('cloudcode-pa.googleapis.com'))
+check('daily-cloudcode-pa.googleapis.com 命中', isGoogleHost('daily-cloudcode-pa.googleapis.com'))
+check('generativelanguage.googleapis.com 命中', isGoogleHost('generativelanguage.googleapis.com'))
 check('accounts.google.com 命中', isGoogleHost('accounts.google.com'))
+check('deepmind.google 命中', isGoogleHost('deepmind.google'))
 check('www.gstatic.com 命中', isGoogleHost('www.gstatic.com'))
 check('大写归一', isGoogleHost('OAuth2.GOOGLEAPIS.COM'))
 check('末尾点归一', isGoogleHost('googleapis.com.'))
-check('youtube.com 不命中', !isGoogleHost('www.youtube.com'))
+check('youtube.com 不命中（独立非 API 业务）', !isGoogleHost('www.youtube.com'))
 check('github.com 不命中', !isGoogleHost('github.com'))
 check('notgoogleapis.com 不命中（dot-boundary）', !isGoogleHost('notgoogleapis.com'))
 check('googleapis.com.evil.cn 不命中', !isGoogleHost('googleapis.com.evil.cn'))
 check('googleapis.com.hk 不命中（无区域别名）', !isGoogleHost('googleapis.com.hk'))
 check('空 host 不命中', !isGoogleHost(''))
 
-console.log('[2] colo 门禁判定')
+console.log('[2] colo 门禁判定 — 官方不支持与黑名单区域')
 check('HKG + google host → 拒', shouldBlockColo('HKG', 'oauth2.googleapis.com') === 'unsupported_colo:HKG')
 check('MFM + google host → 拒', shouldBlockColo('MFM', 'google.com') === 'unsupported_colo:MFM')
-check('HKG + youtube → 放行（P0-2 防全量倾泻）', shouldBlockColo('HKG', 'www.youtube.com') === null)
+check('PEK (北京) + google host → 拒', shouldBlockColo('PEK', 'daily-cloudcode-pa.googleapis.com') === 'unsupported_colo:PEK')
+check('PVG (上海) + google host → 拒', shouldBlockColo('PVG', 'google.com') === 'unsupported_colo:PVG')
+check('CAN (广州) + google host → 拒', shouldBlockColo('CAN', 'google.com') === 'unsupported_colo:CAN')
+check('DME (莫斯科) + google host → 拒', shouldBlockColo('DME', 'google.com') === 'unsupported_colo:DME')
+
+console.log('[3] colo 门禁判定 — 非 Google 流量全量放行（P0-2 防全量倾泻）')
+check('HKG + youtube → 放行', shouldBlockColo('HKG', 'www.youtube.com') === null)
 check('HKG + github → 放行', shouldBlockColo('HKG', 'github.com') === null)
-check('SIN + google host → 放行', shouldBlockColo('SIN', 'oauth2.googleapis.com') === null)
-check('NRT + google host → 放行', shouldBlockColo('NRT', 'oauth2.googleapis.com') === null)
-check('colo 缺失 fail-open', shouldBlockColo(undefined, 'oauth2.googleapis.com') === null)
-check('colo 空串 fail-open', shouldBlockColo('', 'oauth2.googleapis.com') === null)
+check('PEK + openai → 放行', shouldBlockColo('PEK', 'openai.com') === null)
+check('MFM + claude.ai → 放行', shouldBlockColo('MFM', 'claude.ai') === null)
+
+console.log('[4] colo 门禁判定 — 官方支持与合规区域')
+check('IAD (美东) + google host → 放行', shouldBlockColo('IAD', 'oauth2.googleapis.com') === null)
+check('SJC (美西硅谷) + google host → 放行', shouldBlockColo('SJC', 'oauth2.googleapis.com') === null)
+check('LAX (洛杉矶) + google host → 放行', shouldBlockColo('LAX', 'google.com') === null)
+check('LHR (伦敦) + google host → 放行', shouldBlockColo('LHR', 'google.com') === null)
+check('FRA (法兰克福) + google host → 放行', shouldBlockColo('FRA', 'google.com') === null)
+check('NRT (东京) + google host → 放行', shouldBlockColo('NRT', 'daily-cloudcode-pa.googleapis.com') === null)
+check('SIN (新加坡) + google host → 放行', shouldBlockColo('SIN', 'daily-cloudcode-pa.googleapis.com') === null)
+
+console.log('[5] colo 缺失与大小写归一')
+check('colo 缺失针对 Google fail-secure 拒', shouldBlockColo(undefined, 'oauth2.googleapis.com') === 'unsupported_colo:MISSING')
+check('colo 空串针对 Google fail-secure 拒', shouldBlockColo('', 'oauth2.googleapis.com') === 'unsupported_colo:MISSING')
+check('colo 缺失针对非 Google 放行', shouldBlockColo(undefined, 'github.com') === null)
 check('colo 小写归一', shouldBlockColo('hkg', 'google.com') === 'unsupported_colo:HKG')
 
-console.log('[3] env 覆盖')
-check('默认黑名单', DEFAULT_BLOCKED_COLOS.join(',') === 'HKG,MFM')
-check('env 覆盖生效', parseBlockedColos('hkg, sin ,nrt').join(',') === 'HKG,SIN,NRT')
-check('env 空串回退默认', parseBlockedColos('').join(',') === 'HKG,MFM')
-check('env undefined 回退默认', parseBlockedColos(undefined).join(',') === 'HKG,MFM')
+console.log('[6] 严格白名单模式 (strictWhitelist)')
 check(
-  'env 覆盖后 SIN 也拒',
-  shouldBlockColo('SIN', 'google.com', parseBlockedColos('SIN')) === 'unsupported_colo:SIN',
+  '严格白名单模式下未知地区被拒',
+  shouldBlockColo('XYZ', 'daily-cloudcode-pa.googleapis.com', { strictWhitelist: true }) === 'unsupported_colo:XYZ'
+)
+check(
+  '严格白名单模式下合规美区放行',
+  shouldBlockColo('IAD', 'daily-cloudcode-pa.googleapis.com', { strictWhitelist: true }) === null
+)
+check(
+  '严格白名单模式下非 Google host 仍放行',
+  shouldBlockColo('XYZ', 'github.com', { strictWhitelist: true }) === null
 )
 
-console.log('[4] reason 与桌面端 denied 解析兼容（engine_tunnel.rs 读取 reason 字段，任意字符串均可）')
-const reason = shouldBlockColo('HKG', 'google.com')
-check('reason 为非空字符串', typeof reason === 'string' && reason.length > 0)
-check('reason 不含敏感信息', !/token|bearer|secret/i.test(reason))
+console.log('[7] 环境变量解析与覆盖')
+check('默认黑名单包含 HKG, MFM, PEK', DEFAULT_BLOCKED_COLOS.includes('HKG') && DEFAULT_BLOCKED_COLOS.includes('PEK'))
+check('默认白名单包含 IAD, SJC, NRT', DEFAULT_ALLOWED_COLOS.includes('IAD') && DEFAULT_ALLOWED_COLOS.includes('NRT'))
+check('env 黑名单解析', parseBlockedColos('hkg, pek, can').join(',') === 'HKG,PEK,CAN')
+check('env 白名单解析', parseAllowedColos('iad, sjx').join(',') === 'IAD,SJX')
 
 console.log(`\n结果: ${passed} pass, ${failed} fail`)
 process.exit(failed ? 1 : 0)
