@@ -354,7 +354,7 @@ pub fn probe_connectivity(data_plane: &str) -> Vec<(String, Result<(u16, u128), 
             .and_then(|tokens| {
                 tokens
                     .into_iter()
-                    .find(|t| t.status == "active" && t.name != "__admin__")
+                    .find(|t| t.revoked_at.is_none() && t.name != "__admin__")
                     .map(|t| t.name)
             });
 
