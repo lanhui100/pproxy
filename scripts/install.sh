@@ -60,35 +60,48 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 
-# 3. 准备下载二进制
-GITHUB_RELEASE_BASE="https://github.com/lanhui100/pproxy/releases/latest/download"
-DOWNLOAD_BASE="${PPROXY_DOWNLOAD_BASE:-$GITHUB_RELEASE_BASE}"
-DOWNLOAD_URL="${DOWNLOAD_BASE}/${BINARY_NAME}"
-TMP_FILE="$(mktemp /tmp/pproxy.XXXXXX)"
-trap 'rm -f "$TMP_FILE"' EXIT INT TERM
-
-echo -e "\n${BOLD}正在下载 Pony Proxy 二进制...${RESET}"
-echo -e "来源: ${BLUE}${DOWNLOAD_URL}${RESET}"
-
-# TTY 检测：交互式终端显示动态 ANSI 进度条 (-#)，非交互式使用静默模式
-if [ -t 1 ]; then
-    CURL_PROGRESS="-#"
+# 3. 准备获取二进制（优先检测本地已有构建产物，否则从 Release 下载）
+LOCAL_TARGET_BIN="$(dirname "$0")/../target/release/pproxy"
+if [ -f "$LOCAL_TARGET_BIN" ]; then
+    echo -e "\n${BOLD}检测到本地构建二进制，直接安装...${RESET}"
+    cp "$LOCAL_TARGET_BIN" "${INSTALL_DIR}/pproxy"
+    chmod +x "${INSTALL_DIR}/pproxy"
+    echo -e "✓ 二进制已就地安装至: ${GREEN}${INSTALL_DIR}/pproxy${RESET}"
+elif [ -f "./target/release/pproxy" ]; then
+    echo -e "\n${BOLD}检测到本地构建二进制，直接安装...${RESET}"
+    cp "./target/release/pproxy" "${INSTALL_DIR}/pproxy"
+    chmod +x "${INSTALL_DIR}/pproxy"
+    echo -e "✓ 二进制已就地安装至: ${GREEN}${INSTALL_DIR}/pproxy${RESET}"
 else
-    CURL_PROGRESS="-s"
-fi
+    GITHUB_RELEASE_BASE="https://github.com/lanhui100/pproxy/releases/latest/download"
+    DOWNLOAD_BASE="${PPROXY_DOWNLOAD_BASE:-$GITHUB_RELEASE_BASE}"
+    DOWNLOAD_URL="${DOWNLOAD_BASE}/${BINARY_NAME}"
+    TMP_FILE="$(mktemp /tmp/pproxy.XXXXXX)"
+    trap 'rm -f "$TMP_FILE"' EXIT INT TERM
 
-if ! curl -fSL $CURL_PROGRESS "$DOWNLOAD_URL" -o "$TMP_FILE"; then
-    echo -e "\n${YELLOW}[WARN] 主下载源连接失败，尝试从 CDN 备用镜像源下载...${RESET}"
-    CDN_URL="https://get.ponyjob.top/dist/${BINARY_NAME}"
-    if ! curl -fSL $CURL_PROGRESS "$CDN_URL" -o "$TMP_FILE"; then
-        echo -e "${RED}[ERROR] 二进制下载失败，请检查网络连接或从 GitHub Releases 手动下载。${RESET}"
-        exit 1
+    echo -e "\n${BOLD}正在下载 Pony Proxy 二进制...${RESET}"
+    echo -e "来源: ${BLUE}${DOWNLOAD_URL}${RESET}"
+
+    # TTY 检测：交互式终端显示动态 ANSI 进度条 (-#)，非交互式使用静默模式
+    if [ -t 1 ]; then
+        CURL_PROGRESS="-#"
+    else
+        CURL_PROGRESS="-s"
     fi
-fi
 
-chmod +x "$TMP_FILE"
-mv "$TMP_FILE" "${INSTALL_DIR}/pproxy"
-echo -e "✓ 二进制已安装至: ${GREEN}${INSTALL_DIR}/pproxy${RESET}"
+    if ! curl -fSL $CURL_PROGRESS "$DOWNLOAD_URL" -o "$TMP_FILE"; then
+        echo -e "\n${YELLOW}[WARN] 主下载源连接失败，尝试从 CDN 备用镜像源下载...${RESET}"
+        CDN_URL="https://get.ponyjob.top/dist/${BINARY_NAME}"
+        if ! curl -fSL $CURL_PROGRESS "$CDN_URL" -o "$TMP_FILE"; then
+            echo -e "${RED}[ERROR] 二进制下载失败，请检查网络连接或从 GitHub Releases 手动下载。${RESET}"
+            exit 1
+        fi
+    fi
+
+    chmod +x "$TMP_FILE"
+    mv "$TMP_FILE" "${INSTALL_DIR}/pproxy"
+    echo -e "✓ 二进制已安装至: ${GREEN}${INSTALL_DIR}/pproxy${RESET}"
+fi
 
 # 4. PATH 环境变量与 Shell Wrapper 极速函数注入
 WRAPPER_BLOCK='# Pony Proxy Shell Integration
