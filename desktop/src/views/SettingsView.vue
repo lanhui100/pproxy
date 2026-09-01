@@ -724,24 +724,19 @@ async function triggerRescue() {
       <!-- 软件更新 -->
       <Card class="border-border shadow-sm flex flex-col justify-between">
         <CardHeader class="pb-2">
-          <div class="flex items-center justify-between">
-            <CardTitle class="text-sm flex items-center gap-2">
-              <Download class="h-4 w-4 text-emerald-600 shrink-0" />
-              软件更新
-            </CardTitle>
-            <span v-if="downloading" class="text-xs font-mono font-medium text-emerald-600">
-              {{ downloadProgress }}%
-            </span>
-          </div>
+          <CardTitle class="text-sm flex items-center gap-2">
+            <Download class="h-4 w-4 text-emerald-600 shrink-0" />
+            软件更新
+          </CardTitle>
           <CardDescription class="text-xs">
             <span v-if="downloading" class="text-emerald-600 font-medium">
-              正在下载更新安装包…
+              新版本安装包下载中…
             </span>
             <span v-else-if="downloaded" class="text-emerald-600 font-medium">
-              下载完成，正在启动安装程序…
+              下载完成，即将启动安装程序…
             </span>
             <span v-else-if="checking" class="text-primary font-medium">
-              正在连接更新源检查新版本…
+              正在检查新版本…
             </span>
             <span v-else-if="updateAvailable" class="text-emerald-600 font-medium">
               发现新版本 {{ updateVersion }}，可立即升级
@@ -752,21 +747,15 @@ async function triggerRescue() {
           </CardDescription>
         </CardHeader>
         <CardContent class="pt-2 space-y-3">
-          <!-- 检查中：不定长进度条（Loading） -->
-          <div v-if="checking" class="space-y-1.5 py-1">
-            <div class="flex items-center justify-between text-[11px] text-muted-foreground">
-              <span>检查更新中…</span>
-              <RefreshCw class="h-3 w-3 animate-spin text-primary" />
-            </div>
+          <!-- 检查中：不定长进度条 -->
+          <div v-if="checking" class="py-1">
             <Progress indeterminate class="h-1.5" />
           </div>
 
           <!-- 下载中/已下载：真实进度条 -->
           <div v-else-if="downloading || downloaded" class="space-y-1.5 py-1">
             <div class="flex items-center justify-between text-[11px]">
-              <span class="text-muted-foreground">
-                {{ downloaded ? '下载完成，即将启动安装器…' : '正在下载更新…' }}
-              </span>
+              <span class="text-muted-foreground">下载进度</span>
               <span class="font-mono text-emerald-600 font-medium">{{ downloadProgress }}%</span>
             </div>
             <Progress
@@ -794,7 +783,7 @@ async function triggerRescue() {
             >
               <Check v-if="downloaded" class="h-3.5 w-3.5 mr-1.5" />
               <Download v-else class="h-3.5 w-3.5 mr-1.5 animate-bounce" />
-              {{ downloaded ? '即将启动安装器…' : `正在下载 (${downloadProgress}%)` }}
+              {{ downloaded ? '即将启动安装器…' : '正在下载…' }}
             </Button>
             <Button
               v-else-if="updateAvailable"
