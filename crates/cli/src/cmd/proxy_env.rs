@@ -42,6 +42,7 @@ localhost,\
 .internal";
 
 /// 应急脚本的内嵌模板（供 `pproxy env generate-script` 输出）。
+/// 安全设计：默认存储在 `$HOME/.pony/.saved-proxy-env`，避免 /tmp 符号链接攻击与机密泄漏。
 const MITIGATE_SCRIPT: &str = r#"#!/bin/bash
 # 兄弟项目代理隔离应急工具
 # 由 `pproxy env generate-script` 生成
@@ -50,18 +51,25 @@ const MITIGATE_SCRIPT: &str = r#"#!/bin/bash
 #   on  - 临时关闭代理环境变量（保存原值供恢复）
 #   off - 恢复之前保存的代理环境变量
 
-PPROXY_SAVED_FILE="${PPROXY_SAVED_FILE:-/tmp/.pproxy-saved-env}"
+PPROXY_SAVED_DIR="${HOME:-.}/.pony"
+PPROXY_SAVED_FILE="${PPROXY_SAVED_FILE:-$PPROXY_SAVED_DIR/.saved-proxy-env}"
+
+mkdir -p "$PPROXY_SAVED_DIR" 2>/dev/null || true
+chmod 700 "$PPROXY_SAVED_DIR" 2>/dev/null || true
 
 case "${1:-}" in
     on)
-        cat > "$PPROXY_SAVED_FILE" <<SAVED_EOF
-export http_proxy="${http_proxy:-}"
-export https_proxy="${https_proxy:-}"
-export no_proxy="${no_proxy:-}"
-export HTTP_PROXY="${HTTP_PROXY:-}"
-export HTTPS_PROXY="${HTTPS_PROXY:-}"
-export NO_PROXY="${NO_PROXY:-}"
+        (
+            umask 077
+            cat > "$PPROXY_SAVED_FILE" <<SAVED_EOF
+export http_proxy='${http_proxy:-}'
+export https_proxy='${https_proxy:-}'
+export no_proxy='${no_proxy:-}'
+export HTTP_PROXY='${HTTP_PROXY:-}'
+export HTTPS_PROXY='${HTTPS_PROXY:-}'
+export NO_PROXY='${NO_PROXY:-}'
 SAVED_EOF
+        )
         unset http_proxy https_proxy no_proxy
         unset HTTP_PROXY HTTPS_PROXY NO_PROXY
         echo "✓ 代理环境变量已临时清除（保存至 $PPROXY_SAVED_FILE）"
@@ -85,10 +93,7 @@ esac
 "#;
 
 fn home_dir() -> Result<PathBuf, String> {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .map_err(|_| "HOME / USERPROFILE not set".to_string())
+    config::home_dir().map_err(|e| format!("{e}"))
 }
 
 /// 获取代理持久化文件路径。
@@ -104,6 +109,65 @@ fn snapshot_path() -> Result<PathBuf, String> {
 /// 获取应急脚本默认输出路径。
 fn default_script_path() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".pony").join("mitigate.sh"))
+}
+
+/// 安全转义 Shell 变量值，避免 eval 注入攻击。
+pub fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// 终端 Shell 类型检测与代码生成
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellKind {
+    Bash,
+    Zsh,
+    Fish,
+    PowerShell,
+    Cmd,
+}
+
+impl ShellKind {
+    pub fn detect() -> Self {
+        if cfg!(windows) {
+            // Windows 下若存在 PSModulePath 环境变量且非 CMD
+            if std::env::var("PSModulePath").is_ok() {
+                return Self::PowerShell;
+            }
+            return Self::Cmd;
+        }
+        let shell_env = std::env::var("SHELL").unwrap_or_default();
+        if shell_env.ends_with("/fish") {
+            Self::Fish
+        } else if shell_env.ends_with("/zsh") {
+            Self::Zsh
+        } else {
+            Self::Bash
+        }
+    }
+
+    pub fn render_export(&self, key: &str, val: &str) -> String {
+        match self {
+            Self::Bash | Self::Zsh => format!("export {key}={}", shell_escape(val)),
+            Self::Fish => format!("set -gx {key} {}", shell_escape(val)),
+            Self::PowerShell => format!("$env:{key}=\"{}\"", val.replace('"', "`\"")),
+            Self::Cmd => format!("set {key}={val}"),
+        }
+    }
+
+    pub fn render_unset(&self, keys: &[&str]) -> String {
+        match self {
+            Self::Bash | Self::Zsh => format!("unset {}", keys.join(" ")),
+            Self::Fish => format!("set -e {}", keys.join(" ")),
+            Self::PowerShell => {
+                let items: Vec<String> = keys.iter().map(|k| format!("env:{k}")).collect();
+                format!("Remove-Item {} -ErrorAction Ignore", items.join(", "))
+            }
+            Self::Cmd => {
+                let items: Vec<String> = keys.iter().map(|k| format!("set {k}=")).collect();
+                items.join("\n")
+            }
+        }
+    }
 }
 
 // ─── K8s API 地址自动探测 ────────────────────────────────────
@@ -132,12 +196,21 @@ fn detect_k8s_cluster_entries() -> Vec<String> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("server:") {
             let url = rest.trim().trim_matches('"').trim_matches('\'');
-            if let Some(host) = url
+            if let Some(host_port) = url
                 .strip_prefix("https://")
                 .or_else(|| url.strip_prefix("http://"))
             {
-                let host = host.split(':').next().unwrap_or(host);
-                if !host.is_empty() {
+                let host_port = host_port.split('/').next().unwrap_or(host_port);
+                let host = if host_port.starts_with('[') {
+                    if let Some(end) = host_port.find(']') {
+                        &host_port[1..end]
+                    } else {
+                        host_port
+                    }
+                } else {
+                    host_port.split(':').next().unwrap_or(host_port)
+                };
+                if !host.is_empty() && !entries.contains(&host.to_string()) {
                     entries.push(host.to_string());
                 }
             }
@@ -262,7 +335,7 @@ pub fn status() -> Result<i32, String> {
     Ok(EXIT_OK)
 }
 
-/// 开启环境代理（支持 --eval 直接输出 export 语句）。
+/// 开启环境代理（支持 --eval 直接输出 export/set 语句）。
 pub fn on(eval: bool) -> Result<i32, String> {
     if eval {
         let data_plane = match config::load() {
@@ -278,12 +351,13 @@ pub fn on(eval: bool) -> Result<i32, String> {
         };
         let no_proxy = format!("{}{}", DEFAULT_NO_PROXY, extra_no_proxy);
 
-        println!("export http_proxy=\"{data_plane}\"");
-        println!("export https_proxy=\"{data_plane}\"");
-        println!("export no_proxy=\"{no_proxy}\"");
-        println!("export HTTP_PROXY=\"{data_plane}\"");
-        println!("export HTTPS_PROXY=\"{data_plane}\"");
-        println!("export NO_PROXY=\"{no_proxy}\"");
+        let shell = ShellKind::detect();
+        println!("{}", shell.render_export("http_proxy", &data_plane));
+        println!("{}", shell.render_export("https_proxy", &data_plane));
+        println!("{}", shell.render_export("no_proxy", &no_proxy));
+        println!("{}", shell.render_export("HTTP_PROXY", &data_plane));
+        println!("{}", shell.render_export("HTTPS_PROXY", &data_plane));
+        println!("{}", shell.render_export("NO_PROXY", &no_proxy));
         Ok(EXIT_OK)
     } else {
         enable_proxy()
@@ -293,7 +367,9 @@ pub fn on(eval: bool) -> Result<i32, String> {
 /// 关闭环境代理（支持 --eval / --hard）。
 pub fn off(eval: bool, hard: bool) -> Result<i32, String> {
     if eval {
-        println!("unset http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY");
+        let shell = ShellKind::detect();
+        let keys = ["http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
+        println!("{}", shell.render_unset(&keys));
         Ok(EXIT_OK)
     } else if hard {
         disable_proxy_hard()
@@ -311,7 +387,7 @@ pub fn toggle(enable: bool) -> Result<i32, String> {
     }
 }
 
-/// 开启持久化代理 + 硬清除（--hard 模式：输出 eval 线段供就地执行）。
+/// 开启持久化代理 + 硬清除（--hard 模式：输出 eval 代码供就地执行）。
 pub fn toggle_hard(enable: bool) -> Result<i32, String> {
     if enable {
         enable_proxy()
@@ -351,10 +427,8 @@ export no_proxy="{no_proxy}"
         path_display
     );
 
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    }
-    fs::write(&path, &content).map_err(|e| format!("写入文件失败: {e}"))?;
+    config::secure_write_file(&path, content.as_bytes())
+        .map_err(|e| format!("写入代理配置文件失败: {e}"))?;
 
     println!("✓ 环境代理已启用");
     println!();
@@ -365,7 +439,11 @@ export no_proxy="{no_proxy}"
     }
     println!();
     println!("请在当前 shell 中执行以下命令加载代理配置：");
-    println!("  source {}", path_display);
+    if cfg!(windows) {
+        println!("  eval \"$(pproxy on --eval)\"  # PowerShell");
+    } else {
+        println!("  source {}", path_display);
+    }
     println!();
     println!("或将其添加到 ~/.bashrc / ~/.zshrc 以永久生效：");
     println!("  echo 'source {}' >> ~/.bashrc", path_display);
@@ -394,23 +472,25 @@ unset NO_PROXY
         path_display
     );
 
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    }
-    fs::write(&path, &content).map_err(|e| format!("写入文件失败: {e}"))?;
+    config::secure_write_file(&path, content.as_bytes())
+        .map_err(|e| format!("写入代理配置文件失败: {e}"))?;
 
     println!("✓ 代理关闭配置已写入");
     println!();
     println!("请在当前 shell 中执行以下命令清除代理环境变量：");
-    println!("  source {}", path_display);
+    if cfg!(windows) {
+        println!("  eval \"$(pproxy off --eval)\"  # PowerShell");
+    } else {
+        println!("  source {}", path_display);
+    }
     println!();
     println!("如需就地清除（无需 source），请执行：");
-    println!("  eval \"$(pproxy off --hard)\"");
+    println!("  eval \"$(pproxy off --eval)\"");
 
     Ok(EXIT_OK)
 }
 
-/// 关闭 --hard 模式：写入 unset 文件 + 直接清除当前进程环境 + 输出 eval 代码。
+/// 关闭 --hard 模式：写入 unset 文件 + 提示就地 eval 清除。
 fn disable_proxy_hard() -> Result<i32, String> {
     let _ = disable_proxy();
 
@@ -427,9 +507,10 @@ fn disable_proxy_hard() -> Result<i32, String> {
     }
 
     println!();
-    println!("或者直接 eval 以下代码清除当前 shell 环境：");
-    println!("  eval \"$(pproxy env suspend)\"  # 保存并清除");
-    println!("  eval \"$(pproxy env resume)\"   # 恢复");
+    println!("直接 eval 以下代码就地清除当前 shell 环境变量：");
+    println!("  eval \"$(pproxy off --eval)\"");
+    println!("  eval \"$(pproxy env suspend)\"  # 保存快照并清除");
+    println!("  eval \"$(pproxy env resume)\"   # 恢复快照");
 
     Ok(EXIT_OK)
 }
@@ -441,19 +522,15 @@ fn disable_proxy_hard() -> Result<i32, String> {
 pub fn env_suspend() -> Result<i32, String> {
     let saved = SavedProxyEnv::from_current();
     let path = snapshot_path()?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    }
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(&saved).map_err(|e| format!("序列化失败: {e}"))?,
-    )
-    .map_err(|e| format!("写入快照失败: {e}"))?;
+    let json = serde_json::to_string_pretty(&saved).map_err(|e| format!("序列化失败: {e}"))?;
+    config::secure_write_file(&path, json.as_bytes()).map_err(|e| format!("写入快照失败: {e}"))?;
 
-    println!("# pproxy env suspend — 代理快照已保存到 {}", path.display());
-    println!("unset http_proxy https_proxy no_proxy");
-    println!("unset HTTP_PROXY HTTPS_PROXY NO_PROXY");
-    println!("echo \"✓ 代理已临时清除（运行 pproxy env resume 恢复）\"");
+    let shell = ShellKind::detect();
+    let keys = ["http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
+    println!("{}", shell.render_unset(&keys));
+    if shell != ShellKind::Cmd {
+        println!("echo \"✓ 代理已临时清除（运行 pproxy env resume 恢复）\"");
+    }
 
     Ok(EXIT_OK)
 }
@@ -467,26 +544,29 @@ pub fn env_resume() -> Result<i32, String> {
     )
     .map_err(|e| format!("解析快照失败: {e}"))?;
 
+    let shell = ShellKind::detect();
     if let Some(v) = &saved.http_proxy {
-        println!("export http_proxy=\"{v}\"");
+        println!("{}", shell.render_export("http_proxy", v));
     }
     if let Some(v) = &saved.https_proxy {
-        println!("export https_proxy=\"{v}\"");
+        println!("{}", shell.render_export("https_proxy", v));
     }
     if let Some(v) = &saved.no_proxy {
-        println!("export no_proxy=\"{v}\"");
+        println!("{}", shell.render_export("no_proxy", v));
     }
     if let Some(v) = &saved.http_proxy_upper {
-        println!("export HTTP_PROXY=\"{v}\"");
+        println!("{}", shell.render_export("HTTP_PROXY", v));
     }
     if let Some(v) = &saved.https_proxy_upper {
-        println!("export HTTPS_PROXY=\"{v}\"");
+        println!("{}", shell.render_export("HTTPS_PROXY", v));
     }
     if let Some(v) = &saved.no_proxy_upper {
-        println!("export NO_PROXY=\"{v}\"");
+        println!("{}", shell.render_export("NO_PROXY", v));
     }
     let _ = fs::remove_file(&path);
-    println!("echo \"✓ 代理已恢复（快照已清除）\"");
+    if shell != ShellKind::Cmd {
+        println!("echo \"✓ 代理已恢复（快照已清除）\"");
+    }
 
     Ok(EXIT_OK)
 }
@@ -705,5 +785,27 @@ contexts:
     fn default_script_path_is_under_pony_dir() {
         let path = default_script_path().unwrap();
         assert!(path.ends_with(std::path::Path::new(".pony").join("mitigate.sh")));
+    }
+
+    #[test]
+    fn test_shell_escape() {
+        assert_eq!(shell_escape("normal_value"), "'normal_value'");
+        assert_eq!(shell_escape("val'with'quotes"), "'val'\\''with'\\''quotes'");
+        assert_eq!(shell_escape("$(whoami)"), "'$(whoami)'");
+    }
+
+    #[test]
+    fn test_shell_kind_render() {
+        let pwsh = ShellKind::PowerShell;
+        let export_pwsh = pwsh.render_export("http_proxy", "http://127.0.0.1:8899");
+        assert!(export_pwsh.contains("$env:http_proxy=\"http://127.0.0.1:8899\""));
+
+        let bash = ShellKind::Bash;
+        let unset_bash = bash.render_unset(&["http_proxy", "https_proxy"]);
+        assert_eq!(unset_bash, "unset http_proxy https_proxy");
+
+        let fish = ShellKind::Fish;
+        let unset_fish = fish.render_unset(&["http_proxy"]);
+        assert_eq!(unset_fish, "set -e http_proxy");
     }
 }

@@ -57,7 +57,7 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
             eprintln!("\n┌─ [ERROR] 端口 {port} 服务启动冲突 ──────────────────────────");
             eprintln!("│ 无法访问实例锁文件 ({e})：已有 pproxy 实例正在监听端口 {port}。");
             eprintln!("│ ");
-            eprintln!("│ 👉 若需停止后台守护进程，请运行: pproxy stop");
+            eprintln!("│ 👉 若需停止后台进程，请在原终端按 Ctrl+C，或运行: pproxy stop (Linux)");
             eprintln!("│ 👉 若需启动另一前台实例，请指定新端口: pproxy serve --listen 127.0.0.1:{}", port + 1);
             eprintln!("└─────────────────────────────────────────────────────────────\n");
             return Ok(EXIT_FAILURE);
@@ -68,7 +68,7 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
         eprintln!("\n┌─ [ERROR] 端口 {port} 服务启动冲突 ──────────────────────────");
         eprintln!("│ 无法获取实例锁：已有 pproxy 实例正在监听端口 {port}。");
         eprintln!("│ ");
-        eprintln!("│ 👉 若需停止后台守护进程，请运行: pproxy stop");
+        eprintln!("│ 👉 若需停止后台进程，请在原终端按 Ctrl+C，或运行: pproxy stop (Linux)");
         eprintln!("│ 👉 若需启动另一前台实例，请指定新端口: pproxy serve --listen 127.0.0.1:{}", port + 1);
         eprintln!("└─────────────────────────────────────────────────────────────\n");
         return Ok(EXIT_FAILURE);

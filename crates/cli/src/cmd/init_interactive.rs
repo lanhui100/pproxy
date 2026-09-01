@@ -5,15 +5,22 @@
 
 use std::io::{self, BufRead, Write};
 
-use crate::config::{self, PonyConfig};
+use crate::config::{self, home_dir, PonyConfig};
+use crate::EXIT_OK;
 
 /// 交互式初始化引导。
 pub fn run_interactive(force: bool) -> Result<i32, String> {
     let path = config::config_path().map_err(|e| e.to_string())?;
     if path.exists() && !force {
-        eprintln!("config already exists: {} (use --force to overwrite)", path.display());
-        eprintln!("或者运行 'pproxy init --interactive --force' 重新初始化");
-        return Ok(1);
+        print!("配置文件已存在 ({})，是否覆盖？[y/N] > ", path.display());
+        io::stdout().flush().ok();
+        let mut confirm = String::new();
+        io::stdin().lock().read_line(&mut confirm).ok();
+        let trimmed = confirm.trim().to_lowercase();
+        if trimmed != "y" && trimmed != "yes" {
+            println!("已取消初始化。原配置文件保持不变。");
+            return Ok(EXIT_OK);
+        }
     }
 
     println!("\n╔══════════════════════════════════════════════════╗");
@@ -29,11 +36,16 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
     println!("按 Ctrl+C 随时退出，已输入内容不会保存。\n");
 
     // 1. Server URL
-    let server = prompt(
+    let server_raw = prompt(
         "管理面服务器地址",
         "例如: http://192.168.1.100:8900 或 https://api.ponyjob.top:8900",
         "http://127.0.0.1:8900",
     );
+    let server = if !server_raw.starts_with("http://") && !server_raw.starts_with("https://") {
+        format!("http://{}", server_raw.trim_end_matches('/'))
+    } else {
+        server_raw.trim_end_matches('/').to_string()
+    };
 
     // 2. Admin Token
     println!();
@@ -152,7 +164,10 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
         println!("│   {}", line);
     }
     println!("│");
-    println!("│ 保存到 /home/USER/pproxy/.pproxy.env 并 chmod 600");
+    let env_path = home_dir()
+        .map(|h| h.join(".pony").join(".pproxy.env").display().to_string())
+        .unwrap_or_else(|_| "~/.pony/.pproxy.env".to_string());
+    println!("│ 保存到 {} 并 chmod 600", env_path);
     println!("└─────────────────────────────────────────────────");
 
     // 9. 下一步指引

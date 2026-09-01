@@ -62,14 +62,68 @@ pub struct PonyConfig {
     pub proxy_secret: Option<String>,
 }
 
-/// `$HOME/.pony/config.toml` 路径；HOME / USERPROFILE 缺失 → 错误（退出码 2）。
-pub fn config_path() -> Result<PathBuf, ConfigError> {
+/// 获取当前用户主目录（HOME / USERPROFILE）。
+pub fn home_dir() -> Result<PathBuf, ConfigError> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| ConfigError::Read(
             std::io::Error::new(std::io::ErrorKind::NotFound, "HOME or USERPROFILE not set"),
         ))?;
-    Ok(Path::new(&home).join(".pony").join("config.toml"))
+    Ok(PathBuf::from(home))
+}
+
+/// `$HOME/.pony/config.toml` 路径；HOME / USERPROFILE 缺失 → 错误（退出码 2）。
+pub fn config_path() -> Result<PathBuf, ConfigError> {
+    Ok(home_dir()?.join(".pony").join("config.toml"))
+}
+
+/// 安全原子写文件（临时文件写入 -> sync_all -> rename），并在 Unix 下赋予 0600 权限、父目录 0700 权限。
+pub fn secure_write_file(path: &Path, content: &[u8]) -> Result<(), std::io::Error> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    let file_stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
+    let tmp_path = path.with_file_name(format!(".{file_stem}.tmp.{}", rand::random::<u32>()));
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+    }
+
+    #[cfg(windows)]
+    {
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
+    }
+    fs::rename(&tmp_path, path)?;
+    Ok(())
 }
 
 /// 读配置：文件缺失 → NotFound；解析失败/缺必填键 → 对应变体。
@@ -96,32 +150,8 @@ pub fn load() -> Result<PonyConfig, ConfigError> {
 /// 写配置并原子赋予 0600 权限；父目录一并创建（0700）。
 pub fn save(cfg: &PonyConfig) -> Result<PathBuf, ConfigError> {
     let path = config_path()?;
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(ConfigError::Read)?;
-        #[cfg(unix)]
-        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
-    }
     let body = toml::to_string_pretty(cfg).map_err(|e| ConfigError::Parse(e.to_string()))?;
-
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(ConfigError::Read)?;
-        file.write_all(body.as_bytes()).map_err(ConfigError::Read)?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, body).map_err(ConfigError::Read)?;
-    }
-
+    secure_write_file(&path, body.as_bytes()).map_err(ConfigError::Read)?;
     Ok(path)
 }
 

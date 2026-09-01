@@ -162,14 +162,16 @@ pub fn hour_floor(ts: u64) -> u64 {
     ts - ts % 3600
 }
 
-/// DB 默认路径解析（T1 §5）：PPROXY_DB 环境变量优先，其次 $HOME/.pony/state.db。
+/// DB 默认路径解析（T1 §5）：PPROXY_DB 环境变量优先，其次 $HOME / %USERPROFILE%/.pony/state.db。
 pub fn default_db_path() -> PathBuf {
     if let Ok(p) = std::env::var("PPROXY_DB") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".pony").join("state.db")
 }
 

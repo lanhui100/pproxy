@@ -3,48 +3,57 @@
 //! 支持从 Windows 桌面端导出加密配置，在 Linux Server 上一键导入，免去重复登录 CF/Vercel。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+use fs2::FileExt;
 use pproxy_core::store::{default_db_path, NewRoute};
 use pproxy_core::Store;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{load, save, PonyConfig};
+use crate::config::{home_dir, load, save, secure_write_file, PonyConfig};
 use crate::EXIT_OK;
 
 pub const SYNC_SCHEME: &str = "pproxy-sync://";
-const DEFAULT_SYNC_PASSPHRASE: &str = "pony-proxy-universal-sync-salt-v1";
 const SYNC_TTL_SECONDS: u64 = 600; // 10 分钟有效
-const KDF_ITERATIONS: u32 = 10_000;
-
-use std::path::PathBuf;
+const PBKDF2_ITERATIONS: u32 = 60_000; // 标准 PBKDF2-HMAC-SHA256 迭代次数
 
 const NONCES_CACHE_FILE: &str = ".nonces.json";
 
 fn nonces_file_path() -> Result<PathBuf, String> {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .map_err(|_| "HOME / USERPROFILE not set".to_string())?;
+    let home = home_dir().map_err(|e| format!("无法定位主目录: {e}"))?;
     Ok(home.join(".pony").join(NONCES_CACHE_FILE))
 }
 
-/// 检查并记录 Nonce（跨进程持久化防重放 + 过期条目自动清理）。
+/// 检查并记录 Nonce（跨进程排他文件锁 + 持久化防重放 + 过期条目自动清理）。
 fn check_and_record_nonce(nonce: &str, exp: u64, now: u64) -> Result<(), String> {
     let path = nonces_file_path()?;
     check_and_record_nonce_at(&path, nonce, exp, now)
 }
 
-fn check_and_record_nonce_at(path: &std::path::Path, nonce: &str, exp: u64, now: u64) -> Result<(), String> {
+fn check_and_record_nonce_at(path: &Path, nonce: &str, exp: u64, now: u64) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+
+    // 使用锁文件进行跨进程排他互斥，防止并发竞态攻击
+    let lock_path = path.with_extension("lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|e| format!("打开 Nonce 锁文件失败: {e}"))?;
+
+    lock_file
+        .lock_exclusive()
+        .map_err(|e| format!("获取 Nonce 排他文件锁失败: {e}"))?;
 
     let mut nonces: HashMap<String, u64> = if path.exists() {
         std::fs::read_to_string(path)
@@ -66,10 +75,9 @@ fn check_and_record_nonce_at(path: &std::path::Path, nonce: &str, exp: u64, now:
     // 3. 记录当前 Nonce
     nonces.insert(nonce.to_string(), exp);
 
-    // 4. 写回持久化存储
-    if let Ok(json) = serde_json::to_string(&nonces) {
-        let _ = std::fs::write(path, json);
-    }
+    // 4. 写回持久化存储（严格原子写入与 0600 权限，Fail-Closed）
+    let json = serde_json::to_string(&nonces).map_err(|e| format!("序列化 Nonce 失败: {e}"))?;
+    secure_write_file(path, json.as_bytes()).map_err(|e| format!("写入 Nonce 存储失败: {e}"))?;
 
     Ok(())
 }
@@ -94,23 +102,67 @@ pub struct SyncPayload {
     pub data: SyncData,
 }
 
-fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
-    let mut current = Sha256::digest(format!("{}:{}", hex::encode(salt), passphrase).as_bytes());
-    for _ in 1..KDF_ITERATIONS {
-        let mut hasher = Sha256::new();
-        hasher.update(&current);
-        hasher.update(salt);
-        hasher.update(passphrase.as_bytes());
-        current = hasher.finalize();
+/// 标准 HMAC-SHA256 实现 (RFC 2104)
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let digest = Sha256::digest(key);
+        key_block[..32].copy_from_slice(&digest);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
     }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&current);
-    key
+
+    let mut o_key_pad = [0x5cu8; BLOCK_SIZE];
+    let mut i_key_pad = [0x36u8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        o_key_pad[i] ^= key_block[i];
+        i_key_pad[i] ^= key_block[i];
+    }
+
+    let mut inner_hasher = Sha256::new();
+    inner_hasher.update(&i_key_pad);
+    inner_hasher.update(data);
+    let inner_hash = inner_hasher.finalize();
+
+    let mut outer_hasher = Sha256::new();
+    outer_hasher.update(&o_key_pad);
+    outer_hasher.update(&inner_hash);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&outer_hasher.finalize());
+    out
+}
+
+/// 标准 PBKDF2-HMAC-SHA256 (RFC 2898) 密钥派生
+pub(crate) fn derive_key(passphrase: &str, salt: &[u8]) -> [u8; 32] {
+    let mut salt_and_index = Vec::with_capacity(salt.len() + 4);
+    salt_and_index.extend_from_slice(salt);
+    salt_and_index.extend_from_slice(&1u32.to_be_bytes());
+
+    let mut u = hmac_sha256(passphrase.as_bytes(), &salt_and_index);
+    let mut out = u;
+
+    for _ in 1..PBKDF2_ITERATIONS {
+        u = hmac_sha256(passphrase.as_bytes(), &u);
+        for i in 0..32 {
+            out[i] ^= u[i];
+        }
+    }
+    out
 }
 
 /// 导出加密配置字符串。
 pub fn export(passphrase: Option<&str>) -> Result<i32, String> {
-    let pass = passphrase.unwrap_or(DEFAULT_SYNC_PASSPHRASE);
+    // 杜绝公开默认口令：未指定口令时自动生成 16 字节 (128-bit 熵) 的高强度随机 Passkey
+    let (pass, is_generated) = match passphrase {
+        Some(p) if !p.is_empty() => (p.to_string(), false),
+        _ => {
+            let mut key_bytes = [0u8; 16];
+            rand::thread_rng().fill_bytes(&mut key_bytes);
+            (hex::encode(key_bytes), true)
+        }
+    };
+
     let cfg = load().unwrap_or_else(|_| PonyConfig {
         server: "http://127.0.0.1:8899".to_string(),
         admin_token: "".to_string(),
@@ -134,7 +186,7 @@ pub fn export(passphrase: Option<&str>) -> Result<i32, String> {
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
 
     let mut nonce_bytes = [0u8; 16];
@@ -163,7 +215,7 @@ pub fn export(passphrase: Option<&str>) -> Result<i32, String> {
     let mut aead_nonce = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut aead_nonce);
 
-    let key = derive_key(pass, &salt);
+    let key = derive_key(&pass, &salt);
     let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|e| e.to_string())?;
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&aead_nonce), json_bytes.as_ref())
@@ -181,17 +233,24 @@ pub fn export(passphrase: Option<&str>) -> Result<i32, String> {
     println!("\n╔════════════════════════════════════════════════════════════════╗");
     println!("║       Pony Proxy 跨端加密同步口令 (有效期: 10 分钟)            ║");
     println!("╚════════════════════════════════════════════════════════════════╝\n");
-    println!("  \x1b[1;32m{sync_uri}\x1b[0m\n");
-    println!("👉 在 Linux Server 终端运行以下命令一键完成同步：");
-    println!("   pproxy sync import \"{sync_uri}\"\n");
-    println!("👉 或在 Windows 桌面端直接粘贴上方口令进行一键配置导入。\n");
+    println!("  同步链接: \x1b[1;32m{sync_uri}\x1b[0m");
+    if is_generated {
+        println!("  解密密钥: \x1b[1;33m{pass}\x1b[0m (自动生成的安全密钥)");
+    }
+    println!();
+    println!("👉 在目标机器运行以下命令一键完成同步：");
+    println!("   pproxy sync import \"{sync_uri}\" --passphrase \"{pass}\"\n");
 
     Ok(EXIT_OK)
 }
 
 /// 导入加密配置字符串。
 pub fn import(input: &str, passphrase: Option<&str>) -> Result<i32, String> {
-    let pass = passphrase.unwrap_or(DEFAULT_SYNC_PASSPHRASE);
+    let pass = match passphrase {
+        Some(p) if !p.is_empty() => p,
+        _ => return Err("请提供解密口令: pproxy sync import \"<uri>\" --passphrase \"<password>\"".into()),
+    };
+
     let encoded = input
         .trim()
         .strip_prefix(SYNC_SCHEME)
@@ -222,12 +281,15 @@ pub fn import(input: &str, passphrase: Option<&str>) -> Result<i32, String> {
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
 
-    // 1. 严格 10 分钟 TTL 过期检查
+    // 1. 严格 10 分钟 TTL 过期检查与未来时间窗口防护
     if now > payload.exp {
         return Err("该同步口令已过期（超过 10 分钟），请在原设备重新导出生成！".into());
+    }
+    if payload.exp > now + SYNC_TTL_SECONDS + 60 {
+        return Err("非法同步口令：有效时间戳超出允许范围！".into());
     }
 
     // 2. Nonce 防重放检查（跨进程文件持久化防重放）
@@ -257,18 +319,17 @@ pub fn import(input: &str, passphrase: Option<&str>) -> Result<i32, String> {
 
     save(&cfg).map_err(|e| format!("保存配置失败: {e}"))?;
 
-    // 4. 导入路由至 SQLite
+    // 4. 导入路由至 SQLite（严格错误检查，拒绝静默吞异常）
     let db_path = default_db_path();
-    if let Ok((store, _)) = Store::open(&db_path) {
-        let store = Arc::new(store);
-        for (name, target) in payload.data.routes {
-            let route_req = NewRoute {
-                name,
-                target_host: target,
-                override_upstream: None,
-            };
-            let _ = store.insert_route(&route_req);
-        }
+    let (store, _) = Store::open(&db_path).map_err(|e| format!("打开数据库失败: {e}"))?;
+    let store = Arc::new(store);
+    for (name, target) in payload.data.routes {
+        let route_req = NewRoute {
+            name,
+            target_host: target,
+            override_upstream: None,
+        };
+        let _ = store.insert_route(&route_req);
     }
 
     println!("\n✓ 跨端配置同步成功！");
@@ -308,7 +369,7 @@ mod tests {
     fn sync_roundtrip_url_safe_and_replay_protection() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
         let unique_nonce = format!("nonce_{}", rand::Rng::gen::<u64>(&mut rand::thread_rng()));
         let payload = SyncPayload {
@@ -324,7 +385,7 @@ mod tests {
         };
 
         let json_bytes = serde_json::to_vec(&payload).unwrap();
-        let pass = "custom_passphrase";
+        let pass = "custom_passphrase_test";
 
         let mut salt = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut salt);

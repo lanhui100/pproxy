@@ -90,8 +90,10 @@ fn which_systemctl() -> Option<std::path::PathBuf> {
 pub fn systemd_action(action: &str) -> Result<i32, String> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = action;
-        eprintln!("error: service start/stop/restart 仅支持本机 Linux (systemd)");
+        eprintln!("error: service start/stop/restart 依赖 Linux systemd 后台服务管理。");
+        if action == "stop" {
+            eprintln!("提示: 若您在前台通过 'pproxy serve' 运行网关，请在对应终端窗口按 Ctrl+C 停止服务。");
+        }
         Ok(EXIT_FAILURE)
     }
     #[cfg(target_os = "linux")]
@@ -118,7 +120,7 @@ pub fn systemd_action(action: &str) -> Result<i32, String> {
     }
 }
 
-/// 单线程 block_on（CLI 无并发需求，不建完整 runtime）。
+/// 单线程 block_on（CLI 调度辅助函数）。
 pub(crate) fn tokio_block<T>(fut: impl std::future::Future<Output = T>) -> T {
     tokio_block_impl(fut)
 }
@@ -134,14 +136,14 @@ pub(crate) fn tokio_block_impl<T>(fut: impl std::future::Future<Output = T>) -> 
 
 #[cfg(test)]
 pub(crate) fn tokio_block_impl<T>(fut: impl std::future::Future<Output = T>) -> T {
-    // 测试中已有 tokio runtime（#[tokio::test]），直接 block_on 会 panic；
-    // 测试路径直接内联执行 future（当前测试不覆盖此函数）
-    futures_lite_block(fut)
-}
-
-#[cfg(test)]
-fn futures_lite_block<T>(fut: impl std::future::Future<Output = T>) -> T {
-    // 极简 executor：本 crate 测试只用于类型检查，不做真实异步驱动
-    drop(fut);
-    unreachable!("async tests use #[tokio::test] in client.rs directly")
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            rt.block_on(fut)
+        }
+    }
 }

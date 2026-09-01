@@ -7,20 +7,29 @@ pub struct ServiceTemplate {
     pub env_prefix: EnvPrefix,
 }
 
-/// env 前缀三态：有标准约定的全量导出；无约定仅 BASE_URL 注释示例。
+/// env 前缀与第三方客户端格式。
 #[derive(Clone, Copy, PartialEq)]
 pub enum EnvPrefix {
     Anthropic,
     Openai,
     Opencode,
+    Cursor,
+    Clash,
+    Surge,
+    Env,
     CommentOnly,
 }
 
 /// 内置模板表（M2 §4.7）。
 pub const TEMPLATES: &[ServiceTemplate] = &[
     ServiceTemplate { name: "anthropic", env_prefix: EnvPrefix::Anthropic },
+    ServiceTemplate { name: "claude", env_prefix: EnvPrefix::Anthropic },
     ServiceTemplate { name: "openai", env_prefix: EnvPrefix::Openai },
     ServiceTemplate { name: "opencode", env_prefix: EnvPrefix::Opencode },
+    ServiceTemplate { name: "cursor", env_prefix: EnvPrefix::Cursor },
+    ServiceTemplate { name: "clash", env_prefix: EnvPrefix::Clash },
+    ServiceTemplate { name: "surge", env_prefix: EnvPrefix::Surge },
+    ServiceTemplate { name: "env", env_prefix: EnvPrefix::Env },
     ServiceTemplate { name: "google", env_prefix: EnvPrefix::CommentOnly },
     ServiceTemplate { name: "github", env_prefix: EnvPrefix::CommentOnly },
     ServiceTemplate { name: "x", env_prefix: EnvPrefix::CommentOnly },
@@ -29,10 +38,10 @@ pub const TEMPLATES: &[ServiceTemplate] = &[
 
 /// 查模板；None = 未知 service（调用方列出可用项退出 1）。
 pub fn lookup(service: &str) -> Option<&'static ServiceTemplate> {
-    TEMPLATES.iter().find(|t| t.name == service)
+    TEMPLATES.iter().find(|t| t.name.eq_ignore_ascii_case(service))
 }
 
-/// 渲染 env 片段。
+/// 渲染配置片段。
 ///
 /// - `token`: Some(明文) 嵌入输出；None 用占位 `<your-pony-token-here>`
 /// - `data_plane_base`: 形如 `http://127.0.0.1:8899`
@@ -44,6 +53,12 @@ pub fn render(
 ) -> String {
     let token = token.unwrap_or("<your-pony-token-here>");
     let base_url = format!("{data_plane_base}/{token}/{route}");
+    let host_port = data_plane_base
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/');
+    let (host, port) = host_port.rsplit_once(':').unwrap_or((host_port, "8899"));
+
     match tpl.env_prefix {
         EnvPrefix::Anthropic => format!(
             "# pony proxy — anthropic\nexport ANTHROPIC_BASE_URL={base_url}\nexport ANTHROPIC_API_KEY=<your-upstream-key>\n"
@@ -53,6 +68,18 @@ pub fn render(
         ),
         EnvPrefix::Opencode => format!(
             "# pony proxy — opencode (zen)\nexport OPENCODE_BASE_URL={base_url}\nexport OPENCODE_API_KEY=<your-upstream-key>\n"
+        ),
+        EnvPrefix::Cursor => format!(
+            "# pony proxy — Cursor Settings (Settings -> Models -> Override OpenAI Base URL)\nBase URL: {base_url}/v1\nAPI Key:  <your-upstream-key>\n"
+        ),
+        EnvPrefix::Clash => format!(
+            "# pony proxy — Clash Proxy Node\nproxies:\n  - name: \"Pony-Proxy-{route}\"\n    type: http\n    server: {host}\n    port: {port}\n"
+        ),
+        EnvPrefix::Surge => format!(
+            "# pony proxy — Surge Proxy Node\nPony-Proxy-{route} = http, {host}, {port}\n"
+        ),
+        EnvPrefix::Env => format!(
+            "# pony proxy — HTTP Environment\nexport HTTP_PROXY=\"{data_plane_base}\"\nexport HTTPS_PROXY=\"{data_plane_base}\"\n"
         ),
         // 无标准 env 约定的服务：仅注释示例（M2 §4.7 模板表）
         EnvPrefix::CommentOnly => format!(
@@ -118,8 +145,24 @@ mod tests {
     fn unknown_service_not_found_and_available_listed() {
         assert!(lookup("nosuch").is_none());
         let avail = available();
-        assert_eq!(avail.len(), 7);
+        assert_eq!(avail.len(), 12);
         assert!(avail.contains(&"anthropic"));
+        assert!(avail.contains(&"cursor"));
+        assert!(avail.contains(&"clash"));
+        assert!(avail.contains(&"surge"));
+        assert!(avail.contains(&"claude"));
+    }
+
+    #[test]
+    fn cursor_and_clash_export() {
+        let cursor_tpl = lookup("cursor").unwrap();
+        let cursor_out = render(cursor_tpl, "openai", Some("tok_123"), "http://127.0.0.1:8899");
+        assert!(cursor_out.contains("http://127.0.0.1:8899/tok_123/openai/v1"));
+
+        let clash_tpl = lookup("clash").unwrap();
+        let clash_out = render(clash_tpl, "global", None, "http://127.0.0.1:8899");
+        assert!(clash_out.contains("server: 127.0.0.1"));
+        assert!(clash_out.contains("port: 8899"));
     }
 
     #[test]

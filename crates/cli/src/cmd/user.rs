@@ -6,7 +6,7 @@ use pproxy_core::store::default_db_path;
 use pproxy_core::user::UserService;
 use pproxy_core::Store;
 
-use crate::config::load;
+use crate::config::{self, load};
 use crate::render::{fmt_ts, Table};
 use crate::{EXIT_FAILURE, EXIT_OK};
 
@@ -35,16 +35,16 @@ pub fn add(
 
     match service.create_user(username, &pass, expires_days) {
         Ok(user) => {
-            let cfg = load().unwrap_or_default();
-            let host_port = if !cfg.server.is_empty() {
-                cfg.server
-                    .trim_start_matches("http://")
-                    .trim_start_matches("https://")
-                    .trim_end_matches('/')
-                    .to_string()
-            } else {
-                "127.0.0.1:8899".to_string()
+            let data_plane = match load() {
+                Ok(cfg) => config::derive_data_plane(&cfg)
+                    .unwrap_or_else(|_| "http://127.0.0.1:8899".to_string()),
+                Err(_) => "http://127.0.0.1:8899".to_string(),
             };
+            let host_port = data_plane
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .trim_end_matches('/')
+                .to_string();
 
             let pproxy_uri = format!("pproxy://{}:{pass}@{host_port}", user.username);
             let http_uri = format!("http://{}:{pass}@{host_port}", user.username);

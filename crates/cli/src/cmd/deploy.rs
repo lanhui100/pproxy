@@ -81,10 +81,17 @@ fn deploy_one(target: Target, cfg: &PonyConfig, deploy_root: &Path) -> Result<i3
     }
 }
 
+fn npx_cmd() -> &'static str {
+    if cfg!(windows) {
+        "npx.cmd"
+    } else {
+        "npx"
+    }
+}
+
 // ---- Deploy helpers ----
 
-/// 查找 deploy/ 目录。优先环境变量 PPROXY_DEPLOY_DIR，否则从当前目录或
-/// 编译期嵌入路径查找。
+/// 查找 deploy/ 目录。优先环境变量 PPROXY_DEPLOY_DIR，否则从当前目录或上级目录查找。
 fn resolve_deploy_root() -> Result<PathBuf, String> {
     if let Ok(dir) = std::env::var("PPROXY_DEPLOY_DIR") {
         let p = PathBuf::from(dir);
@@ -114,13 +121,6 @@ fn resolve_deploy_root() -> Result<PathBuf, String> {
         if candidate.join("cf-worker").join("wrangler.toml").exists() {
             return Ok(candidate);
         }
-    }
-
-    // 最后尝试编译期嵌入路径（仅开发环境有效）
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest.parent().unwrap().parent().unwrap().join("deploy");
-    if candidate.join("cf-worker").join("wrangler.toml").exists() {
-        return Ok(candidate);
     }
 
     Err("无法定位 deploy/ 目录。请在项目根目录运行此命令，或设置 PPROXY_DEPLOY_DIR 环境变量。".into())
@@ -170,7 +170,7 @@ fn trim_secret_value(s: &str) -> String {
 
 /// 检查 wrangler 是否已登录。
 fn check_wrangler_login() -> bool {
-    Command::new("npx")
+    Command::new(npx_cmd())
         .args(["wrangler", "whoami"])
         .output()
         .map(|o| o.status.success())
@@ -179,7 +179,7 @@ fn check_wrangler_login() -> bool {
 
 /// 通过 stdin pipe 设置 wrangler secret（避免交互式提示）。
 fn set_wrangler_secret(name: &str, value: &str, work_dir: &Path) -> Result<(), String> {
-    let mut child = Command::new("npx")
+    let mut child = Command::new(npx_cmd())
         .args(["wrangler", "secret", "put", name])
         .current_dir(work_dir)
         .stdin(std::process::Stdio::piped())
@@ -221,7 +221,7 @@ fn deploy_cf_worker(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String>
     let logged_in = check_wrangler_login();
     if !logged_in {
         println!("  wrangler 未登录，尝试自动登录...");
-        let login_status = Command::new("npx")
+        let login_status = Command::new(npx_cmd())
             .args(["wrangler", "login"])
             .status()
             .map_err(|e| format!("wrangler login 失败: {e}"))?;
@@ -237,7 +237,7 @@ fn deploy_cf_worker(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String>
 
     // 部署
     println!("  正在部署 CF Worker...");
-    let status = Command::new("npx")
+    let status = Command::new(npx_cmd())
         .args(["wrangler", "deploy"])
         .current_dir(&work_dir)
         .stdout(std::process::Stdio::inherit())
@@ -287,7 +287,7 @@ fn deploy_vercel(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
         println!("  Vercel 项目尚未关联。正在尝试 link...");
         println!("  (需要先创建 Vercel 项目 vedge.ponyjob.top)");
 
-        let link_status = Command::new("npx")
+        let link_status = Command::new(npx_cmd())
             .args(["vercel", "link", "--confirm"])
             .current_dir(&work_dir)
             .env("VERCEL_TOKEN", &token)
@@ -317,7 +317,7 @@ fn deploy_vercel(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
 
     // 部署
     println!("  正在部署 Vercel 函数...");
-    let status = Command::new("npx")
+    let status = Command::new(npx_cmd())
         .args(["vercel", "deploy", "--prod"])
         .current_dir(&work_dir)
         .env("VERCEL_TOKEN", &token)
@@ -405,7 +405,7 @@ fn deploy_gate(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
     let logged_in = check_wrangler_login();
     if !logged_in {
         println!("  wrangler 未登录，尝试自动登录...");
-        let login_status = Command::new("npx")
+        let login_status = Command::new(npx_cmd())
             .args(["wrangler", "login"])
             .status()
             .map_err(|e| format!("wrangler login 失败: {e}"))?;
@@ -421,7 +421,7 @@ fn deploy_gate(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
 
     // 部署
     println!("  正在部署 Gate Worker...");
-    let status = Command::new("npx")
+    let status = Command::new(npx_cmd())
         .args(["wrangler", "deploy"])
         .current_dir(&work_dir)
         .stdout(std::process::Stdio::inherit())
@@ -450,7 +450,7 @@ fn deploy_gate(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
     println!("│    gate.ponyjob.top → 此 Worker");
     println!("│ 2. 更新 .pproxy.env（如需）：");
     println!("│    PPROXY_TUNNEL_GATE_URL=wss://gate.ponyjob.top/ws");
-    println!("│    PPROXY_TUNNEL_TOKEN={}", tunnel_token);
+    println!("│    PPROXY_TUNNEL_TOKEN={}", crate::config::redact(&tunnel_token));
     println!("└─────────────────────────────────────────────────");
 
     Ok(EXIT_OK)

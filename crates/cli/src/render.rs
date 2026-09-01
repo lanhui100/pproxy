@@ -6,15 +6,48 @@ pub struct Table {
     rows: Vec<Vec<String>>,
 }
 
-/// 计算单个字符在终端中的显示列宽（East Asian Width 支持）。纯函数可测。
+/// 剥离 ANSI 转义序列（如终端颜色码 \x1b[32m 等），用于真实视觉列宽计算。纯函数可测。
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                while let Some(sc) = chars.next() {
+                    if sc.is_ascii_alphabetic() || sc == 'm' {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// 计算单个字符在终端中的显示列宽（East Asian Width 与常见 Emoji 支持）。纯函数可测。
 pub fn char_width(c: char) -> usize {
     let u = c as u32;
-    // 控制字符与零宽字符
-    if u < 0x20 || (0x7F..=0x9F).contains(&u) || u == 0x200B || u == 0xFEFF {
+    // 控制字符与零宽字符（包含零宽连接符与 Emoji 变体选择符）
+    if u < 0x20
+        || (0x7F..=0x9F).contains(&u)
+        || u == 0x200B
+        || u == 0x200D
+        || u == 0xFEFF
+        || u == 0xFE0F
+    {
         return 0;
     }
     // 宽字符范围（CJK 统一表意文字、全角标点、日韩假名、全角 ASCII、Emoji 等）
     if (0x1100..=0x115F).contains(&u)
+        || (0x231A..=0x231B).contains(&u)
+        || (0x23E9..=0x23EC).contains(&u)
+        || (0x23F0..=0x23F3).contains(&u)
+        || (0x25FD..=0x25FE).contains(&u)
+        || (0x2600..=0x27BF).contains(&u) // Symbols, Dingbats, ✨, ⚠️, ⚡, ✅, ❌
+        || (0x2B50..=0x2B55).contains(&u)
         || (0x2E80..=0xA4CF).contains(&u)
         || (0xAC00..=0xD7A3).contains(&u)
         || (0xF900..=0xFAFF).contains(&u)
@@ -22,10 +55,8 @@ pub fn char_width(c: char) -> usize {
         || (0xFE30..=0xFE6F).contains(&u)
         || (0xFF00..=0xFF60).contains(&u)
         || (0xFFE0..=0xFFE6).contains(&u)
-        || (0x1F300..=0x1F64F).contains(&u)
-        || (0x1F900..=0x1F9FF).contains(&u)
-        || (0x20000..=0x2FFFD).contains(&u)
-        || (0x30000..=0x3FFFD).contains(&u)
+        || (0x1F000..=0x1FFFF).contains(&u) // Emoji, 🚀, 🎉 等
+        || (0x20000..=0x3FFFD).contains(&u)
     {
         2
     } else {
@@ -33,9 +64,9 @@ pub fn char_width(c: char) -> usize {
     }
 }
 
-/// 计算字符串在终端中的总显示列宽。纯函数可测。
+/// 计算字符串在终端中的总显示列宽（自动剔除 ANSI 颜色转义字符）。纯函数可测。
 pub fn display_width(s: &str) -> usize {
-    s.chars().map(char_width).sum()
+    strip_ansi(s).chars().map(char_width).sum()
 }
 
 impl Table {
@@ -283,19 +314,23 @@ mod tests {
         assert_eq!(display_width("hello"), 5);
         assert_eq!(display_width("中国"), 4);
         assert_eq!(display_width("pproxy 代理"), 11); // 6 + 1 + 4 = 11
-        assert_eq!(display_width("✨ 测试"), 6); // 2 + 1 + 2 + 1 = 6 (emoji 2, space 1, 测试 4 -> 2 + 1 + 4 = 7, wait: emoji ✨ is \u{2728} or other)
+        assert_eq!(display_width("✨ 测试"), 7); // ✨ 宽 2 + 空格 1 + 测试 4 = 7
+        assert_eq!(display_width("🚀 部署成功"), 11); // 🚀 宽 2 + 空格 1 + 8 = 11
+        // ANSI 颜色代码不增加显示宽度
+        assert_eq!(display_width("\x1b[1;32mhello\x1b[0m"), 5);
+        assert_eq!(display_width("\x1b[31m中国\x1b[0m"), 4);
     }
 
     #[test]
     fn test_table_cjk_alignment() {
         let mut t = Table::new(&["服务名", "状态"]);
-        t.push(vec!["anthropic".into(), "已启用".into()]);
+        t.push(vec!["anthropic".into(), "\x1b[32m已启用\x1b[0m".into()]);
         t.push(vec!["本地网关".into(), "禁用".into()]);
         let rendered = t.render();
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(lines.len(), 4);
         // 表头 "服务名" 宽 6, "anthropic" 宽 9, "本地网关" 宽 8 => 第一列列宽 9
-        // 行 2 "已启用" 宽 6, 表头 "状态" 宽 4 => 第二列列宽 6
+        // 行 2 "\x1b[32m已启用\x1b[0m" 实际显示宽 6, 表头 "状态" 宽 4 => 第二列列宽 6
         assert!(lines[0].starts_with("服务名   ")); // 6 + 3 spaces = 9
         assert!(lines[2].starts_with("anthropic")); // 9
         assert!(lines[3].starts_with("本地网关 ")); // 8 + 1 space = 9

@@ -31,44 +31,52 @@ pub(crate) fn run(
         let mut skipped = 0u32;
 
         // 1. health
-        match http.health().await {
+        let admin_ok = match http.health().await {
             Ok(v) => {
                 let db = v.get("db").and_then(|x| x.as_str()).unwrap_or("?");
                 let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("?");
                 if status == "ok" && db == "ok" {
                     println!("[pass] admin api health (status={status}, db={db})");
                     passed += 1;
+                    true
                 } else {
                     println!("[fail] admin api health (status={status}, db={db})");
                     failed += 1;
+                    false
                 }
             }
             Err(e @ ApiError::Connection(_)) => {
                 println!("[fail] admin api unreachable: {e}");
                 failed += 1;
-                print_summary(passed, failed, skipped);
-                return Ok(EXIT_FAILURE);
+                false
             }
             Err(e) => {
                 println!("[fail] admin api health: {e}");
                 failed += 1;
+                false
             }
-        }
+        };
 
         // 2. routes
-        let routes = match http.list_routes().await {
-            Ok(rows) => {
-                let enabled = rows.iter().filter(|r| r.enabled).count();
-                let disabled = rows.len() - enabled;
-                println!("[pass] routes: {} total, {enabled} enabled, {disabled} disabled", rows.len());
-                passed += 1;
-                rows
+        let routes = if admin_ok {
+            match http.list_routes().await {
+                Ok(rows) => {
+                    let enabled = rows.iter().filter(|r| r.enabled).count();
+                    let disabled = rows.len() - enabled;
+                    println!("[pass] routes: {} total, {enabled} enabled, {disabled} disabled", rows.len());
+                    passed += 1;
+                    rows
+                }
+                Err(e) => {
+                    println!("[fail] routes list: {e}");
+                    failed += 1;
+                    vec![]
+                }
             }
-            Err(e) => {
-                println!("[fail] routes list: {e}");
-                failed += 1;
-                vec![]
-            }
+        } else {
+            println!("[skip] routes list: admin api 不可用");
+            skipped += 1;
+            vec![]
         };
         let enabled_names: Vec<String> =
             routes.iter().filter(|r| r.enabled).map(|r| r.name.clone()).collect();
@@ -124,7 +132,7 @@ pub(crate) fn run(
                 }
             }
             _ => {
-                println!("[skip] data plane probe: --probe-token 未提供或无 enabled 路由");
+                println!("[skip] data plane probe: --probe-token 未提供或无 enabled 路由 (提示: 可运行 'pproxy token create <name>' 创建令牌测试)");
                 skipped += 1;
             }
         }
@@ -160,6 +168,18 @@ pub(crate) enum TunnelProbeResult {
 /// 执行 CONNECT 隧道探针：裸 TCP 连数据面，发 CONNECT 读响应行。
 /// 不依赖 token/env，零机密（spec §3.7）。
 fn tunnel_probe(data_plane: &Option<String>, host: &str) -> TunnelProbeResult {
+    // 严格安全校验：防止 CRLF 注入 / HTTP 请求走私
+    if host.is_empty()
+        || host.contains('\r')
+        || host.contains('\n')
+        || host.contains(' ')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '_' | '[' | ']'))
+    {
+        return TunnelProbeResult::Fail("非法 tunnel_host 参数格式（包含非法字符或换行符）".into());
+    }
+
     let addr = match data_plane {
         Some(dp) => match normalize_host_port(dp) {
             Some(a) => a,
