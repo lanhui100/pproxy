@@ -747,3 +747,29 @@ tailnet 管理面），不属于桌面端退役范围，予以保留。
 
 **代价与自愈**：开启代理恢复秒级；「状态已开但个别站点不通」由连通性测试逐站暴露，
 用户可据此判断链路质量，而不是被启动门禁一票否决。
+
+---
+
+## Antigravity CLI `FAILED_PRECONDITION (400) Location Not Supported` 修复与双 Gate 落地 · 2026-09-01
+
+**现象**：
+Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution terminated due to error`。通过扫描会话 SQLite 数据库底层真实响应，发现全部错误均为 Google API 返回的 `FAILED_PRECONDITION (code 400): User location is not supported for the API use`（Server: ESF）。
+
+**根因**：
+`agy` 经本地 pproxy 路由至 Cloudflare Gate Worker（`gate.ponyjob.top`）。CF Worker 出口网络地理位置跟随 edge colo 调度，国内用户频繁被调度至香港节点（HKG/MFM），而香港属于 Gemini/Google API 不支持的区域，从而导致请求被 Google ESF 拦截并报 400。
+
+**落地修复**：
+1. **Vercel Gate 钉死美区物理执行算力**：
+   - 在 [`deploy/vercel-gate-worker/vercel.json`](file:///D:/Documents/pproxy/deploy/vercel-gate-worker/vercel.json) 显式配置 `"regions": ["iad1"]`（AWS 美东弗吉尼亚数据中心），确保所有出网 TCP 具有合规的原生美国 IP。
+   - 生产环境绑定自定义域名 [`vgate.ponyjob.top`](https://vgate.ponyjob.top)。
+2. **三端 SHA-256 鉴权令牌对齐**：
+   - 统一使用 SHA-256 散列值 `<REDACTED_SHA256>`。
+   - 同步注入到 Cloudflare Worker (`gate.ponyjob.top`) 密钥、Vercel 环境变量 (`TUNNEL_TOKEN_HASH`) 以及本地 Windows 凭据管理器 (`tunnel_token.pony-desktop`)。
+3. **双网关 Failover 协同策略**：
+   - 客户端配置多端点：`wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws`。
+   - 当 CF Worker 调度至非合规区域（HKG/MFM）且目标为 Google 时返回 `denied (unsupported_colo)`，桌面端 `engine_tunnel` 自动秒级 Failover 至 Vercel 美区出口；常规流量继续享受 CF Worker 低延迟直连。
+4. **验证取证**：
+   - `node smoke-test.mjs wss://vgate.ponyjob.top/api/ws www.google.com 443` -> `OK: TLS established (TLS_AES_256_GCM_SHA384)`
+   - `node smoke-test.mjs wss://vgate.ponyjob.top/api/ws openai.com 443` -> `OK: TLS established (TLS_AES_256_GCM_SHA384)`
+   - 单元测试：Rust 44/44 通过、Vitest 69/69 通过。
+
