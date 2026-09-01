@@ -52,8 +52,63 @@ jobs:
           name: ${{ matrix.binary }}
           path: ${{ matrix.binary }}
 
+  build-macos-cli:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            binary: pproxy-macos-arm64
+          - target: x86_64-apple-darwin
+            binary: pproxy-macos-amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build CLI natively for macOS
+        run: |
+          cargo build --target ${{ matrix.target }} --release -p pproxy-cli
+          cp target/${{ matrix.target }}/release/pproxy ${{ matrix.binary }}
+          chmod +x ${{ matrix.binary }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: ${{ matrix.binary }}
+
+  build-windows-cli:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build CLI for Windows
+        shell: bash
+        run: |
+          cargo build --release -p pproxy-cli
+          cp target/release/pproxy.exe pproxy-windows-x64.exe
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pproxy-windows-x64
+          path: pproxy-windows-x64.exe
+
   publish-release:
-    needs: build-linux-cli
+    needs: [build-linux-cli, build-macos-cli, build-windows-cli]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +122,7 @@ jobs:
         run: |
           mkdir -p release-assets
           find dist -type f -exec cp {} release-assets/ \;
+          chmod +x release-assets/pproxy-linux-* release-assets/pproxy-macos-* 2>/dev/null || true
           ls -la release-assets
 
       - name: Determine Release Tag
@@ -93,5 +149,6 @@ jobs:
             gh release upload "$TAG" release-assets/* --clobber
           else
             echo "Release $TAG does not exist, creating release..."
-            gh release create "$TAG" release-assets/* --title "Pony Proxy $TAG" --notes "Linux CLI (amd64 / arm64 musl 静态独立二进制) 发版"
+            gh release create "$TAG" release-assets/* --title "Pony Proxy $TAG" --notes "CLI (Linux amd64/arm64 musl, macOS arm64/amd64, Windows x64) 三平台发版"
           fi
+
