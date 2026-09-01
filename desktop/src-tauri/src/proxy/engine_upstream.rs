@@ -9,7 +9,7 @@ use base64::Engine as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::engine::{relay_bidir, Kind, ReqHead, Upstream};
+use super::engine::{relay_bidir_with_stats, EngineStats, Kind, ReqHead, Upstream};
 
 fn io(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("upstream: {e}"))
@@ -138,23 +138,40 @@ pub async fn connect_and_relay(
     parsed: ReqHead,
     head: &str,
     up: &Upstream,
+    stats: &EngineStats,
 ) -> std::io::Result<()> {
     // 建连阶段可重试（尚未向客户端写 200）；一旦开始 relay 不再重试
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..RETRY {
         match try_establish(up, &parsed).await {
             Ok(target) => {
+                stats
+                    .upstream_reqs
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if parsed.kind == Kind::Connect {
                     client
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         .await?;
-                    return relay_bidir(client, target).await;
+                    return relay_bidir_with_stats(
+                        client,
+                        target,
+                        Some((&stats.upstream_up, &stats.upstream_down)),
+                    )
+                    .await;
                 }
                 // absolute-form 原样交上游 HTTP 代理，仅注入认证头
                 let mut target = target;
                 let forwarded = rebuild_request(head, &proxy_auth_header(up));
+                stats
+                    .upstream_up
+                    .fetch_add(forwarded.len() as u64, std::sync::atomic::Ordering::Relaxed);
                 target.write_all(forwarded.as_bytes()).await?;
-                return relay_bidir(client, target).await;
+                return relay_bidir_with_stats(
+                    client,
+                    target,
+                    Some((&stats.upstream_up, &stats.upstream_down)),
+                )
+                .await;
             }
             Err(e) => {
                 // 仅网络级错误值得重试（半死连接、抖动）；确定性拒绝（403/407 认证失败等）
@@ -277,12 +294,15 @@ mod tests {
         let up = upstream_of(host);
         let (mut a, client) = socket_pair().await;
         let up2 = up.clone();
+        let stats = std::sync::Arc::new(EngineStats::default());
+        let stats2 = stats.clone();
         let handle = tokio::spawn(async move {
             connect_and_relay(
                 client,
                 ReqHead { kind: Kind::Connect, host: "github.com".into(), port: 443 },
                 "CONNECT github.com:443 HTTP/1.1\r\n\r\n",
                 &up2,
+                &stats2,
             )
             .await
         });
@@ -306,6 +326,11 @@ mod tests {
         // 必须关闭客户端写端，否则 relay_bidir 的两端拷贝永远等不到 EOF（B1 挂死根因）
         drop(a);
         handle.await.unwrap().expect("链路建立成功");
+
+        // 验证统计打点正常累加
+        assert_eq!(stats.upstream_reqs.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(stats.upstream_up.load(std::sync::atomic::Ordering::Relaxed), 4); // "PING".len()
+        assert_eq!(stats.upstream_down.load(std::sync::atomic::Ordering::Relaxed), 4); // "PING".len()
     }
 
     #[tokio::test]
@@ -315,11 +340,13 @@ mod tests {
         let up = upstream_of(host);
         let (a, client) = socket_pair().await;
         let started = std::time::Instant::now();
+        let stats = EngineStats::default();
         let err = connect_and_relay(
             client,
             ReqHead { kind: Kind::Connect, host: "github.com".into(), port: 443 },
             "CONNECT github.com:443 HTTP/1.1\r\n\r\n",
             &up,
+            &stats,
         )
         .await
         .expect_err("半死上游必须超时报错");
@@ -359,12 +386,14 @@ mod tests {
         let (mut a, client) = socket_pair().await;
         let head = "POST http://x/y HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nBODY";
         let up2 = up.clone();
+        let stats = EngineStats::default();
         let handle = tokio::spawn(async move {
             connect_and_relay(
                 client,
                 ReqHead { kind: Kind::Plain, host: "x".into(), port: 80 },
                 head,
                 &up2,
+                &stats,
             )
             .await
         });
@@ -390,11 +419,13 @@ mod tests {
         let host = fake_upstream("HTTP/1.1 403 Denied\r\n\r\n").await;
         let up = upstream_of(host);
         let (_a, client) = socket_pair().await;
+        let stats = EngineStats::default();
         let err = connect_and_relay(
             client,
             ReqHead { kind: Kind::Connect, host: "github.com".into(), port: 443 },
             "CONNECT github.com:443 HTTP/1.1\r\n\r\n",
             &up,
+            &stats,
         )
         .await
         .expect_err("非 2xx 必须报错");

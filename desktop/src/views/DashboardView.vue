@@ -26,7 +26,7 @@ import {
 import { openExternalUrl } from '@/lib/urls'
 import {
   appendSpeedSample,
-  calculateSpeed,
+  calculateSmoothedSpeed,
   formatSpeedParts,
   generateSpeedWaveform,
   type SpeedSample,
@@ -60,7 +60,7 @@ const remoteUser = ref('')
 const remotePass = ref('')
 const isSubmitting = ref(false)
 
-// ---- 用量统计（引擎本地计数：按 gate 端点拆分 CF / Vercel 双出口，含近 7 日与近 24 小时历史）----
+// ---- 用量统计（引擎本地计数：按出口归账，含近 7 日与近 24 小时历史）----
 interface TrafficBucket {
   requests: number
   bytes_up: number
@@ -70,22 +70,25 @@ interface DayUsage {
   date: string
   cf: TrafficBucket
   vercel: TrafficBucket
+  upstream?: TrafficBucket
 }
 interface HourUsage {
   hour: string
   cf: TrafficBucket
   vercel: TrafficBucket
+  upstream?: TrafficBucket
 }
 interface TrafficStats {
-  today: { cf: TrafficBucket; vercel: TrafficBucket }
-  total: { cf: TrafficBucket; vercel: TrafficBucket }
+  today: { cf: TrafficBucket; vercel: TrafficBucket; upstream?: TrafficBucket }
+  total: { cf: TrafficBucket; vercel: TrafficBucket; upstream?: TrafficBucket }
   history: DayUsage[]
   hourly?: HourUsage[]
 }
 const traffic = ref<TrafficStats | null>(null)
 const usageDimension = ref<'7d' | '24h'>('7d')
 
-function bucketBytes(b: TrafficBucket): number {
+function bucketBytes(b?: TrafficBucket): number {
+  if (!b) return 0
   return b.bytes_up + b.bytes_down
 }
 
@@ -163,14 +166,18 @@ const todayTotals = computed(() => {
   if (!traffic.value) return { bytes: 0, requests: 0 }
   const t = traffic.value.today
   return {
-    bytes: bucketBytes(t.cf) + bucketBytes(t.vercel),
-    requests: t.cf.requests + t.vercel.requests,
+    bytes: bucketBytes(t.cf) + bucketBytes(t.vercel) + bucketBytes(t.upstream),
+    requests: (t.cf?.requests ?? 0) + (t.vercel?.requests ?? 0) + (t.upstream?.requests ?? 0),
   }
 })
 
 const totalBytes = computed(() => {
   if (!traffic.value) return 0
-  return bucketBytes(traffic.value.total.cf) + bucketBytes(traffic.value.total.vercel)
+  return (
+    bucketBytes(traffic.value.total.cf) +
+    bucketBytes(traffic.value.total.vercel) +
+    bucketBytes(traffic.value.total.upstream)
+  )
 })
 
 const currentSpeed = ref<{ up: number; down: number }>({ up: 0, down: 0 })
@@ -250,11 +257,21 @@ async function refreshTraffic(): Promise<void> {
     const stats = await invoke<TrafficStats>('proxy_traffic_stats')
     traffic.value = stats
 
-    const totalUp = (stats.total.cf?.bytes_up ?? 0) + (stats.total.vercel?.bytes_up ?? 0)
-    const totalDown = (stats.total.cf?.bytes_down ?? 0) + (stats.total.vercel?.bytes_down ?? 0)
+    const totalUp =
+      (stats.total.cf?.bytes_up ?? 0) +
+      (stats.total.vercel?.bytes_up ?? 0) +
+      (stats.total.upstream?.bytes_up ?? 0)
+    const totalDown =
+      (stats.total.cf?.bytes_down ?? 0) +
+      (stats.total.vercel?.bytes_down ?? 0) +
+      (stats.total.upstream?.bytes_down ?? 0)
 
     if (prevTotals.value && isRunning.value) {
-      const sp = calculateSpeed(prevTotals.value, { up: totalUp, down: totalDown, ts: now })
+      const sp = calculateSmoothedSpeed(
+        prevTotals.value,
+        { up: totalUp, down: totalDown, ts: now },
+        currentSpeed.value,
+      )
       currentSpeed.value = sp
       speedHistory.value = appendSpeedSample(speedHistory.value, { down: sp.down, up: sp.up, ts: now })
     } else {
@@ -851,7 +868,7 @@ async function submitImportOrChained() {
           <p class="mt-3 text-xs text-muted-foreground text-center">{{ statusText }}</p>
         </section>
 
-        <!-- 用量统计：极简合并单图（左上角请求/累计，右上角定宽无小数实时速率） -->
+        <!-- 用量统计：极简合并单图（左上角请求/累计，右上角定宽高精实时速率） -->
         <section class="w-[350px] shrink-0 ml-auto space-y-2">
           <div class="flex items-center justify-between gap-1 whitespace-nowrap">
             <!-- 左上角：今日请求与累计指标 -->
@@ -866,16 +883,16 @@ async function submitImportOrChained() {
               </span>
             </div>
 
-            <!-- 右上角：实时网速指标（无小数、三位数定宽、单位固定槽位，绝对不换行） -->
+            <!-- 右上角：实时网速指标（自适应小数、定宽防抖、单位固定槽位，绝对不换行） -->
             <div class="flex items-center shrink-0">
               <span class="inline-flex items-center gap-1 text-xs">
                 <span class="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shrink-0">实时</span>
                 <span class="inline-flex items-center font-mono text-xs tabular-nums text-foreground">
                   <span class="text-muted-foreground">↓</span>
-                  <span class="inline-block w-6 text-right font-medium">{{ speedDownParts.val }}</span>
+                  <span class="inline-block w-7 text-right font-medium">{{ speedDownParts.val }}</span>
                   <span class="inline-block w-7 text-left text-[10px] text-muted-foreground pl-0.5">{{ speedDownParts.unit }}</span>
                   <span class="text-muted-foreground ml-1">↑</span>
-                  <span class="inline-block w-6 text-right font-medium">{{ speedUpParts.val }}</span>
+                  <span class="inline-block w-7 text-right font-medium">{{ speedUpParts.val }}</span>
                   <span class="inline-block w-7 text-left text-[10px] text-muted-foreground pl-0.5">{{ speedUpParts.unit }}</span>
                 </span>
               </span>

@@ -278,8 +278,14 @@ pub async fn connect_and_relay(
                         .await?;
                 } else {
                     let full_req = rebuild_request(head);
+                    let bytes = full_req.into_bytes();
+                    match egress {
+                        Egress::Cf => &stats.cf_up,
+                        Egress::Vercel => &stats.vercel_up,
+                    }
+                    .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     ws_tx
-                        .send(Message::Binary(full_req.into_bytes()))
+                        .send(Message::Binary(bytes))
                         .await
                         .map_err(io)?;
                 }

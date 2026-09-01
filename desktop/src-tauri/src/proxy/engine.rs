@@ -82,6 +82,9 @@ pub struct EngineStats {
     pub vercel_up: AtomicU64,
     pub vercel_down: AtomicU64,
     pub vercel_reqs: AtomicU64,
+    pub upstream_up: AtomicU64,
+    pub upstream_down: AtomicU64,
+    pub upstream_reqs: AtomicU64,
     pub last_error: std::sync::Mutex<Option<String>>,
 }
 
@@ -188,16 +191,21 @@ fn split_host_port(authority: &str, default_port: u16) -> Option<(String, u16)> 
     }
 }
 
+const CLIENT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 async fn handle_conn(
     mut stream: TcpStream,
     cfg: &EngineConfig,
     stats: &EngineStats,
 ) -> std::io::Result<()> {
-    // 读取请求头（至 \r\n\r\n，上限 16KB）
+    // 读取请求头（至 \r\n\r\n，上限 16KB，含 15 秒超时防 Slowloris 悬挂）
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 2048];
+    let deadline = tokio::time::Instant::now() + CLIENT_READ_TIMEOUT;
     loop {
-        let n = stream.read(&mut tmp).await?;
+        let n = tokio::time::timeout_at(deadline, stream.read(&mut tmp))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client head read timed out"))??;
         if n == 0 {
             return Ok(()); // 对端关闭
         }
@@ -256,7 +264,7 @@ async fn handle_conn(
             stats.tunneled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let upstream = cfg.upstream.borrow().clone();
             let result = match upstream {
-                Some(u) => super::engine_upstream::connect_and_relay(stream, parsed, &head, &u).await,
+                Some(u) => super::engine_upstream::connect_and_relay(stream, parsed, &head, &u, stats).await,
                 None => super::engine_tunnel::connect_and_relay(stream, parsed, &head, cfg, stats).await,
             };
             match result {
@@ -344,6 +352,14 @@ pub(crate) async fn relay_bidir(
     a: TcpStream,
     b: TcpStream,
 ) -> std::io::Result<()> {
+    relay_bidir_with_stats(a, b, None).await
+}
+
+pub(crate) async fn relay_bidir_with_stats(
+    a: TcpStream,
+    b: TcpStream,
+    stats: Option<(&AtomicU64, &AtomicU64)>,
+) -> std::io::Result<()> {
     let (mut ar, mut aw) = a.into_split();
     let (mut br, mut bw) = b.into_split();
     let mut a_eof = false;
@@ -361,6 +377,9 @@ pub(crate) async fn relay_bidir(
                     a_eof = true;
                     let _ = bw.shutdown().await;
                 } else {
+                    if let Some((up, _)) = stats {
+                        up.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
                     bw.write_all(&buf_a[..n]).await?;
                 }
             }
@@ -370,6 +389,9 @@ pub(crate) async fn relay_bidir(
                     b_eof = true;
                     let _ = aw.shutdown().await;
                 } else {
+                    if let Some((_, down)) = stats {
+                        down.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
                     aw.write_all(&buf_b[..n]).await?;
                 }
             }
