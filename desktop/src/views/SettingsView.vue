@@ -343,6 +343,19 @@ async function triggerRescue() {
     toast.error('急救失败：' + (typeof e === 'string' ? e : e?.message))
   }
 }
+
+async function handleCheckUpdate() {
+  if (!isTauri()) {
+    toast.info('开发模式无需更新', '当前处于浏览器/开发环境')
+    return
+  }
+  await checkForUpdate()
+  if (updateError.value) {
+    toast.error('检查更新失败', updateError.value)
+  } else if (!updateAvailable.value) {
+    toast.success('已是最新版本', '当前版本已是最新')
+  }
+}
 </script>
 
 <template>
@@ -704,7 +717,7 @@ async function triggerRescue() {
             <LifeBuoy class="h-4 w-4 shrink-0" />
             网络急救箱 (Windows)
           </CardTitle>
-          <CardDescription class="text-xs">
+          <CardDescription class="text-xs min-h-[2rem] flex items-center">
             如果软件异常退出导致电脑无法上网，一键清除所有系统代理残留并恢复直连。
           </CardDescription>
         </CardHeader>
@@ -722,90 +735,89 @@ async function triggerRescue() {
       </Card>
 
       <!-- 软件更新 -->
-      <Card class="border-border shadow-sm flex flex-col justify-between">
+      <Card class="border-border shadow-sm flex flex-col justify-between relative overflow-hidden">
+        <!-- 顶部无侵入式进度指示条：绝对定位，零垂直流高度占位，杜绝布局抖动 -->
+        <div
+          v-if="checking || downloading || downloaded"
+          class="absolute top-0 inset-x-0 h-1 z-10 overflow-hidden bg-emerald-500/20"
+        >
+          <Progress
+            v-if="checking"
+            indeterminate
+            class="h-1 rounded-none bg-transparent"
+            indicator-class="bg-emerald-600"
+          />
+          <div
+            v-else
+            class="h-full bg-emerald-600 transition-all duration-300 ease-out"
+            :style="{ width: `${downloadProgress}%` }"
+          />
+        </div>
+
         <CardHeader class="pb-2">
           <CardTitle class="text-sm flex items-center gap-2">
             <Download class="h-4 w-4 text-emerald-600 shrink-0" />
             软件更新
           </CardTitle>
-          <CardDescription class="text-xs">
+          <CardDescription class="text-xs min-h-[2rem] flex items-center">
             <span v-if="downloading" class="text-emerald-600 font-medium">
-              新版本安装包下载中…
+              新版本安装包下载中 ({{ downloadProgress }}%)…
             </span>
             <span v-else-if="downloaded" class="text-emerald-600 font-medium">
               下载完成，即将启动安装程序…
             </span>
-            <span v-else-if="checking" class="text-primary font-medium">
+            <span v-else-if="checking" class="text-primary font-medium flex items-center gap-1.5">
+              <RefreshCw class="h-3 w-3 animate-spin" />
               正在检查新版本…
+            </span>
+            <span v-else-if="updateError" class="text-rose-600 dark:text-rose-400 line-clamp-2" :title="updateError">
+              检查失败：{{ updateError }}
             </span>
             <span v-else-if="updateAvailable" class="text-emerald-600 font-medium">
               发现新版本 {{ updateVersion }}，可立即升级
             </span>
-            <span v-else>
+            <span v-else class="text-muted-foreground">
               当前已是最新版本，保持最新以获得最佳体验
             </span>
           </CardDescription>
         </CardHeader>
-        <CardContent class="pt-2 space-y-3">
-          <!-- 检查中：不定长进度条 -->
-          <div v-if="checking" class="py-1">
-            <Progress indeterminate class="h-1.5" />
-          </div>
-
-          <!-- 下载中/已下载：真实进度条 -->
-          <div v-else-if="downloading || downloaded" class="space-y-1.5 py-1">
-            <div class="flex items-center justify-between text-[11px]">
-              <span class="text-muted-foreground">下载进度</span>
-              <span class="font-mono text-emerald-600 font-medium">{{ downloadProgress }}%</span>
-            </div>
-            <Progress
-              :model-value="downloadProgress"
-              class="h-1.5"
-              indicator-class="bg-emerald-600"
-            />
-          </div>
-
-          <!-- 错误提示 -->
-          <div
-            v-if="updateError && !checking && !downloading"
-            class="rounded-lg bg-rose-500/10 border border-rose-500/20 px-2.5 py-1.5 text-[11px] text-rose-600 dark:text-rose-400"
+        <CardContent class="pt-2">
+          <Button
+            v-if="downloading || downloaded"
+            disabled
+            size="sm"
+            class="w-full text-xs h-8.5 relative overflow-hidden bg-emerald-600 text-white opacity-95 cursor-not-allowed border-0"
           >
-            检查更新失败：{{ updateError }}
-          </div>
-
-          <!-- 操作按钮 -->
-          <div>
-            <Button
-              v-if="downloading || downloaded"
-              disabled
-              size="sm"
-              class="w-full text-xs h-8.5 bg-emerald-600 text-white opacity-90 cursor-not-allowed"
-            >
+            <div
+              class="absolute inset-y-0 left-0 bg-emerald-700/60 transition-all duration-200"
+              :style="{ width: `${downloadProgress}%` }"
+            />
+            <span class="relative z-10 flex items-center justify-center">
               <Check v-if="downloaded" class="h-3.5 w-3.5 mr-1.5" />
               <Download v-else class="h-3.5 w-3.5 mr-1.5 animate-bounce" />
-              {{ downloaded ? '即将启动安装器…' : '正在下载…' }}
-            </Button>
-            <Button
-              v-else-if="updateAvailable"
-              @click="downloadAndInstall"
-              size="sm"
-              class="w-full text-xs h-8.5 cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white"
-            >
-              <Download class="h-3.5 w-3.5 mr-1.5" />
-              立即升级至 {{ updateVersion }}
-            </Button>
-            <Button
-              v-else
-              variant="outline"
-              size="sm"
-              @click="checkForUpdate"
-              :disabled="checking"
-              class="w-full text-xs h-8.5 cursor-pointer"
-            >
-              <RefreshCw v-if="checking" class="h-3 w-3 mr-1.5 animate-spin" />
-              {{ checking ? '正在检查…' : '检查新版本' }}
-            </Button>
-          </div>
+              {{ downloaded ? '即将启动安装器…' : `正在下载 (${downloadProgress}%)` }}
+            </span>
+          </Button>
+          <Button
+            v-else-if="updateAvailable"
+            @click="downloadAndInstall"
+            size="sm"
+            class="w-full text-xs h-8.5 cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white"
+          >
+            <Download class="h-3.5 w-3.5 mr-1.5" />
+            立即升级至 {{ updateVersion }}
+          </Button>
+          <Button
+            v-else
+            variant="outline"
+            size="sm"
+            @click="handleCheckUpdate"
+            :disabled="checking"
+            class="w-full text-xs h-8.5 cursor-pointer"
+          >
+            <RefreshCw v-if="checking" class="h-3 w-3 mr-1.5 animate-spin" />
+            {{ checking ? '正在检查…' : '检查新版本' }}
+          </Button>
         </CardContent>
       </Card>
     </div>
