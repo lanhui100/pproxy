@@ -22,6 +22,17 @@ fn io(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("tunnel: {e}"))
 }
 
+/// WS Upgrade 被 gate 以 401 拒绝时的稳定错误标记（自愈判定的唯一依据）。
+const AUTH_401_MARKER: &str = "tunnel_auth_401";
+
+/// 401 自愈冷却：进程内距上次自愈至少间隔此时长（single-flight 负缓存，
+/// 防止 token 轮换瞬间 N 个并发 CONNECT 各自同步读 keyring + 重复重试）。
+#[cfg(not(test))]
+const SELF_HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const SELF_HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(0);
+static LAST_SELF_HEAL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
 const RETRY: u32 = 2; // 总尝试次数（首次 + 1 次重试）
 
 // 超时常量：测试下缩短，避免单测真等满 10 秒（对齐 engine_upstream 的做法）。
@@ -59,10 +70,21 @@ async fn try_establish_url(
     );
     // 拨号 + WS Upgrade 共享 DIAL_TIMEOUT 预算：静默端点不得挂死建连循环
     let dial_deadline = tokio::time::Instant::now() + DIAL_TIMEOUT;
-    let (ws, _resp) = tokio::time::timeout_at(dial_deadline, tokio_tungstenite::connect_async(req))
+    let upgrade = tokio::time::timeout_at(dial_deadline, tokio_tungstenite::connect_async(req))
         .await
-        .map_err(|_| io(format!("dial timeout after {DIAL_TIMEOUT:?}")))?
-        .map_err(io)?;
+        .map_err(|_| io(format!("dial timeout after {DIAL_TIMEOUT:?}")))?;
+    let (ws, _resp) = match upgrade {
+        Ok(pair) => pair,
+        Err(e) => {
+            // 401 打稳定标记：establish 的自愈只认此标记，不做模糊字符串匹配
+            if let tokio_tungstenite::tungstenite::Error::Http(resp) = &e {
+                if resp.status() == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED {
+                    return Err(io(AUTH_401_MARKER));
+                }
+            }
+            return Err(io(e));
+        }
+    };
     let (mut ws_tx, mut ws_rx) = ws.split();
 
     let first = serde_json::json!({ "host": parsed.host, "port": parsed.port }).to_string();
@@ -114,12 +136,49 @@ async fn establish(
         .collect();
 
     let mut last_err = None;
+    let mut saw_401 = false;
     for u in &urls {
         match try_establish_url(u, &token, parsed).await {
             Ok(pair) => return Ok((pair, (*u).to_string())),
             Err(e) => {
+                if e.to_string().contains(AUTH_401_MARKER) { saw_401 = true; }
                 log::warn!("tunnel establish on {u} for {} failed: {e}", parsed.host);
                 last_err = Some(e);
+            }
+        }
+    }
+
+    // 401 自愈：全部端点鉴权失败时，凭据可能已被外部更新（轮换）——重读凭据并刷新重试。
+    // 自愈不变式（spec token-ux-simplification §9 P0-2）：重读为 None（含冷却中）绝不回写 watch；
+    // 仅当与 watch 快照不同才回写（防并发回退用户新保存值）；进程内冷却 single-flight + spawn_blocking 读 keyring。
+    if saw_401 {
+        let cooled = {
+            let mut g = LAST_SELF_HEAL.lock().unwrap_or_else(|p| p.into_inner());
+            match *g {
+                Some(t) if t.elapsed() < SELF_HEAL_COOLDOWN => false,
+                _ => { *g = Some(std::time::Instant::now()); true }
+            }
+        };
+        let (fresh_url, fresh_token) = if cooled {
+            tokio::task::spawn_blocking(crate::tunnel_config_load).await.unwrap_or((None, None))
+        } else {
+            (None, None) // 冷却中：跳过自愈（single-flight）
+        };
+        if let (Some(u), Some(t)) = (fresh_url, fresh_token) {
+            let current = cfg.tunnel.borrow().clone();
+            if Some(t.clone()) != current.1 && t != token {
+                log::info!("tunnel token rotated on disk, refreshing watch and retrying once");
+                let _ = crate::ensure_tunnel_watch().send((Some(u.clone()), Some(t.clone())));
+                let urls2: Vec<&str> = u.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                for u2 in &urls2 {
+                    match try_establish_url(u2, &t, parsed).await {
+                        Ok(pair) => return Ok((pair, (*u2).to_string())),
+                        Err(e) => {
+                            log::warn!("tunnel re-establish on {u2} for {} failed: {e}", parsed.host);
+                            last_err = Some(e);
+                        }
+                    }
+                }
             }
         }
     }

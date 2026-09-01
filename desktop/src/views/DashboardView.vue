@@ -2,7 +2,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   Check,
-  ExternalLink,
   Power,
   RefreshCw,
   Server,
@@ -11,19 +10,19 @@ import {
   Zap,
 } from '@lucide/vue'
 import LatencyBars from '@/components/common/LatencyBars.vue'
+import InfoTip from '@/components/common/InfoTip.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useToast } from '@/composables/useToast'
-import { isTauri } from '@/lib/config'
+import { importConnectCode, isTauri, parseGateInput, saveTunnelToken } from '@/lib/config'
 import {
   appendLatencyPoint,
   loadLatencySeries,
   saveLatencySeries,
   type LatencyPoint,
 } from '@/lib/latencyHistory'
-import { openExternalUrl } from '@/lib/urls'
 import {
   appendSpeedSample,
   calculateSmoothedSpeed,
@@ -54,6 +53,10 @@ const configInfo = ref<{
 // 新手向导状态
 const setupTab = ref<'direct' | 'chained'>('direct')
 const cfToken = ref('')
+const GATE_INPUT_TIP =
+  '加速授权码（隧道令牌）用于开通 Cloudflare / Vercel 双出网通道。' +
+  '请向服务提供方（部署管理员）索取：可直接粘贴 pony-gate:// 连接口令（端点+令牌一步到位），' +
+  '或仅粘贴裸授权码（端点沿用默认双通道）。与 Cloudflare 官网 API Token 无关。'
 const syncUriInput = ref('')
 const remoteHost = ref('')
 const remoteUser = ref('')
@@ -559,20 +562,33 @@ async function setProxyMode(mode: 'whitelist' | 'global') {
 
 // ---- 向导提交 ----
 async function submitDirectSetup() {
-  if (!cfToken.value.trim()) {
-    toast.error('请输入加速授权码')
+  const raw = cfToken.value.trim()
+  if (!raw) {
+    toast.error('请粘贴连接口令或加速授权码')
     return
   }
   isSubmitting.value = true
   try {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core')
+      const parsed = parseGateInput(raw)
+      if (raw.startsWith('pony-gate://')) {
+        if (parsed?.kind !== 'code') throw new Error('连接口令已损坏，请向提供方重新索取')
+        const res = await importConnectCode(raw)
+        if (parsed.official === false) {
+          // 非官方端点：只保留警示，不叠加成功 toast
+          toast.info('已导入，但端点不是官方域名，请确认来源可信', res.url)
+          isConfigured.value = true
+          await refreshStatus()
+          return
+        }
+      } else {
+        // 裸授权码：仅保存令牌（无端点配置时后端自动补默认双 gate）
+        await saveTunnelToken(raw)
+      }
       await invoke('proxy_mode_switch', {
         modeType: 'direct',
-        config: {
-          worker_url: 'https://edge.ponyjob.top',
-          proxy_secret: cfToken.value.trim(),
-        },
+        config: { worker_url: 'https://edge.ponyjob.top' },
       })
     }
     toast.success('配置成功！已准备就绪。')
@@ -580,7 +596,7 @@ async function submitDirectSetup() {
     await refreshStatus()
     await toggleProxy()
   } catch (e: any) {
-    toast.error('配置失败：' + (typeof e === 'string' ? e : e?.message))
+    toast.error('配置失败：' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
   } finally {
     isSubmitting.value = false
   }
@@ -731,19 +747,15 @@ async function submitImportOrChained() {
           <CardContent class="space-y-3">
             <div class="space-y-1.5">
               <div class="flex items-center justify-between">
-                <Label class="text-xs font-medium">加速授权码</Label>
-                <button
-                  type="button"
-                  @click="openExternalUrl('https://dash.cloudflare.com/profile/api-tokens')"
-                  class="text-xs text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
-                >
-                  获取授权码 <ExternalLink class="h-3 w-3" />
-                </button>
+                <Label class="text-xs font-medium flex items-center gap-1">
+                  连接口令 / 加速授权码（隧道令牌）
+                  <InfoTip :text="GATE_INPUT_TIP" />
+                </Label>
               </div>
               <Input
                 v-model="cfToken"
                 type="password"
-                placeholder="粘贴授权码"
+                placeholder="粘贴 pony-gate:// 连接口令，或仅粘贴授权码"
                 class="font-mono text-sm"
               />
             </div>

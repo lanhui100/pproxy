@@ -184,6 +184,7 @@ pub fn run() {
       proxy_whitelist_get, proxy_whitelist_set, proxy_mode_get, proxy_mode_set,
       proxy_enable, proxy_disable, proxy_pac, proxy_status, proxy_test_sites,
       proxy_tunnel_get, proxy_tunnel_set_url, tunnel_token_save, tunnel_token_clear,
+      tunnel_connect_code_import, tunnel_self_check,
       proxy_auto_config_get, proxy_auto_config_set, app_config_get, app_config_set,
       proxy_bypass_hosts,
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
@@ -432,6 +433,8 @@ const TUNNEL_FILE: &str = "tunnel.json";
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
 /// 注意：与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
 const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+/// 默认双 gate 端点（CF 主 + Vercel iad1 美区兜底）：裸 token 保存且无端点配置时自动补齐。
+const DEFAULT_TUNNEL_URLS: &str = "wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws";
 
 /// 旧配置迁移：早期版本把 HTTP 网关域名（edge.ponyjob.top）误当作 WS gate 端点，
 /// 且曾缺 /ws 路径。读到这类值一律映射到正确的 gate 端点（防止拨测超时/隧道连接失败）。
@@ -455,8 +458,13 @@ fn validate_tunnel_url(url: &str) -> Result<(), String> {
 #[tauri::command]
 fn proxy_tunnel_get() -> serde_json::Value {
   let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(migrate_tunnel_url)).unwrap_or_default();
-  let has_token = matches!(cred_get_impl(CREDENTIAL_USER_TUNNEL), Ok(Some(t)) if !t.is_empty());
-  serde_json::json!({ "url": url, "has_token": has_token })
+  let (has_token, cred_error) = match cred_get_impl(CREDENTIAL_USER_TUNNEL) {
+    Ok(Some(t)) if !t.is_empty() => (true, serde_json::Value::Null),
+    Ok(_) => (false, serde_json::Value::Null),
+    // 凭据损坏（如外部工具以非 keyring 编码写入）须显式上报，不再静默吞为「未配置」
+    Err(e) => (false, serde_json::json!(format!("凭据损坏或编码不兼容（{e}）：请重新粘贴加速授权码"))),
+  };
+  serde_json::json!({ "url": url, "has_token": has_token, "cred_error": cred_error, "fingerprint": tunnel_token_fingerprint() })
 }
 #[tauri::command]
 fn proxy_tunnel_set_url(url: String) -> Result<(), String> {
@@ -474,9 +482,104 @@ fn proxy_tunnel_set_url(url: String) -> Result<(), String> {
 #[tauri::command]
 fn tunnel_token_save(secret: String) -> Result<(), String> {
   if secret.trim().is_empty() { return Err("empty tunnel token".into()); }
-  cred_set_impl(CREDENTIAL_USER_TUNNEL, secret)?;
-  let _ = ensure_tunnel_watch().send(tunnel_config_load());
+  let secret = secret.trim().to_string();
+  cred_set_impl(CREDENTIAL_USER_TUNNEL, secret.clone())?;
+  // 直发用户输入的 secret（不回读凭据），与 configure_direct_tunnel 同口径：
+  // 凭据回读失败（如外部工具以非 keyring 编码写入）不影响本次保存即时生效。
+  let (url, _) = tunnel_config_load();
+  let url = match url {
+    Some(u) => u,
+    // 无合法端点配置时补齐默认双 gate（裸 token 粘贴即完成全部配置）
+    None => { proxy_tunnel_set_url(DEFAULT_TUNNEL_URLS.to_string())?; DEFAULT_TUNNEL_URLS.to_string() }
+  };
+  let _ = ensure_tunnel_watch().send((Some(url), Some(secret)));
   Ok(())
+}
+
+/// 本机隧道令牌指纹：SHA-256 前 8 位 hex（用于与运维侧/gate 部署核对，不含可爆破材料）。
+fn tunnel_token_fingerprint() -> Option<String> {
+  use sha2::{Digest, Sha256};
+  let t = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().filter(|s| !s.is_empty())?;
+  let h = Sha256::digest(t.as_bytes());
+  Some(hex::encode(&h[..4]))
+}
+
+/// 解析 pony-gate:// 连接口令：base64url(JSON {"u": url, "t": token})。
+/// 长期有效、无加密（机密性与 token 等同）；与一次性迁移用的 pproxy-sync:// 定位不同。
+fn parse_connect_code(code: &str) -> Result<(String, String), String> {
+  use base64::Engine as _;
+  let encoded = code
+    .trim()
+    .strip_prefix("pony-gate://")
+    .ok_or_else(|| "连接口令须以 pony-gate:// 开头".to_string())?;
+  let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+    .decode(encoded)
+    .or_else(|_| base64::engine::general_purpose::STANDARD.decode(encoded))
+    .map_err(|_| "连接口令格式错误（Base64 解码失败）".to_string())?;
+  let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "连接口令内容不是合法 JSON".to_string())?;
+  // 版本字段：缺省视为 v1；未来字段不兼容时拒绝
+  if let Some(vn) = v.get("v").and_then(|x| x.as_u64()) {
+    if vn != 1 { return Err(format!("连接口令版本不支持（v{vn}），请更新软件后重试").into()); }
+  }
+  let url = v.get("u").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty())
+    .ok_or_else(|| "连接口令缺少端点字段 u".to_string())?;
+  let token = v.get("t").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty())
+    .ok_or_else(|| "连接口令缺少令牌字段 t".to_string())?;
+  validate_tunnel_url(url)?;
+  // 连接口令强制 wss://（明文 ws:// 会让 Bearer token 裸奔，属于投毒入口）
+  if url.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).any(|u| !u.starts_with("wss://")) {
+    return Err("连接口令的端点必须使用 wss:// 加密端点".into());
+  }
+  Ok((url.to_string(), token.to_string()))
+}
+
+/// 一键导入 pony-gate:// 连接口令：写端点 + 写凭据 + 直发 watch，即时生效（无需重启）。
+#[tauri::command]
+fn tunnel_connect_code_import(code: String) -> Result<serde_json::Value, String> {
+  let (url, token) = parse_connect_code(&code)?;
+  proxy_tunnel_set_url(url.clone())?;
+  cred_set_impl(CREDENTIAL_USER_TUNNEL, token.clone())?;
+  let _ = ensure_tunnel_watch().send((Some(url.clone()), Some(token)));
+  Ok(serde_json::json!({
+    "success": true,
+    "url": url,
+    "fingerprint": tunnel_token_fingerprint(),
+    "message": "连接口令已导入，端点与令牌即时生效",
+  }))
+}
+
+/// 隧道健康自检：本机凭据可读性 + token 指纹 + 逐 gate 实测（WS 升级成功即证明该端哈希与本机 token 一致）。
+#[tauri::command]
+async fn tunnel_self_check() -> Result<serde_json::Value, String> {
+  let cred = cred_get_impl(CREDENTIAL_USER_TUNNEL);
+  let (cred_ok, cred_error, token) = match &cred {
+    Ok(Some(t)) if !t.is_empty() => (true, serde_json::Value::Null, Some(t.clone())),
+    Ok(_) => (false, serde_json::json!("凭据为空：请粘贴加速授权码"), None),
+    Err(e) => (false, serde_json::json!(format!("凭据损坏或编码不兼容（{e}）：请重新粘贴加速授权码")), None),
+  };
+  let url_raw = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok()
+    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(migrate_tunnel_url))
+    .unwrap_or_else(|| GATE_WS_URL.to_string());
+  let urls: Vec<String> = url_raw.split([',', ';', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+  let mut gates = Vec::new();
+  for u in urls {
+    let name = if u.contains("vercel") || u.contains("vgate") { "vercel" } else { "cf" };
+    let item = match &token {
+      Some(t) => match proxy::engine_tunnel::probe_gate_rtt(&u, t).await {
+        Ok(ms) => serde_json::json!({ "name": name, "url": u, "ok": true, "ms": ms }),
+        Err(e) => serde_json::json!({ "name": name, "url": u, "ok": false, "error": e }),
+      },
+      None => serde_json::json!({ "name": name, "url": u, "ok": false, "error": "no token" }),
+    };
+    gates.push(item);
+  }
+  Ok(serde_json::json!({
+    "fingerprint": tunnel_token_fingerprint(),
+    "cred_ok": cred_ok,
+    "cred_error": cred_error,
+    "gates": gates,
+  }))
 }
 #[tauri::command]
 fn tunnel_token_clear() -> Result<(), String> {
@@ -536,6 +639,10 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     if upstream.is_none() {
         let (tunnel_url, tunnel_token) = tunnel_config_load();
         if !wl.is_empty() && (tunnel_url.is_none() || tunnel_token.is_none()) {
+            // 细分根因：凭据读取失败（编码污染）与「未配置」是两类事故，文案必须区分
+            if let Err(e) = cred_get_impl(CREDENTIAL_USER_TUNNEL) {
+                return Err(format!("隧道凭据读取失败（{e}）：可能是凭据被外部工具以不兼容编码写入。请在「设置 → 方案 A」重新粘贴加速授权码即可修复，无需重启").into());
+            }
             return Err("隧道未配置：白名单流量无法出网。请先在「设置 → 方案 A」填写授权码，或在首页粘贴同步口令，再开启总开关".into());
         }
         let _ = ensure_tunnel_watch().send((tunnel_url, tunnel_token));
@@ -970,7 +1077,18 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
         _ => return Err("未知接口：仅支持 cf / vercel".into()),
     };
 
-    let token = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten();
+    let token = match cred_get_impl(CREDENTIAL_USER_TUNNEL) {
+        Ok(t) => t,
+        // 凭据损坏必须显式失败，不得回落 TCP 探测造成「接口假绿」
+        Err(e) => {
+            return Ok(serde_json::json!({
+                "iface": iface,
+                "ok": false,
+                "ms": 0,
+                "error": format!("凭据损坏或编码不兼容（{e}）：请在「设置 → 方案 A」重新粘贴加速授权码"),
+            }));
+        }
+    };
     if let Some(ref tok) = token {
         match proxy::engine_tunnel::probe_gate_rtt(gate, tok).await {
             Ok(ms) => {
@@ -1247,10 +1365,14 @@ fn proxy_mode_switch(mode_type: String, config: serde_json::Value) -> Result<(),
 
 static USED_SYNC_NONCES: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
 
-/// 跨端口令一键导入（支持 pproxy-sync:// 与 pproxy:// 协议）
+/// 跨端口令一键导入（支持 pproxy-sync:// 与 pproxy:// 协议；pony-gate:// 转发连接口令导入）
 #[tauri::command]
 fn proxy_import_sync(sync_uri: String, passphrase: Option<String>) -> Result<serde_json::Value, String> {
     let raw = sync_uri.trim();
+    // pony-gate:// 连接口令统一路由（防止用户粘错入口得到「未知口令」类报错）
+    if raw.starts_with("pony-gate://") {
+        return tunnel_connect_code_import(raw.to_string());
+    }
     if raw.starts_with("pproxy-sync://") {
         use base64::Engine as _;
         let encoded = raw.strip_prefix("pproxy-sync://").unwrap_or(raw);
@@ -1431,5 +1553,45 @@ mod tests {
         // 正确端点与自定义端点保持原样
         assert_eq!(migrate_tunnel_url("wss://gate.ponyjob.top/ws"), "wss://gate.ponyjob.top/ws");
         assert_eq!(migrate_tunnel_url("wss://self-host.example.com/tunnel"), "wss://self-host.example.com/tunnel");
+    }
+
+    // ---- pony-gate:// 连接口令解析 ----
+    fn make_code(url: &str, token: &str) -> String {
+        use base64::Engine as _;
+        let j = serde_json::json!({ "u": url, "t": token }).to_string();
+        format!("pony-gate://{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(j))
+    }
+    #[test]
+    fn connect_code_parses_valid_payload() {
+        let (u, t) = parse_connect_code(&make_code("wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws", "tok-123")).unwrap();
+        assert_eq!(u, "wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws");
+        assert_eq!(t, "tok-123");
+    }
+    #[test]
+    fn connect_code_accepts_standard_base64_and_whitespace() {
+        use base64::Engine as _;
+        let j = serde_json::json!({ "u": "wss://gate.ponyjob.top/ws", "t": "abc" }).to_string();
+        let code = format!("  pony-gate://{}  ", base64::engine::general_purpose::STANDARD.encode(j));
+        let (u, t) = parse_connect_code(&code).unwrap();
+        assert_eq!(u, "wss://gate.ponyjob.top/ws");
+        assert_eq!(t, "abc");
+    }
+    #[test]
+    fn connect_code_rejects_bad_inputs() {
+        assert!(parse_connect_code("pony-gate://!!!not-base64!!!").is_err());
+        assert!(parse_connect_code("pproxy-sync://xxxx").unwrap_err().contains("pony-gate://"));
+        // 缺字段
+        use base64::Engine as _;
+        for payload in [
+            serde_json::json!({ "t": "abc" }).to_string(),
+            serde_json::json!({ "u": "wss://x/ws" }).to_string(),
+            serde_json::json!({ "u": "", "t": "" }).to_string(),
+        ] {
+            let code = format!("pony-gate://{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&payload));
+            assert!(parse_connect_code(&code).is_err(), "应拒绝: {payload}");
+        }
+        // 非法端点
+        let bad = format!("pony-gate://{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::json!({ "u": "https://evil.com", "t": "abc" }).to_string()));
+        assert!(parse_connect_code(&bad).is_err());
     }
 }

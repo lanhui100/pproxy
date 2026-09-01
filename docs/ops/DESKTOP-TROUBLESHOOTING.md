@@ -773,3 +773,34 @@ Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution
    - `node smoke-test.mjs wss://vgate.ponyjob.top/api/ws openai.com 443` -> `OK: TLS established (TLS_AES_256_GCM_SHA384)`
    - 单元测试：Rust 44/44 通过、Vitest 69/69 通过。
 
+
+---
+
+## 凭据编码污染事故：「隧道未配置」误报 + 全站 401 · 2026-09-01
+
+**现象**：
+重启桌面端后开启代理报「隧道未配置」（配置明明都在）；经同步口令导入后代理可开但所有网站
+502（`tunnel failed: HTTP error: 401`）；仪表盘却显示接口正常。
+
+**根因**：
+当日 token 轮换时，新 token 由脚本以 **UTF-8 字节**写入 Windows 凭据管理器；而桌面端
+keyring 3.6.3 一律按 **UTF-16** 解码凭据 blob（其 `set_password` 亦按 UTF-16 写入）。
+53 字节 UTF-8 blob 无法按 UTF-16 解码，`get_password()` 返回 `Err("Data is not UTF-8 encoded")`，
+被 `.ok().flatten()` 静默吞成「未配置」。同步口令导入则把旧 token 直送内存 watch（不读凭据），
+导致引擎持旧 token 拨 gate → 401。接口拨测每次现读凭据，故能升级 WS，造成「接口绿、站点红」。
+
+**定位手法**：
+最小 keyring 探针（keyring 3.6.3 + `Entry::new("pony-desktop","tunnel_token").get_password()`）
+复现解码错误；Python `win32cred.CredRead` 对照证实 blob 为 UTF-8。
+
+**修复**：
+用 `win32cred.CredWrite`（str blob，UTF-16LE）重写凭据，keyring 探针读回 OK，
+`CONNECT google.com:443` 经本地引擎恢复 200。
+
+**固化防御（spec token-ux-simplification）**：
+1. `tunnel_token_save` 保存后直发用户输入 secret 到 watch，不依赖凭据回读；
+2. 开启代理时凭据读取 Err 单独报错「凭据损坏」，不再混淆为「隧道未配置」；
+3. 引擎 401 自愈：重读凭据 token 变化则刷新 watch 重试（冷却 single-flight + spawn_blocking）；
+4. `proxy_tunnel_get` 暴露 `cred_error` 与 token 指纹，`tunnel_self_check` 一键逐 gate 自检；
+5. **运维纪律**：写入 `tunnel_token.pony-desktop` 凭据必须通过桌面端（设置页/同步口令/连接口令）
+   或 keyring 兼容工具（UTF-16 blob），严禁以 UTF-8 字节直接 CredWrite。

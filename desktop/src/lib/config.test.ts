@@ -64,3 +64,94 @@ describe('dev 便利通道（浏览器 localStorage）隧道配置往返', () =>
     await expect(mod.saveTunnelConfig('https://gate.example/ws', 't')).rejects.toThrow()
   })
 })
+
+// ---- pony-gate:// 连接口令解析（与 deploy/gen-connect-code.mjs 输出对齐）----
+function makeCode(url: string, token: string): string {
+  const json = JSON.stringify({ v: 1, u: url, t: token })
+  return `pony-gate://${Buffer.from(json, 'utf8').toString('base64url')}`
+}
+
+describe('parseGateInput', () => {
+  it('识别裸授权码', async () => {
+    const mod = await loadConfig()
+    expect(mod.parseGateInput('some-raw-token-123')).toEqual({ kind: 'token' })
+  })
+
+  it('解析合法连接口令并判定官方域名', async () => {
+    const mod = await loadConfig()
+    const r = mod.parseGateInput(makeCode('wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws', 'tok'))
+    expect(r?.kind).toBe('code')
+    expect(r?.url).toBe('wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws')
+    expect(r?.official).toBe(true)
+  })
+
+  it('非官方域名端点标记为非官方（前端警示）', async () => {
+    const mod = await loadConfig()
+    const r = mod.parseGateInput(makeCode('wss://evil.example.com/ws', 'tok'))
+    expect(r?.kind).toBe('code')
+    expect(r?.official).toBe(false)
+  })
+
+  it('仿冒域名（含 ponyjob.top 子串）不得误判为官方', async () => {
+    const mod = await loadConfig()
+    for (const u of ['wss://evil-ponyjob.top.attacker.com/ws', 'wss://ponyjob.top.evil.com/ws']) {
+      const r = mod.parseGateInput(makeCode(u, 'tok'))
+      expect(r?.kind).toBe('code')
+      expect(r?.official).toBe(false)
+    }
+  })
+
+  it('损坏/缺字段的连接口令返回 null', async () => {
+    const mod = await loadConfig()
+    expect(mod.parseGateInput('pony-gate://!!!bad')).toBeNull()
+    expect(mod.parseGateInput(`pony-gate://${Buffer.from('{"u":"wss://x/ws"}').toString('base64url')}`)).toBeNull()
+  })
+
+  it('空输入返回 null', async () => {
+    const mod = await loadConfig()
+    expect(mod.parseGateInput('')).toBeNull()
+    expect(mod.parseGateInput('   ')).toBeNull()
+  })
+})
+
+// ---- mapTunnelConfig：Rust snake_case → 前端 camelCase（review B P1-1 回归）----
+describe('mapTunnelConfig', () => {
+  it('映射正常凭据与指纹', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelConfig({
+      url: 'wss://gate.ponyjob.top/ws',
+      has_token: true,
+      cred_error: null,
+      fingerprint: 'deadbeef',
+    })
+    expect(c).toEqual({
+      url: 'wss://gate.ponyjob.top/ws',
+      hasToken: true,
+      credError: null,
+      fingerprint: 'deadbeef',
+    })
+  })
+
+  it('凭据损坏时透传 cred_error（曾因字段名漂移静默失效）', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelConfig({
+      url: '',
+      has_token: false,
+      cred_error: '凭据损坏或编码不兼容',
+      fingerprint: null,
+    })
+    expect(c.hasToken).toBe(false)
+    expect(c.credError).toContain('凭据损坏')
+    expect(c.fingerprint).toBeNull()
+  })
+
+  it('缺失字段按空值兜底（不抛错）', async () => {
+    const mod = await loadConfig()
+    expect(mod.mapTunnelConfig({})).toEqual({
+      url: '',
+      hasToken: false,
+      credError: null,
+      fingerprint: null,
+    })
+  })
+})

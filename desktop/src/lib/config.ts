@@ -12,6 +12,8 @@ export function isTauri(): boolean {
 export interface TunnelConfig {
   url: string
   hasToken: boolean
+  credError?: string | null
+  fingerprint?: string | null
 }
 
 /** 读取隧道配置（Rust 侧文件 + 凭据库探测，不回传令牌明文）。 */
@@ -21,7 +23,17 @@ export async function loadTunnelConfig(): Promise<TunnelConfig> {
     const hasToken = Boolean(localStorage.getItem('pony-dev-tunnel-token'))
     return { url, hasToken }
   }
-  return invoke<TunnelConfig>('proxy_tunnel_get')
+  return mapTunnelConfig(await invoke<Record<string, unknown>>('proxy_tunnel_get'))
+}
+
+/** 纯函数：把 Rust `proxy_tunnel_get` 的 snake_case 响应映射为前端 camelCase（防字段漂移，可单测）。 */
+export function mapTunnelConfig(raw: Record<string, unknown>): TunnelConfig {
+  return {
+    url: typeof raw.url === 'string' ? raw.url : '',
+    hasToken: raw.has_token === true,
+    credError: raw.cred_error != null ? String(raw.cred_error) : null,
+    fingerprint: raw.fingerprint != null ? String(raw.fingerprint) : null,
+  }
 }
 
 /** 校验：仅接受 wss:// 或 ws:// 且无空白。 */
@@ -47,6 +59,17 @@ export async function saveTunnelConfig(url: string, token: string): Promise<void
   }
 }
 
+/** 仅保存裸授权码（端点沿用已配置；无端点时后端自动补默认双 gate）。 */
+export async function saveTunnelToken(secret: string): Promise<void> {
+  const v = secret.trim()
+  if (!v) throw new Error('授权码不能为空')
+  if (isTauri()) {
+    await invoke('tunnel_token_save', { secret: v })
+  } else {
+    localStorage.setItem('pony-dev-tunnel-token', v)
+  }
+}
+
 /** 清除已保存的隧道令牌。 */
 export async function clearTunnelToken(): Promise<boolean> {
   if (isTauri()) {
@@ -59,6 +82,91 @@ export async function clearTunnelToken(): Promise<boolean> {
   }
   localStorage.removeItem('pony-dev-tunnel-token')
   return true
+}
+
+// ---- 连接口令（pony-gate://）：一个字符串同时携带端点与令牌，粘贴即完成方案 A 配置 ----
+
+export interface GateInput {
+  kind: 'code' | 'token'
+  /** kind=code 时解析出的端点（用于预览/官方域名警示） */
+  url?: string
+  /** 端点是否为官方域名（ponyjob.top），非官方时前端应提示确认 */
+  official?: boolean
+}
+
+function isOfficialGateUrl(url: string): boolean {
+  return url
+    .split(/[,;\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .every((u) => {
+      try {
+        const h = new URL(u).hostname
+        return h === 'ponyjob.top' || h.endsWith('.ponyjob.top')
+      } catch {
+        return false
+      }
+    })
+}
+
+/** 判定输入是 pony-gate:// 连接口令还是裸授权码；口令附带端点预览与官方域名判定。 */
+export function parseGateInput(raw: string): GateInput | null {
+  const v = raw.trim()
+  if (!v) return null
+  if (!v.startsWith('pony-gate://')) return { kind: 'token' }
+  try {
+    const b64 = v.slice('pony-gate://'.length).replace(/-/g, '+').replace(/_/g, '/')
+    const bin = atob(b64)
+    const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0))
+    const json = JSON.parse(new TextDecoder().decode(bytes))
+    if (typeof json?.u !== 'string' || typeof json?.t !== 'string') return null
+    return { kind: 'code', url: json.u, official: isOfficialGateUrl(json.u) }
+  } catch {
+    return null
+  }
+}
+
+/** 导入 pony-gate:// 连接口令（端点 + 令牌一步到位，即时生效）。 */
+export async function importConnectCode(code: string): Promise<{ url: string; fingerprint?: string; message?: string }> {
+  if (!isTauri()) {
+    const parsed = parseGateInput(code)
+    if (parsed?.kind !== 'code' || !parsed.url) throw new Error('连接口令格式不正确')
+    localStorage.setItem('pony-tunnel-url', parsed.url)
+    localStorage.setItem('pony-dev-tunnel-token', 'dev-placeholder')
+    return { url: parsed.url }
+  }
+  return invoke('tunnel_connect_code_import', { code: code.trim() })
+}
+
+export interface GateCheckResult {
+  name: string
+  url: string
+  ok: boolean
+  ms?: number
+  error?: string
+}
+
+export interface TunnelSelfCheck {
+  fingerprint: string | null
+  cred_ok: boolean
+  cred_error: string | null
+  gates: GateCheckResult[]
+}
+
+/** 隧道健康自检：凭据可读性 + token 指纹 + 逐 gate 实测。 */
+export async function tunnelSelfCheck(): Promise<TunnelSelfCheck> {
+  if (!isTauri()) {
+    return {
+      fingerprint: 'dev00dev',
+      cred_ok: true,
+      cred_error: null,
+      gates: [
+        { name: 'cf', url: 'wss://gate.ponyjob.top/ws', ok: true, ms: 120 },
+        { name: 'vercel', url: 'wss://vgate.ponyjob.top/api/ws', ok: true, ms: 210 },
+      ],
+    }
+  }
+  return invoke<TunnelSelfCheck>('tunnel_self_check')
 }
 
 // ---- auto_proxy 偏好配置：默认 true（启动即开启智能模式代理） ----

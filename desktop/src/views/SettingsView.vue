@@ -3,7 +3,6 @@ import { onMounted, ref } from 'vue'
 import {
   Check,
   Download,
-  ExternalLink,
   LifeBuoy,
   Plus,
   RefreshCw,
@@ -33,14 +32,20 @@ import {
 } from '@/composables/useUpdater'
 import {
   clearTunnelToken,
+  importConnectCode,
   isTauri,
   isValidTunnelUrl,
   loadAutoProxyConfig,
   loadTunnelConfig,
+  parseGateInput,
   saveAutoProxyConfig,
   saveTunnelConfig,
+  saveTunnelToken,
+  tunnelSelfCheck,
+  type TunnelSelfCheck,
 } from '@/lib/config'
-import { cleanDomainInput, openExternalUrl } from '@/lib/urls'
+import InfoTip from '@/components/common/InfoTip.vue'
+import { cleanDomainInput } from '@/lib/urls'
 
 const toast = useToast()
 
@@ -110,8 +115,9 @@ async function removeWhitelistEntry(i: number): Promise<void> {
 
 // ---- 隧道中继（方案 A 出网通道：WS 端点 + 令牌）----
 const tunnelUrlInput = ref('')
-const tunnelTokenInput = ref('')
 const tunnelHasToken = ref(false)
+const tunnelCredError = ref<string | null>(null)
+const tunnelFingerprint = ref<string | null>(null)
 const tunnelSaving = ref(false)
 
 async function refreshTunnel(): Promise<void> {
@@ -119,7 +125,70 @@ async function refreshTunnel(): Promise<void> {
     const c = await loadTunnelConfig()
     tunnelUrlInput.value = c.url
     tunnelHasToken.value = c.hasToken
+    tunnelCredError.value = c.credError ?? null
+    tunnelFingerprint.value = c.fingerprint ?? null
   } catch { /* 首次启动无配置，保持空表单 */ }
+}
+
+// ---- 连接口令 / 加速授权码（方案 A 唯一入口）----
+const gateInput = ref('')
+const gateSaving = ref(false)
+const selfCheck = ref<TunnelSelfCheck | null>(null)
+const selfChecking = ref(false)
+
+const GATE_INPUT_TIP =
+  '加速授权码（隧道令牌）用于开通 Cloudflare / Vercel 双出网通道。' +
+  '请向服务提供方（部署管理员）索取：可直接粘贴 pony-gate:// 连接口令（端点+令牌一步到位），' +
+  '或仅粘贴裸授权码（端点沿用默认双通道）。与 Cloudflare 官网 API Token 无关。'
+
+const REMOTE_PASS_TIP =
+  '远端代理密码用于连接你自己搭建的代理服务器（方案 B），与方案 A 的加速授权码是两套独立凭据。' +
+  '在你的 Linux 服务器上执行 pproxy user add 创建账号，或用 pproxy sync export 导出连接口令。'
+
+async function submitGateInput(): Promise<void> {
+  if (gateSaving.value) return
+  const raw = gateInput.value.trim()
+  if (!raw) {
+    toast.error('请粘贴连接口令或加速授权码')
+    return
+  }
+  const parsed = parseGateInput(raw)
+  if (raw.startsWith('pony-gate://') && parsed?.kind !== 'code') {
+    toast.error('连接口令格式不正确', '口令已损坏，请向提供方重新索取')
+    return
+  }
+  gateSaving.value = true
+  try {
+    if (parsed?.kind === 'code') {
+      const res = await importConnectCode(raw)
+      if (parsed.official === false) {
+        toast.info('已导入，但端点不是官方域名，请确认来源可信', res.url)
+      } else {
+        toast.success('连接口令已导入', '端点与令牌即时生效')
+      }
+    } else {
+      await saveTunnelToken(raw)
+      toast.success('加速授权码已保存', '即时生效，无需重启')
+    }
+    gateInput.value = ''
+    await refreshTunnel()
+  } catch (e: any) {
+    toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
+  } finally {
+    gateSaving.value = false
+  }
+}
+
+async function runSelfCheck(): Promise<void> {
+  if (selfChecking.value) return
+  selfChecking.value = true
+  try {
+    selfCheck.value = await tunnelSelfCheck()
+  } catch (e: any) {
+    toast.error('自检失败: ' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
+  } finally {
+    selfChecking.value = false
+  }
 }
 
 async function saveTunnel(): Promise<void> {
@@ -130,9 +199,7 @@ async function saveTunnel(): Promise<void> {
   }
   tunnelSaving.value = true
   try {
-    await saveTunnelConfig(tunnelUrlInput.value.trim(), tunnelTokenInput.value)
-    tunnelTokenInput.value = ''
-    tunnelHasToken.value = true
+    await saveTunnelConfig(tunnelUrlInput.value.trim(), '')
     await refreshTunnel()
     toast.success('隧道配置已保存，重新开启代理后生效')
   } catch (e: any) {
@@ -145,8 +212,9 @@ async function saveTunnel(): Promise<void> {
 async function clearTunnelTokenAction(): Promise<void> {
   const cleared = await clearTunnelToken()
   if (cleared) {
-    tunnelTokenInput.value = ''
+    gateInput.value = ''
     tunnelHasToken.value = false
+    tunnelFingerprint.value = null
     toast.success('已清除隧道令牌')
     return
   }
@@ -154,7 +222,6 @@ async function clearTunnelTokenAction(): Promise<void> {
 }
 
 const currentMode = ref<'direct' | 'chained'>('direct')
-const cfToken = ref('')
 const remoteHost = ref('')
 const remoteUser = ref('')
 const remotePass = ref('')
@@ -215,17 +282,7 @@ async function saveModeConfig() {
   try {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core')
-      if (currentMode.value === 'direct') {
-        if (cfToken.value.trim()) {
-          await invoke('proxy_mode_switch', {
-            modeType: 'direct',
-            config: {
-              worker_url: 'https://edge.ponyjob.top',
-              proxy_secret: cfToken.value.trim(),
-            },
-          })
-        }
-      } else {
+      if (currentMode.value === 'chained') {
         await invoke('proxy_mode_switch', {
           modeType: 'chained',
           config: {
@@ -235,6 +292,7 @@ async function saveModeConfig() {
           },
         })
       }
+      // direct 模式：授权码统一走上方「连接口令 / 加速授权码」入口，无需在此保存
     }
     toast.success('配置已保存生效！')
   } catch (e: any) {
@@ -378,25 +436,68 @@ async function triggerRescue() {
 
         <!-- 方案 A：独立加速详细配置 -->
         <div v-if="currentMode === 'direct'" class="space-y-3.5 pt-1">
-          <!-- 授权码配置 -->
+          <!-- 连接口令 / 加速授权码（方案 A 唯一凭据入口） -->
           <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-3">
             <div class="space-y-1.5">
               <div class="flex items-center justify-between">
-                <Label class="text-xs font-medium">更新加速授权码 (Cloudflare Token)</Label>
-                <button
-                  type="button"
-                  @click="openExternalUrl('https://dash.cloudflare.com/profile/api-tokens')"
-                  class="text-xs text-primary hover:underline flex items-center gap-1 cursor-pointer bg-transparent border-0 p-0"
-                >
-                  获取授权码 <ExternalLink class="h-3 w-3" />
-                </button>
+                <Label class="text-xs font-medium flex items-center gap-1">
+                  连接口令 / 加速授权码（隧道令牌）
+                  <InfoTip :text="GATE_INPUT_TIP" />
+                </Label>
+                <span v-if="tunnelHasToken" class="text-[11px] text-emerald-600 font-medium">本机已保存</span>
+                <span v-else class="text-[11px] text-muted-foreground">未配置</span>
               </div>
-              <Input
-                v-model="cfToken"
-                type="password"
-                placeholder="如需更新授权码请在此输入"
-                class="font-mono text-xs"
-              />
+              <div class="flex gap-2">
+                <Input
+                  v-model="gateInput"
+                  type="password"
+                  placeholder="粘贴 pony-gate:// 连接口令，或仅粘贴授权码"
+                  class="font-mono text-xs"
+                  @keyup.enter="submitGateInput"
+                />
+                <Button
+                  size="sm"
+                  class="text-xs h-9 shrink-0 cursor-pointer"
+                  :disabled="gateSaving || !gateInput.trim()"
+                  @click="submitGateInput"
+                >
+                  <RefreshCw v-if="gateSaving" class="h-3 w-3 mr-1 animate-spin" />
+                  {{ gateSaving ? '导入中…' : '保存' }}
+                </Button>
+              </div>
+              <!-- 凭据健康与指纹 -->
+              <div class="flex items-center justify-between text-[11px]">
+                <span v-if="tunnelCredError" class="text-rose-600 dark:text-rose-400">{{ tunnelCredError }}</span>
+                <span v-else-if="tunnelFingerprint" class="text-muted-foreground font-mono">
+                  指纹 sha256:{{ tunnelFingerprint }}…
+                </span>
+                <span v-else class="text-muted-foreground">保存后此处显示令牌指纹</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="text-[11px] h-7 px-2 cursor-pointer"
+                  :disabled="selfChecking"
+                  @click="runSelfCheck"
+                >
+                  <RefreshCw v-if="selfChecking" class="h-3 w-3 mr-1 animate-spin" />
+                  {{ selfChecking ? '自检中…' : '通道自检' }}
+                </Button>
+              </div>
+              <!-- 自检结果 -->
+              <div v-if="selfCheck" class="rounded-lg border border-border/60 bg-background/60 px-2.5 py-2 space-y-1">
+                <div v-if="selfCheck.cred_error" class="text-[11px] text-rose-600 dark:text-rose-400">
+                  {{ selfCheck.cred_error }}
+                </div>
+                <div
+                  v-for="g in selfCheck.gates"
+                  :key="g.url"
+                  class="flex items-center justify-between text-[11px] font-mono"
+                >
+                  <span class="text-muted-foreground">{{ g.name === 'cf' ? 'Cloudflare 出口' : 'Vercel 美区出口' }}</span>
+                  <span v-if="g.ok" class="text-emerald-600">{{ typeof g.ms === 'number' ? `正常 · ${g.ms}ms` : '正常' }}</span>
+                  <span v-else class="text-rose-600 truncate max-w-56" :title="g.error">失败 · {{ g.error }}</span>
+                </div>
+              </div>
             </div>
             <p class="text-xs text-muted-foreground flex items-center gap-1.5">
               <ShieldCheck class="h-3.5 w-3.5 text-emerald-600 shrink-0" />
@@ -418,20 +519,9 @@ async function triggerRescue() {
                 未配置令牌
               </span>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div class="space-y-1">
-                <Label class="text-xs text-muted-foreground">隧道端点 (wss://)</Label>
-                <Input v-model="tunnelUrlInput" placeholder="wss://gate.ponyjob.top/ws" class="font-mono text-xs" />
-              </div>
-              <div class="space-y-1">
-                <Label class="text-xs text-muted-foreground">隧道令牌 (留空沿用已保存)</Label>
-                <Input
-                  v-model="tunnelTokenInput"
-                  type="password"
-                  placeholder="粘贴隧道令牌"
-                  class="font-mono text-xs"
-                />
-              </div>
+            <div class="space-y-1">
+              <Label class="text-xs text-muted-foreground">隧道端点 (wss://，高级：一般无需修改)</Label>
+              <Input v-model="tunnelUrlInput" placeholder="wss://gate.ponyjob.top/ws" class="font-mono text-xs" />
             </div>
             <div class="flex justify-end gap-2 pt-1">
               <Button
@@ -499,8 +589,11 @@ async function triggerRescue() {
                 <Input v-model="remoteUser" placeholder="用户名" class="text-xs" />
               </div>
               <div class="sm:col-span-2 space-y-1">
-                <Label class="text-xs text-muted-foreground">密码</Label>
-                <Input v-model="remotePass" type="password" placeholder="密码" class="text-xs" />
+                <Label class="text-xs text-muted-foreground flex items-center gap-1">
+                  远端代理密码
+                  <InfoTip :text="REMOTE_PASS_TIP" />
+                </Label>
+                <Input v-model="remotePass" type="password" placeholder="你自己服务器的代理密码，与加速授权码无关" class="text-xs" />
               </div>
             </div>
           </div>
