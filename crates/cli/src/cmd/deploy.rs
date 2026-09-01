@@ -542,6 +542,7 @@ mod tests {
             cf_account_tag: None,
             vercel_token: None,
             tunnel_token: None,
+            tunnel_gate_url: None,
             proxy_secret: Some("my_secret".into()),
         };
         let result = resolve_proxy_secret(&cfg);
@@ -559,6 +560,7 @@ mod tests {
             cf_account_tag: None,
             vercel_token: None,
             tunnel_token: None,
+            tunnel_gate_url: None,
             proxy_secret: None,
         };
         // PROXY_SECRET 未配置，环境变量也不存在（测试环境），应返回错误

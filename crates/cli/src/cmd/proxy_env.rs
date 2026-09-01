@@ -417,6 +417,17 @@ pub fn probe_connectivity(data_plane: &str) -> (Vec<(&'static str, Result<u128, 
 
 /// 打印代理连通性状态卡片
 pub fn print_connectivity_card(data_plane: &str) {
+    let cfg = config::load().unwrap_or_default();
+    let (tunnel_url, tunnel_token) = config::get_tunnel_config(&cfg);
+
+    if tunnel_url.is_none() || tunnel_token.is_none() {
+        eprintln!("┌─ 出海隧道配置提示 ────────────────────────────────");
+        eprintln!("│ \x1b[1;33m⚠ 未检测到出海隧道配置（Gate URL / Tunnel Token）\x1b[0m");
+        eprintln!("│   正向 HTTPS 代理将无法出海访问 Google / GitHub 等站点");
+        eprintln!("│ \x1b[1;36m💡 配置命令: pproxy config set-tunnel --gate-url \"<urls>\" --token \"<token>\"\x1b[0m");
+        eprintln!("└───────────────────────────────────────────────────");
+    }
+
     eprintln!("┌─ 代理连通性状态 (Connectivity) ──────────────────────");
     let (probes, routes_count) = probe_connectivity(data_plane);
     if routes_count > 0 {

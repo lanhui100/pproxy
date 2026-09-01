@@ -239,6 +239,15 @@ enum ConfigCmd {
         #[arg(long)]
         token: Option<String>,
     },
+    /// 设置出海隧道 Gate URL 与 Token（持久化至 config.toml 与 .pproxy.env）
+    SetTunnel {
+        /// Gate 端点 URL（支持逗号分隔多个，如 wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws）
+        #[arg(long)]
+        gate_url: Option<String>,
+        /// 隧道认证 Token（如 gate_xxx）
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -431,6 +440,46 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Config {
             cmd: ConfigCmd::Export { service, route, token },
         } => cmd::export_cmd::run(&cfg, service, route.as_deref(), token.as_deref()),
+        Command::Config {
+            cmd: ConfigCmd::SetTunnel { gate_url, token },
+        } => {
+            use std::io::Write;
+            let gate_url = match gate_url {
+                Some(u) => u.clone(),
+                None => {
+                    print!("请输入 Gate 端点 URL (默认: wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws): ");
+                    let _ = std::io::stdout().flush();
+                    let mut input = String::new();
+                    let _ = std::io::stdin().read_line(&mut input);
+                    let input = input.trim();
+                    if input.is_empty() {
+                        "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws".to_string()
+                    } else {
+                        input.to_string()
+                    }
+                }
+            };
+            let token = match token {
+                Some(t) => t.clone(),
+                None => {
+                    print!("请输入 隧道认证 Token (gate_xxx): ");
+                    let _ = std::io::stdout().flush();
+                    let mut input = String::new();
+                    let _ = std::io::stdin().read_line(&mut input);
+                    input.trim().to_string()
+                }
+            };
+            if token.is_empty() {
+                return Err(RunError::Msg("错误: 隧道 Token 不能为空".to_string()));
+            }
+            config::save_tunnel_config(&gate_url, &token).map_err(RunError::Msg)?;
+            println!("\x1b[1;32m✓ 出海隧道配置已成功持久化至 ~/.pony/config.toml 与 ~/.pony/.pproxy.env\x1b[0m");
+            println!("  Gate 端点: {}", gate_url);
+            println!("  隧道令牌:  {}", config::redact(&token));
+            println!();
+            println!("\x1b[1;36m💡 请运行 pproxy on 开启代理，所有终端流量将通过出海隧道畅通访问！\x1b[0m");
+            return Ok(EXIT_OK);
+        }
         Command::Serve { .. }
         | Command::User { .. }
         | Command::Sync { .. }
@@ -464,6 +513,7 @@ fn init(server: &str, token: Option<&str>, force: bool) -> Result<i32, RunError>
         cf_account_tag: None,
         vercel_token: None,
         tunnel_token: None,
+        tunnel_gate_url: None,
         proxy_secret: None,
     };
     let written = config::save(&cfg)?;

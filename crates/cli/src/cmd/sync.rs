@@ -171,6 +171,7 @@ pub fn export(passphrase: Option<&str>) -> Result<i32, String> {
         cf_account_tag: None,
         vercel_token: None,
         tunnel_token: None,
+        tunnel_gate_url: None,
         proxy_secret: None,
     });
 
@@ -304,6 +305,7 @@ pub fn import(input: &str, passphrase: Option<&str>) -> Result<i32, String> {
         cf_account_tag: None,
         vercel_token: None,
         tunnel_token: None,
+        tunnel_gate_url: None,
         proxy_secret: None,
     });
 

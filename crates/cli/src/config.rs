@@ -57,9 +57,75 @@ pub struct PonyConfig {
     /// 隧道令牌（Gate Worker 认证）
     #[serde(default)]
     pub tunnel_token: Option<String>,
+    /// 隧道 Gate URL（可逗号分隔多个 wss:// 端点）
+    #[serde(default)]
+    pub tunnel_gate_url: Option<String>,
     /// 上游共享密钥（PROXY_SECRET，服务器与 Worker 之间）
     #[serde(default)]
     pub proxy_secret: Option<String>,
+}
+
+/// 保存出海隧道配置（持久化至 config.toml 与 .pproxy.env）。
+pub fn save_tunnel_config(gate_url: &str, token: &str) -> Result<(), String> {
+    let mut cfg = load().unwrap_or_default();
+    cfg.tunnel_gate_url = Some(gate_url.trim().to_string());
+    cfg.tunnel_token = Some(token.trim().to_string());
+    save(&cfg).map_err(|e| format!("保存 config.toml 失败: {e}"))?;
+
+    // 同步写入 ~/.pony/.pproxy.env
+    if let Ok(home) = home_dir() {
+        let env_file = home.join(".pony").join(".pproxy.env");
+        let env_content = format!(
+            "PPROXY_TUNNEL_GATE_URL=\"{}\"\nPPROXY_TUNNEL_TOKEN=\"{}\"\n",
+            gate_url.trim(),
+            token.trim()
+        );
+        let _ = secure_write_file(&env_file, env_content.as_bytes());
+    }
+
+    Ok(())
+}
+
+/// 获取出海隧道配置（优先环境变量，其次 config.toml，再次 .pproxy.env）。
+pub fn get_tunnel_config(cfg: &PonyConfig) -> (Option<String>, Option<String>) {
+    let env_url = std::env::var("PPROXY_TUNNEL_GATE_URL").ok().filter(|s| !s.trim().is_empty());
+    let env_token = std::env::var("PPROXY_TUNNEL_TOKEN").ok().filter(|s| !s.trim().is_empty());
+
+    let url = env_url.or_else(|| cfg.tunnel_gate_url.clone()).or_else(|| {
+        home_dir().ok().and_then(|h| {
+            let env_path = h.join(".pony").join(".pproxy.env");
+            fs::read_to_string(env_path).ok().and_then(|c| {
+                for line in c.lines() {
+                    if let Some(val) = line.strip_prefix("PPROXY_TUNNEL_GATE_URL=") {
+                        let trimmed = val.trim().trim_matches('"').trim_matches('\'');
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+                None
+            })
+        })
+    });
+
+    let token = env_token.or_else(|| cfg.tunnel_token.clone()).or_else(|| {
+        home_dir().ok().and_then(|h| {
+            let env_path = h.join(".pony").join(".pproxy.env");
+            fs::read_to_string(env_path).ok().and_then(|c| {
+                for line in c.lines() {
+                    if let Some(val) = line.strip_prefix("PPROXY_TUNNEL_TOKEN=") {
+                        let trimmed = val.trim().trim_matches('"').trim_matches('\'');
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_string());
+                        }
+                    }
+                }
+                None
+            })
+        })
+    });
+
+    (url, token)
 }
 
 /// 获取当前用户主目录（HOME / USERPROFILE）。
@@ -288,6 +354,7 @@ mod tests {
             cf_account_tag: None,
             vercel_token: None,
             tunnel_token: None,
+            tunnel_gate_url: None,
             proxy_secret: None,
         };
         assert_eq!(
@@ -323,6 +390,7 @@ mod tests {
             cf_account_tag: Some("test_account_tag".into()),
             vercel_token: Some("vcp_test_token".into()),
             tunnel_token: Some("gate_test_token".into()),
+            tunnel_gate_url: Some("wss://gate.example.com/ws".into()),
             proxy_secret: Some("proxy_secret_value".into()),
         };
         let toml_str = toml::to_string_pretty(&cfg).unwrap();

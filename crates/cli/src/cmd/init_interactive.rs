@@ -134,6 +134,7 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
         cf_account_tag: if cf_account_tag.is_empty() { None } else { Some(cf_account_tag.clone()) },
         vercel_token: if vercel_token.is_empty() { None } else { Some(vercel_token.clone()) },
         tunnel_token: if tunnel_token.is_empty() { None } else { Some(tunnel_token.clone()) },
+        tunnel_gate_url: None,
         proxy_secret: Some(proxy_secret.clone()),
     };
 
