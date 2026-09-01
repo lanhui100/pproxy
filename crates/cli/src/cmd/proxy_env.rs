@@ -349,56 +349,81 @@ pub fn probe_connectivity(data_plane: &str) -> (Vec<(&'static str, Result<u128, 
         ("GitHub", "https://api.github.com/zen"),
     ];
 
-    let proxy = match reqwest::Proxy::all(data_plane) {
-        Ok(p) => p,
-        Err(_) => {
-            return (
-                targets.iter().map(|(name, _)| (*name, Err("代理配置无效".to_string()))).collect(),
-                0,
-            );
+    // 1. 优先探测本地代理端口 TCP 是否就绪
+    let local_dp_ready = if let Ok(url) = reqwest::Url::parse(data_plane) {
+        if let Some(host) = url.host_str() {
+            let port = url.port().unwrap_or(8899);
+            let addr = format!("{host}:{port}");
+            std::net::TcpStream::connect_timeout(
+                &addr.parse().unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+                std::time::Duration::from_millis(500),
+            ).is_ok()
+        } else {
+            false
         }
+    } else {
+        false
     };
 
-    let client = match reqwest::blocking::Client::builder()
-        .proxy(proxy)
-        .timeout(std::time::Duration::from_millis(2000))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => {
-            return (
-                targets.iter().map(|(name, _)| (*name, Err("探测客户端初始化失败".to_string()))).collect(),
-                0,
-            );
+    if !local_dp_ready {
+        for (name, _) in targets {
+            probe_results.push((name, Err("本地代理服务未运行 (端口未监听)".to_string())));
         }
-    };
-
-    for (name, url) in targets {
-        let start = std::time::Instant::now();
-        let res = client
-            .get(url)
-            .header("User-Agent", "pproxy-probe/1.0")
-            .send();
-        let elapsed = start.elapsed().as_millis();
-        match res {
-            Ok(resp) => {
-                if resp.status().is_success() || resp.status().as_u16() == 204 {
-                    probe_results.push((name, Ok(elapsed)));
-                } else if resp.status().as_u16() == 403 {
-                    probe_results.push((name, Err("未配置 Gate 隧道出口 (需部署 gate-worker)".to_string())));
-                } else {
-                    probe_results.push((name, Err(format!("HTTP {}", resp.status().as_u16()))));
-                }
+    } else {
+        let proxy = match reqwest::Proxy::all(data_plane) {
+            Ok(p) => p,
+            Err(_) => {
+                return (
+                    targets.iter().map(|(name, _)| (*name, Err("代理配置无效".to_string()))).collect(),
+                    0,
+                );
             }
-            Err(e) => {
-                let err_msg = if e.is_connect() {
-                    "无法连接本地代理端口".to_string()
-                } else if e.is_timeout() {
-                    "未配置 Gate 隧道出口 (超时)".to_string()
-                } else {
-                    "隧道未连通".to_string()
-                };
-                probe_results.push((name, Err(err_msg)));
+        };
+
+        let client = match reqwest::blocking::Client::builder()
+            .proxy(proxy)
+            .timeout(std::time::Duration::from_millis(2000))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                return (
+                    targets.iter().map(|(name, _)| (*name, Err("探测客户端初始化失败".to_string()))).collect(),
+                    0,
+                );
+            }
+        };
+
+        for (name, url) in targets {
+            let start = std::time::Instant::now();
+            let res = client
+                .get(url)
+                .header("User-Agent", "pproxy-probe/1.0")
+                .send();
+            let elapsed = start.elapsed().as_millis();
+            match res {
+                Ok(resp) => {
+                    if resp.status().is_success() || resp.status().as_u16() == 204 {
+                        probe_results.push((name, Ok(elapsed)));
+                    } else if resp.status().as_u16() == 403 {
+                        probe_results.push((name, Err("未配置 Gate 隧道出口 (需部署 gate-worker)".to_string())));
+                    } else {
+                        probe_results.push((name, Err(format!("HTTP {}", resp.status().as_u16()))));
+                    }
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    let err_msg = if err_str.contains("502") || err_str.contains("tunnel_failed") {
+                        "Gate 隧道建连失败 (502 / 端点未通)".to_string()
+                    } else if err_str.contains("403") {
+                        "未配置 Gate 隧道出口 (403)".to_string()
+                    } else if e.is_timeout() {
+                        "Gate 隧道超时 (上游无响应)".to_string()
+                    } else {
+                        "出海隧道未通 (网络/DNS异常)".to_string()
+                    };
+                    probe_results.push((name, Err(err_msg)));
+                }
             }
         }
     }

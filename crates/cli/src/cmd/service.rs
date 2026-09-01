@@ -54,18 +54,27 @@ pub fn status(http: &AdminClient) -> Result<i32, String> {
     {
         if which_systemctl().is_some() {
             let is_root = unsafe { libc::geteuid() == 0 };
-            let cmd_args = if is_root {
-                vec!["is-active", "pproxy"]
-            } else {
-                vec!["--user", "is-active", "pproxy"]
-            };
-            match Command::new("systemctl").args(&cmd_args).output() {
-                Ok(out) => {
+            let services = ["pproxy-server", "pproxy"];
+            let mut matched = None;
+            for svc in services {
+                let cmd_args = if is_root {
+                    vec!["is-active", svc]
+                } else {
+                    vec!["--user", "is-active", svc]
+                };
+                if let Ok(out) = Command::new("systemctl").args(&cmd_args).output() {
                     let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    let mode = if is_root { "system" } else { "user" };
-                    println!("systemd (pproxy [{mode}]): {state}");
+                    if state == "active" {
+                        matched = Some((svc, state));
+                        break;
+                    } else if matched.is_none() {
+                        matched = Some((svc, state));
+                    }
                 }
-                Err(_) => {}
+            }
+            if let Some((svc, state)) = matched {
+                let mode = if is_root { "system" } else { "user" };
+                println!("systemd ({svc} [{mode}]): {state}");
             }
         }
     }
