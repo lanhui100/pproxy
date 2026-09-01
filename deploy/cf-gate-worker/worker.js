@@ -69,8 +69,8 @@ export default {
         server.close(1008, 'acl denied')
         return
       }
-      // colo 门禁（spec render-gate-egress §3.3）：Google 系 host ∧ colo 黑名单 → 秒拒，
-      // 客户端（桌面端 engine_tunnel）denied fallover 自动落到 Render 美区兜底。
+      // colo 门禁：Google 系 host ∧ colo 黑名单 → 秒拒，
+      // 客户端（桌面端 engine_tunnel）denied fallover 自动落到 Vercel iad1 美区兜底。
       // 非 Google host 任何 colo 放行，防全量流量倾泻到兜底出口。
       const coloReason = shouldBlockColo(request.cf?.colo, req.host, parseBlockedColos(env.BLOCKED_COLOS))
       if (coloReason) {

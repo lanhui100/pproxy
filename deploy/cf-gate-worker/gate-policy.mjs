@@ -1,7 +1,7 @@
 // gate-policy — colo 门禁纯函数（无 CF 依赖，node 可直接单测）。
 // worker.js 在收到首帧 {host,port} 后、connect() 前调用 shouldBlockColo：
 // 仅「Google 系 host ∧ colo 黑名单」才拒（防 HKG colo 下 Gemini 400 location 错误），
-// 非 Google host 全放行（防全量流量倾泻到 Render 兜底打爆免费额度）。
+// 非 Google host 全放行（防全量流量倾泻到 Vercel 兜底出口）。
 
 export const DEFAULT_BLOCKED_COLOS = ['HKG', 'MFM']
 
