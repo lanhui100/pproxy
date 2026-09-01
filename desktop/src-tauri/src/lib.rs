@@ -540,6 +540,10 @@ fn tunnel_connect_code_import(code: String) -> Result<serde_json::Value, String>
   proxy_tunnel_set_url(url.clone())?;
   cred_set_impl(CREDENTIAL_USER_TUNNEL, token.clone())?;
   let _ = ensure_tunnel_watch().send((Some(url.clone()), Some(token)));
+  let _ = app_config_set(serde_json::json!({
+    "mode_type": "direct",
+    "configured": true
+  }));
   Ok(serde_json::json!({
     "success": true,
     "url": url,
@@ -618,7 +622,16 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
     for h in ALWAYS_TUNNEL { if !wl.iter().any(|w| w==h) { wl.push(h.to_string()); } }
     // 按出网模式装配通道：chained → 远端上游代理；direct → WS gate 隧道
     let cfg_json = app_config_get();
-    let mode_type = cfg_json.get("mode_type").and_then(|v| v.as_str()).unwrap_or("direct").to_string();
+    let mut mode_type = cfg_json.get("mode_type").and_then(|v| v.as_str()).unwrap_or("direct").to_string();
+    let raw_host = cfg_json.get("remote_host").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if mode_type == "chained"
+        && (raw_host.is_empty() || raw_host.starts_with("127.0.0.1:"))
+        && cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().is_some()
+        && cred_get_impl(CREDENTIAL_USER_PROXY).ok().flatten().unwrap_or_default().is_empty()
+    {
+        mode_type = "direct".to_string();
+        let _ = app_config_set(serde_json::json!({ "mode_type": "direct" }));
+    }
     let upstream = if mode_type == "chained" {
         let raw_host = cfg_json.get("remote_host").and_then(|v| v.as_str()).unwrap_or("").trim();
         if raw_host.is_empty() {
@@ -1025,11 +1038,9 @@ fn proxy_traffic_stats() -> serde_json::Value {
 /// - 方案 B（Chained 远端代理）：测到用户自建服务器的真实物理 TCP 握手往返延迟（RTT）。
 #[tauri::command]
 async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
-    let cfg_json = app_config_get();
-    let mode_type = cfg_json.get("mode_type").and_then(|v| v.as_str()).unwrap_or("direct");
-
-    // 方案 B：Chained 远端代理模式
-    if mode_type == "chained" {
+    // 方案 B：Chained 远端代理接口
+    if iface == "chained" {
+        let cfg_json = app_config_get();
         let raw_host = cfg_json.get("remote_host").and_then(|v| v.as_str()).unwrap_or("").trim();
         if raw_host.is_empty() {
             return Err("未配置远端代理服务器地址".into());
@@ -1070,11 +1081,11 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
         }
     }
 
-    // 方案 A：Direct 独立中继隧道模式
+    // 方案 A：Direct 独立中继隧道模式（cf / vercel）
     let gate = match iface.as_str() {
         "cf" => GATE_WS_URL,
         "vercel" => "wss://vgate.ponyjob.top/api/ws",
-        _ => return Err("未知接口：仅支持 cf / vercel".into()),
+        _ => return Err("未知接口：仅支持 cf / vercel / chained".into()),
     };
 
     let token = match cred_get_impl(CREDENTIAL_USER_TUNNEL) {
@@ -1138,7 +1149,7 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
     }
 }
 
-/// 按选定出网接口（cf / vercel）拨测指定站点：
+/// 按选定出网接口（cf / vercel / chained）拨测指定站点：
 /// - 方案 A（Direct 独立加速）：经对应 gate 隧道热态长连接测物理往返延迟（RTT）；
 /// - 方案 B（Chained 远端代理）：经 TCP 握手测本地到用户自建服务器的真实物理往返延迟（RTT）。
 #[tauri::command]
@@ -1152,11 +1163,9 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
         return Err("非法域名".into());
     }
 
-    let cfg_json = app_config_get();
-    let mode_type = cfg_json.get("mode_type").and_then(|v| v.as_str()).unwrap_or("direct");
-
-    // 方案 B：Chained 远端代理模式
-    if mode_type == "chained" {
+    // 方案 B：Chained 远端代理接口
+    if iface == "chained" {
+        let cfg_json = app_config_get();
         let raw_host = cfg_json.get("remote_host").and_then(|v| v.as_str()).unwrap_or("").trim();
         if raw_host.is_empty() {
             return Err("未配置远端代理服务器地址".into());
@@ -1200,12 +1209,12 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
         }
     }
 
-    // 方案 A：Direct 独立中继隧道模式
+    // 方案 A：Direct 独立中继隧道模式（cf / vercel）
     let gate = match iface.as_str() {
         "cf" => GATE_WS_URL,
         // Vercel gate（deploy/vercel-gate-worker，挂载 /api/ws；vgate CNAME → cname.vercel.com）
         "vercel" => "wss://vgate.ponyjob.top/api/ws",
-        _ => return Err("未知接口：仅支持 cf / vercel".into()),
+        _ => return Err("未知接口：仅支持 cf / vercel / chained".into()),
     };
     let token = cred_get_impl(CREDENTIAL_USER_TUNNEL)
         .ok()
@@ -1533,7 +1542,7 @@ mod tests {
             "remote_host": addr.to_string(),
         }));
 
-        let res = proxy_test_site_via("cf".into(), "google.com".into()).await.unwrap();
+        let res = proxy_test_site_via("chained".into(), "google.com".into()).await.unwrap();
         assert_eq!(res["ok"], true);
         assert_eq!(res["iface"], "chained");
         assert!(res["ms"].as_u64().is_some());

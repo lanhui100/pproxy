@@ -311,7 +311,7 @@ const ifaceRows = ref<IfaceRow[]>([
 ])
 
 const siteRows = ref<SiteRow[]>([
-  { name: 'Google', host: 'google.com', iface: 'cf', history: [], testing: false },
+  { name: 'Google', host: 'google.com', iface: 'vercel', history: [], testing: false },
   { name: 'GitHub', host: 'github.com', iface: 'cf', history: [], testing: false },
   { name: 'X', host: 'x.com', iface: 'cf', history: [], testing: false },
   { name: 'OpenAI', host: 'openai.com', iface: 'vercel', history: [], testing: false },
