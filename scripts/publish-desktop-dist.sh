@@ -42,7 +42,7 @@ SIG="${EXE}.sig"
 [[ -f "$SIG" ]] || { echo "缺少签名文件: $SIG"; exit 1; }
 
 STAGE="$(mktemp -d)"
-trap 'cd /; rm -rf "$STAGE"' EXIT
+trap 'cd /; rm -rf "$STAGE" 2>/dev/null || true' EXIT
 cp "$EXE" "$STAGE/$NAME"
 cp "$SIG" "$STAGE/$NAME.sig"
 cp "$LATEST_JSON" "$STAGE/latest.json"
