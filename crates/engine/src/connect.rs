@@ -446,25 +446,44 @@ impl fmt::Display for EstablishError {
 impl std::error::Error for EstablishError {}
 
 /// 仅完成 TCP+TLS+WS Upgrade（Bearer token 认证，不携带目标 host）。
+/// 支持逗号分隔多个 Gate 端点（如 wss://gate1,wss://gate2），按顺序故障转移。
 pub async fn connect_ws(cfg: &TunnelConfig) -> Result<(WsTx, WsRx), EstablishError> {
-    let mut req = cfg
+    let endpoints: Vec<&str> = cfg
         .gate_url
-        .as_str()
-        .into_client_request()
-        .map_err(|e| EstablishError::Handshake(e.to_string()))?;
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
 
-    req.headers_mut().insert(
-        "authorization",
-        WsHeaderValue::from_str(&format!("Bearer {}", cfg.token))
-            .map_err(|e| EstablishError::Handshake(e.to_string()))?,
-    );
+    let mut last_err = None;
+    for endpoint in endpoints {
+        let req_result = endpoint.into_client_request();
+        let mut req = match req_result {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Some(EstablishError::Handshake(format!("bad gate url '{endpoint}': {e}")));
+                continue;
+            }
+        };
 
-    let (ws_stream, _) = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(req))
-        .await
-        .map_err(|_| EstablishError::Network("ws connect timeout".into()))?
-        .map_err(|e| EstablishError::Network(e.to_string()))?;
+        if let Ok(val) = WsHeaderValue::from_str(&format!("Bearer {}", cfg.token)) {
+            req.headers_mut().insert("authorization", val);
+        }
 
-    Ok(ws_stream.split())
+        match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(req)).await {
+            Ok(Ok((ws_stream, _))) => {
+                return Ok(ws_stream.split());
+            }
+            Ok(Err(e)) => {
+                last_err = Some(EstablishError::Network(format!("{endpoint}: {e}")));
+            }
+            Err(_) => {
+                last_err = Some(EstablishError::Network(format!("{endpoint}: ws connect timeout")));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| EstablishError::Network("no valid gate endpoints configured".into())))
 }
 
 /// 在已建立的 WS 会话上声明目标（首帧 Text JSON {"host":..., "port":...} → 等 {"ok":true}）。
