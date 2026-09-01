@@ -1,0 +1,97 @@
+name: cli-release
+
+on:
+  push:
+    tags: ["cli-v*", "desktop-v*", "v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release Tag to attach to (e.g. cli-v0.3.25 or desktop-v0.3.25)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-cli:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            binary: pproxy-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            binary: pproxy-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross prebuilt binary
+        run: |
+          mkdir -p ~/.cargo/bin
+          curl -fsSL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-musl.tar.gz | tar -xz -C ~/.cargo/bin
+          chmod +x ~/.cargo/bin/cross
+
+      - name: Build CLI with Cross
+        run: |
+          cross build --target ${{ matrix.target }} --release -p pproxy-cli
+          cp target/${{ matrix.target }}/release/pproxy ${{ matrix.binary }}
+          chmod +x ${{ matrix.binary }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.binary }}
+          path: ${{ matrix.binary }}
+
+  publish-release:
+    needs: build-linux-cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find dist -type f -exec cp {} release-assets/ \;
+          ls -la release-assets
+
+      - name: Determine Release Tag
+        id: get_tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          elif [ -n "${{ github.ref_name }}" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG=$(git describe --tags --abbrev=0)
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          TAG="${{ steps.get_tag.outputs.tag }}"
+          echo "Target Release Tag: $TAG"
+          
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists, uploading assets..."
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            echo "Release $TAG does not exist, creating release..."
+            gh release create "$TAG" release-assets/* --title "Pony Proxy $TAG" --notes "Linux CLI (amd64 / arm64 musl 静态独立二进制) 发版"
+          fi
