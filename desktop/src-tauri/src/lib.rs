@@ -188,7 +188,7 @@ pub fn run() {
       proxy_auto_config_get, proxy_auto_config_set, app_config_get, app_config_set,
       proxy_bypass_hosts,
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
-      proxy_traffic_stats, proxy_test_egress, proxy_test_site_via,
+      proxy_traffic_stats, proxy_test_egress, proxy_test_site_via, proxy_test_site_local,
       open_external_url,
     ])
     .build(ctx)
@@ -439,12 +439,16 @@ const DEFAULT_TUNNEL_URLS: &str = "wss://vgate.ponyjob.top/api/ws,wss://gate.pon
 /// 旧配置迁移：早期版本把 HTTP 网关域名（edge.ponyjob.top）误当作 WS gate 端点，
 /// 且曾缺 /ws 路径。读到这类值一律映射到正确的 gate 端点（防止拨测超时/隧道连接失败）。
 /// 同时将旧版 CF 在前的默认端点自动迁移为 Vercel 美区优先，确保 Google/AI API 稳定出网。
+/// 单一 CF 端点（纯 gate.ponyjob.top）同样补齐默认双端点，避免缺 Vercel 兜底（P2-4）。
 fn migrate_tunnel_url(url: &str) -> String {
     let t = url.trim();
     if t.starts_with("wss://edge.ponyjob.top") || t.starts_with("ws://edge.ponyjob.top") {
         return GATE_WS_URL.to_string();
     }
     if t == "wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws" {
+        return DEFAULT_TUNNEL_URLS.to_string();
+    }
+    if t == GATE_WS_URL {
         return DEFAULT_TUNNEL_URLS.to_string();
     }
     t.to_string()
@@ -523,7 +527,7 @@ fn parse_connect_code(code: &str) -> Result<(String, String), String> {
   let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| "连接口令内容不是合法 JSON".to_string())?;
   // 版本字段：缺省视为 v1；未来字段不兼容时拒绝
   if let Some(vn) = v.get("v").and_then(|x| x.as_u64()) {
-    if vn != 1 { return Err(format!("连接口令版本不支持（v{vn}），请更新软件后重试").into()); }
+    if vn != 1 { return Err(format!("连接口令版本不支持（v{vn}），请更新软件后重试")); }
   }
   let url = v.get("u").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty())
     .ok_or_else(|| "连接口令缺少端点字段 u".to_string())?;
@@ -658,7 +662,7 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
         if !wl.is_empty() && (tunnel_url.is_none() || tunnel_token.is_none()) {
             // 细分根因：凭据读取失败（编码污染）与「未配置」是两类事故，文案必须区分
             if let Err(e) = cred_get_impl(CREDENTIAL_USER_TUNNEL) {
-                return Err(format!("隧道凭据读取失败（{e}）：可能是凭据被外部工具以不兼容编码写入。请在「设置 → 方案 A」重新粘贴加速授权码即可修复，无需重启").into());
+                return Err(format!("隧道凭据读取失败（{e}）：可能是凭据被外部工具以不兼容编码写入。请在「设置 → 方案 A」重新粘贴加速授权码即可修复，无需重启"));
             }
             return Err("隧道未配置：白名单流量无法出网。请先在「设置 → 方案 A」填写授权码，或在首页粘贴同步口令，再开启总开关".into());
         }
@@ -1157,8 +1161,7 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
 /// - 方案 A（Direct 独立加速）：经对应 gate 隧道热态长连接测物理往返延迟（RTT）；
 /// - 方案 B（Chained 远端代理）：经 TCP 握手测本地到用户自建服务器的真实物理往返延迟（RTT）。
 #[tauri::command]
-async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::Value, String> {
-    let host = host.trim().trim_start_matches("https://").trim_start_matches("http://")
+async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::Value, String> {    let host = host.trim().trim_start_matches("https://").trim_start_matches("http://")
         .trim_end_matches('/').to_lowercase();
     if host.is_empty()
         || host.len() > 253
@@ -1239,6 +1242,50 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
             "error": e,
         })),
     }
+}
+
+/// 经本地引擎（127.0.0.1:18900）对指定站点做真实出网拨测（P2-5 修复）：
+/// 与 `proxy_test_sites` 同口径 —— 走引擎的 CONNECT 分流，命中白名单/全局则经隧道出网、
+/// 未命中则直连，真实反映"前端链接状态 = 实际可用性"，而非绕过引擎直拨 gate。
+/// 需代理已启用（ENGINE_ON），未启用时明确报错而不是伪装成功。
+#[tauri::command]
+async fn proxy_test_site_local(host: String) -> Result<serde_json::Value, String> {
+    let host = host.trim().trim_start_matches("https://").trim_start_matches("http://")
+        .trim_end_matches('/').to_lowercase();
+    if host.is_empty()
+        || host.len() > 253
+        || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        return Err("非法域名".into());
+    }
+    if !ENGINE_ON.load(AOrd::SeqCst) {
+        return Ok(serde_json::json!({
+            "site": host,
+            "iface": "local",
+            "ok": false,
+            "ms": 0,
+            "error": "代理未启用：请先打开系统代理总开关",
+        }));
+    }
+    let started = std::time::Instant::now();
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        dial_via_proxy("127.0.0.1:18900", &host, 443),
+    ).await;
+    let ok = matches!(r, Ok(Ok(())));
+    let ms = started.elapsed().as_millis() as u64;
+    let error = match &r {
+        Err(_) => "timeout".to_string(),
+        Ok(Err(e)) => e.to_string(),
+        Ok(Ok(())) => String::new(),
+    };
+    Ok(serde_json::json!({
+        "site": host,
+        "iface": "local",
+        "ok": ok,
+        "ms": ms,
+        "error": error,
+    }))
 }
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 #[tauri::command]
@@ -1564,8 +1611,10 @@ mod tests {
         assert_eq!(migrate_tunnel_url("wss://edge.ponyjob.top/ws"), "wss://gate.ponyjob.top/ws");
         assert_eq!(migrate_tunnel_url("ws://edge.ponyjob.top"), "wss://gate.ponyjob.top/ws");
         // 正确端点与自定义端点保持原样
-        assert_eq!(migrate_tunnel_url("wss://gate.ponyjob.top/ws"), "wss://gate.ponyjob.top/ws");
+        assert_eq!(migrate_tunnel_url("wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws");
         assert_eq!(migrate_tunnel_url("wss://self-host.example.com/tunnel"), "wss://self-host.example.com/tunnel");
+        // P2-4：单 CF 端点补齐默认双端点（Vercel 兜底）
+        assert_eq!(migrate_tunnel_url("wss://gate.ponyjob.top/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws");
     }
 
     // ---- pony-gate:// 连接口令解析 ----

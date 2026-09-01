@@ -4,6 +4,12 @@ name = "pony-gate"
 main = "worker.js"
 compatibility_date = "2024-09-01"
 
+[vars]
+# Google 系 host 严格白名单门禁：默认开启（worker.js 亦 fail-closed），
+# 仅放行 DEFAULT_ALLOWED_COLOS 中的合规 Colo，其余一律 denied 触发 Vercel failover。
+# 显式声明便于部署核对；可设 "false" 临时关闭（P1-2 修复）。
+STRICT_GOOGLE_WHITELIST = "true"
+
 [observability]
 enabled = true
 

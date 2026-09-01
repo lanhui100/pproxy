@@ -2,7 +2,7 @@
 // relay 模式采用 CF 官方文档规范：sock.readable.pipeTo(WritableStream) +
 // ws message → writer.write（此前手搓 for-await/双闭包模式触发本地 workerd 崩溃）。
 import { connect } from 'cloudflare:sockets'
-import { shouldBlockColo, parseBlockedColos, parseAllowedColos } from './gate-policy.mjs'
+import { shouldBlockColo, parseBlockedColos, parseAllowedColos, strictGoogleEnabled } from './gate-policy.mjs'
 
 const ALLOWED_PORTS = new Set([443]) // 80 明文透传默认禁用（M6 spec R8/F12）
 const MAX_NAME_LEN = 253
@@ -72,10 +72,12 @@ export default {
       // colo 门禁：Google 系 host ∧ 非合规区域/黑名单 → 秒拒，
       // 客户端（桌面端 engine_tunnel）denied fallover 自动落到 Vercel iad1 美区兜底。
       // 非 Google host 任何 colo 放行，防全量流量倾泻到兜底出口。
+      // 严格白名单默认开启（fail-closed）：仅当显式设置 STRICT_GOOGLE_WHITELIST=false/0 时关闭，
+      // 保证"仅放行 Google 官方合规区域"不是可选项而是生产默认（P1-2 修复）。
       const coloReason = shouldBlockColo(request.cf?.colo, req.host, {
         blockedColos: parseBlockedColos(env.BLOCKED_COLOS),
         allowedColos: parseAllowedColos(env.ALLOWED_COLOS),
-        strictWhitelist: env.STRICT_GOOGLE_WHITELIST === 'true' || env.STRICT_GOOGLE_WHITELIST === '1',
+        strictWhitelist: strictGoogleEnabled(env.STRICT_GOOGLE_WHITELIST),
       })
       if (coloReason) {
         console.log('[gate] colo blocked', coloReason, req.host)

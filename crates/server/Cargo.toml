@@ -20,5 +20,5 @@ futures.workspace = true
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # rustls 0.23 需要 install_default CryptoProvider（tokio-tungstenite 的依赖）
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-reqwest = { version = "0.12", default-features = false, features = ["charset"] }
+reqwest = { version = "0.12", default-features = false, features = ["charset", "rustls-tls"] }
 tower = { version = "0.5" }

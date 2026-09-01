@@ -13,6 +13,11 @@ export const GOOGLE_SUFFIXES = [
   'gstatic.com',
   'googleusercontent.com',
   'deepmind.google',
+  // Antigravity CLI（agy）的官方域名：桌面端白名单默认含这两项，必须纳入 Google 系
+  // 否则 CF gate 会把它们当非 Google 流量全量放行，落在 HKG/MFM 等区域时 Google 仍会拒绝，
+  // 且不触发 failover 到 Vercel 合规出口。
+  'antigravity.google',
+  'labs.google',
   'g.co',
   'goog',
 ]
@@ -83,6 +88,16 @@ export function parseBlockedColos(envValue) {
 export function parseAllowedColos(envValue) {
   if (typeof envValue !== 'string' || !envValue.trim()) return [...DEFAULT_ALLOWED_COLOS]
   return envValue.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+}
+
+/**
+ * 严格白名单开关判定（P1-2 修复）：fail-closed 默认开启，
+ * 仅当显式设置为 'false' / '0' 时才关闭。
+ * @param {string|undefined} envValue STRICT_GOOGLE_WHITELIST 的值
+ * @returns {boolean}
+ */
+export function strictGoogleEnabled(envValue) {
+  return !(envValue === 'false' || envValue === '0')
 }
 
 /**

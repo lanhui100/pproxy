@@ -773,6 +773,17 @@ Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution
    - `node smoke-test.mjs wss://vgate.ponyjob.top/api/ws openai.com 443` -> `OK: TLS established (TLS_AES_256_GCM_SHA384)`
    - 单元测试：Rust 44/44 通过、Vitest 69/69 通过。
 
+### 门禁加固与端点策略 · 2026-09-02（P1/P2 设计审核落地）
+
+针对「前端链接状态绿但 agy 不可用」的复查，补齐门禁盲区与端点策略（见 `deploy/cf-gate-worker/gate-policy.mjs` 与 `desktop/src-tauri/src/proxy/engine_tunnel.rs`）：
+
+- **P1-1 · agy 域名纳入 Google 系门禁**：`GOOGLE_SUFFIXES` 补充 `antigravity.google` / `labs.google`（桌面端白名单默认项）。此前这两个域名会被当作非 Google 流量在 HKG/MFM 等区域被全量放行，Google 拒绝时不触发 Vercel failover——正是 agy 场景的门禁盲区。
+- **P1-2 · 严格白名单默认开启（fail-closed）**：`worker.js` 改为 `STRICT_GOOGLE_WHITELIST` 未设置/非 `false|0` 时即启用严格白名单；`wrangler.toml` 显式声明 `STRICT_GOOGLE_WHITELIST="true"`。此前白名单仅在显式开启时生效，属名不副实。
+- **P2-3 · 端点 host 感知优先级**：`engine_tunnel.rs` 新增 `is_google_host`/`order_endpoints`——Google 系 host（含 agy 域名）→ Vercel 合规出口优先；非 Google → CF 低延迟优先。与 gate-policy 口径一致，消除「全量 Vercel 优先拖慢非 Google 流量」与「Google 先吃 CF denied 往返」两个问题。
+- **P2-4 · 单 CF 端点旧配置迁移**：`migrate_tunnel_url` 对单独 `wss://gate.ponyjob.top/ws` 也自动补齐默认双端点。
+- **P2-5 · 前端站点测速走本地引擎**：新增 `proxy_test_site_local` 命令，`DashboardView` 站点行改为经本地引擎真实分流（命中白名单/全局走隧道、未命中直连），移除站点行的手动 C/V 切换（引擎已按 host 自动选出口）；接口行保留 gate RTT 测速。
+- 回归：gate-policy 51/51、desktop cargo 50/50、Vitest 78/78、vue-tsc 0 错、oxlint 0 警告。
+
 
 ---
 

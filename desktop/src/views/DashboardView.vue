@@ -317,8 +317,6 @@ const siteRows = ref<SiteRow[]>([
   { name: 'OpenAI', host: 'openai.com', iface: 'vercel', history: [], testing: false },
 ])
 
-const IFACE_CHOICE_PREFIX = 'pony-site-iface:'
-
 function siteSeriesKey(host: string): string {
   return `site:${host}`
 }
@@ -328,13 +326,10 @@ function loadAllHistories(): void {
     row.history = loadLatencySeries(`iface:${row.id}`)
   }
   for (const row of siteRows.value) {
-    try {
-      const saved = localStorage.getItem(IFACE_CHOICE_PREFIX + row.host)
-      if (saved === 'cf' || saved === 'vercel') row.iface = saved
-    } catch { /* 忽略 */ }
+    // P2-5：站点测速改为经本地引擎（引擎自动选出口），不再持久化用户手动 C/V 选择；
+    // 兼容读取旧版按出口存储的时序数据（迁移到统一 site:host 键）。
     let hist = loadLatencySeries(siteSeriesKey(row.host))
     if (!hist.length) {
-      // 兼容迁移按出口存储的旧版时序数据
       const oldHist = loadLatencySeries(`site:${row.host}:${row.iface}`)
       if (oldHist.length) {
         hist = oldHist
@@ -343,15 +338,6 @@ function loadAllHistories(): void {
     }
     row.history = hist
   }
-}
-
-function switchSiteIface(row: SiteRow, iface: Iface): void {
-  if (row.iface === iface) return
-  row.iface = iface
-  try {
-    localStorage.setItem(IFACE_CHOICE_PREFIX + row.host, iface)
-  } catch { /* 忽略 */ }
-  void testSiteRow(row)
 }
 
 async function probeEgress(iface: Iface): Promise<LatencyPoint> {
@@ -365,15 +351,16 @@ async function probeEgress(iface: Iface): Promise<LatencyPoint> {
   return { ts: Date.now(), ok: r.ok, ms: r.ms, err: r.error }
 }
 
-async function probeSite(host: string, iface: Iface): Promise<LatencyPoint> {
+async function probeSite(host: string): Promise<LatencyPoint> {
   if (!isTauri()) {
     await new Promise((r) => setTimeout(r, 400))
     const ms = Math.floor(Math.random() * 900) + 150
     return { ts: Date.now(), ok: true, ms }
   }
+  // P2-5：站点拨测走本地引擎真实分流（命中白名单/全局 → 隧道出网；未命中 → 直连），
+  // 与「链接状态 = 实际可用性」一致，而非绕过引擎直拨 gate 的假绿。
   const { invoke } = await import('@tauri-apps/api/core')
-  const r = await invoke<{ ok: boolean; ms: number; error?: string }>('proxy_test_site_via', {
-    iface,
+  const r = await invoke<{ ok: boolean; ms: number; error?: string }>('proxy_test_site_local', {
     host,
   })
   return { ts: Date.now(), ok: r.ok, ms: r.ms, err: r.error }
@@ -398,7 +385,7 @@ async function testSiteRow(row: SiteRow): Promise<void> {
   if (row.testing) return
   row.testing = true
   try {
-    const point = await probeSite(row.host, row.iface)
+    const point = await probeSite(row.host)
     row.history = appendLatencyPoint(row.history, point)
     saveLatencySeries(siteSeriesKey(row.host), row.history)
   } catch (e) {
@@ -1063,37 +1050,11 @@ async function submitImportOrChained() {
           <div class="flex flex-col min-w-0">
             <div class="flex items-center gap-1.5 min-w-0">
               <span class="text-sm font-medium leading-none truncate">{{ row.name }}</span>
-              <!-- 出网接口 switch：紧随网站名 -->
-              <div
-                class="shrink-0 inline-flex items-center rounded-full bg-muted p-0.5 text-xs"
-                role="group"
-                :aria-label="`${row.name} 测速接口`"
-              >
-                <button
-                  @click="switchSiteIface(row, 'cf')"
-                  :aria-pressed="row.iface === 'cf'"
-                  :class="[
-                    'px-1.5 py-0.5 rounded-full text-[10px] leading-none transition-all duration-150 cursor-pointer',
-                    row.iface === 'cf'
-                      ? 'bg-card text-foreground font-medium shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground',
-                  ]"
-                >
-                  C
-                </button>
-                <button
-                  @click="switchSiteIface(row, 'vercel')"
-                  :aria-pressed="row.iface === 'vercel'"
-                  :class="[
-                    'px-1.5 py-0.5 rounded-full text-[10px] leading-none transition-all duration-150 cursor-pointer',
-                    row.iface === 'vercel'
-                      ? 'bg-card text-foreground font-medium shadow-sm'
-                      : 'text-muted-foreground hover:text-foreground',
-                  ]"
-                >
-                  V
-                </button>
-              </div>
+              <!-- P2-5：站点测速走本地引擎真实分流，引擎按 host 自动选择出口（Google→Vercel，其余→CF），
+                   不再提供手动 C/V 切换——手动切换会误导用户以为能决定真实出网 -->
+              <span class="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                经本地引擎
+              </span>
             </div>
             <div class="text-xs text-muted-foreground font-mono mt-1 truncate">{{ row.host }}</div>
           </div>

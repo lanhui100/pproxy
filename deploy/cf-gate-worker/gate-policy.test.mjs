@@ -6,6 +6,7 @@ import {
   parseBlockedColos,
   parseAllowedColos,
   shouldBlockColo,
+  strictGoogleEnabled,
 } from './gate-policy.mjs'
 
 let passed = 0
@@ -26,6 +27,9 @@ check('daily-cloudcode-pa.googleapis.com 命中', isGoogleHost('daily-cloudcode-
 check('generativelanguage.googleapis.com 命中', isGoogleHost('generativelanguage.googleapis.com'))
 check('accounts.google.com 命中', isGoogleHost('accounts.google.com'))
 check('deepmind.google 命中', isGoogleHost('deepmind.google'))
+check('antigravity.google 命中（agy 官方域名）', isGoogleHost('antigravity.google'))
+check('api.antigravity.google 命中（agy 子域）', isGoogleHost('api.antigravity.google'))
+check('labs.google 命中（agy/实验产品域名）', isGoogleHost('labs.google'))
 check('www.gstatic.com 命中', isGoogleHost('www.gstatic.com'))
 check('大写归一', isGoogleHost('OAuth2.GOOGLEAPIS.COM'))
 check('末尾点归一', isGoogleHost('googleapis.com.'))
@@ -84,6 +88,14 @@ check('默认黑名单包含 HKG, MFM, PEK', DEFAULT_BLOCKED_COLOS.includes('HKG
 check('默认白名单包含 IAD, SJC, NRT', DEFAULT_ALLOWED_COLOS.includes('IAD') && DEFAULT_ALLOWED_COLOS.includes('NRT'))
 check('env 黑名单解析', parseBlockedColos('hkg, pek, can').join(',') === 'HKG,PEK,CAN')
 check('env 白名单解析', parseAllowedColos('iad, sjx').join(',') === 'IAD,SJX')
+
+console.log('[8] 严格白名单默认开启（P1-2 fail-closed）')
+check('env 未设置 → 严格开启', strictGoogleEnabled(undefined) === true)
+check('env 空串 → 严格开启', strictGoogleEnabled('') === true)
+check('env=true → 严格开启', strictGoogleEnabled('true') === true)
+check('env=1 → 严格开启', strictGoogleEnabled('1') === true)
+check('env=false → 显式关闭', strictGoogleEnabled('false') === false)
+check('env=0 → 显式关闭', strictGoogleEnabled('0') === false)
 
 console.log(`\n结果: ${passed} pass, ${failed} fail`)
 process.exit(failed ? 1 : 0)

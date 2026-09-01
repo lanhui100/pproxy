@@ -134,6 +134,9 @@ async fn establish(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
+    // P2-3：按目标 host 重排端点优先级（Google → Vercel 优先；非 Google → CF 优先），
+    // 与 gate-policy 门禁口径一致，避免非 Google 流量被默认 Vercel 优先拖慢、Google 流量先吃 CF denied。
+    let urls = order_endpoints(urls, &parsed.host);
 
     let mut last_err = None;
     let mut saw_401 = false;
@@ -170,6 +173,8 @@ async fn establish(
                 log::info!("tunnel token rotated on disk, refreshing watch and retrying once");
                 let _ = crate::ensure_tunnel_watch().send((Some(u.clone()), Some(t.clone())));
                 let urls2: Vec<&str> = u.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                // P2-3：自愈重试同样按 host 重排端点优先级
+                let urls2 = order_endpoints(urls2, &parsed.host);
                 for u2 in &urls2 {
                     match try_establish_url(u2, &t, parsed).await {
                         Ok(pair) => return Ok((pair, (*u2).to_string())),
@@ -199,6 +204,49 @@ pub fn classify_egress(url: &str) -> Egress {
     } else {
         Egress::Cf
     }
+}
+
+/// Google 系 host 判定（P2-3 修复）：与 gate-policy.mjs 的 GOOGLE_SUFFIXES 保持一致，
+/// 含 antigravity.google / labs.google（桌面端白名单默认项），避免"前端绿但 agy 红"的错位。
+const GOOGLE_SUFFIXES: &[&str] = &[
+    "google.com",
+    "googleapis.com",
+    "gstatic.com",
+    "googleusercontent.com",
+    "deepmind.google",
+    "antigravity.google",
+    "labs.google",
+    "g.co",
+    "goog",
+];
+
+pub fn is_google_host(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    GOOGLE_SUFFIXES.iter().any(|s| {
+        if !h.ends_with(s) {
+            return false;
+        }
+        let rest = &h[..h.len() - s.len()];
+        rest.is_empty() || rest.ends_with('.')
+    })
+}
+
+/// 端点优先级重排（P2-3 修复）：Google 系 host → Vercel 合规出口优先（避免先吃 CF colo denied 的
+/// 往返，且保证 Google API 区域合规）；非 Google host → CF 低延迟优先（Vercel 兜底）。
+/// 稳定排序：同优先级端点保持 tunnel.json 原始顺序；自定义端点按归类参与排序。
+fn order_endpoints<'a>(urls: Vec<&'a str>, host: &str) -> Vec<&'a str> {
+    let google = is_google_host(host);
+    let mut list = urls;
+    list.sort_by_key(|u| {
+        let is_vercel = u.contains("vercel") || u.contains("vgate");
+        match (google, is_vercel) {
+            (true, true) => 0,   // Google + Vercel 最优先
+            (true, false) => 1,  // Google + CF/自定义 兜底
+            (false, true) => 1,  // 非 Google + Vercel 兜底
+            (false, false) => 0, // 非 Google + CF/自定义 最优先
+        }
+    });
+    list
 }
 
 /// 站点拨测（仪表盘「链接状态」）：经指定 gate 端点完成 WS 升级 + 首帧 {"host","port"} 握手，
@@ -548,5 +596,61 @@ mod tests {
             rebuild_request("GET http://x/y HTTP/1.1\r\nHost: x\r\n\r\n"),
             "GET /y HTTP/1.1\r\nHost: x\r\n\r\n"
         );
+    }
+
+    // ---- P2-3：Google 系 host 判定与端点优先级 ----
+
+    #[test]
+    fn google_host_detection_matches_gate_policy() {
+        // 与 gate-policy.mjs GOOGLE_SUFFIXES 保持一致，含 agy 域名
+        for h in [
+            "google.com",
+            "www.google.com",
+            "accounts.google.com",
+            "generativelanguage.googleapis.com",
+            "oauth2.googleapis.com",
+            "www.gstatic.com",
+            "deepmind.google",
+            "antigravity.google",
+            "api.antigravity.google",
+            "labs.google",
+            "g.co",
+        ] {
+            assert!(is_google_host(h), "应识别为 Google 系: {h}");
+        }
+        // 非 Google / 陷阱域
+        for h in ["github.com", "youtube.com", "notgoogleapis.com", "googleapis.com.evil.cn", "baidu.com"] {
+            assert!(!is_google_host(h), "不应识别为 Google 系: {h}");
+        }
+    }
+
+    #[test]
+    fn endpoint_order_prefers_vercel_for_google() {
+        let urls = vec![
+            "wss://gate.ponyjob.top/ws",
+            "wss://vgate.ponyjob.top/api/ws",
+        ];
+        let ordered = order_endpoints(urls.clone(), "oauth2.googleapis.com");
+        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws", "Google 应 Vercel 优先");
+        assert_eq!(ordered[1], "wss://gate.ponyjob.top/ws");
+
+        let ordered = order_endpoints(urls.clone(), "antigravity.google");
+        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws", "agy 域名应 Vercel 优先");
+
+        let ordered = order_endpoints(urls.clone(), "api.openai.com");
+        assert_eq!(ordered[0], "wss://gate.ponyjob.top/ws", "非 Google 应 CF 优先");
+        assert_eq!(ordered[1], "wss://vgate.ponyjob.top/api/ws");
+    }
+
+    #[test]
+    fn endpoint_order_stable_for_custom_and_unknown() {
+        // 同优先级保持原始相对顺序；未知域名按非 Google 处理（CF/自定义优先）
+        let urls = vec![
+            "wss://custom-a.example/ws",
+            "wss://custom-b.example/ws",
+        ];
+        let ordered = order_endpoints(urls, "random.host.io");
+        assert_eq!(ordered[0], "wss://custom-a.example/ws");
+        assert_eq!(ordered[1], "wss://custom-b.example/ws");
     }
 }
