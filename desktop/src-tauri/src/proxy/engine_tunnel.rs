@@ -10,8 +10,10 @@
 //! - 透传期应答 WS Ping/Pong，避免 CF 侧长时间空闲判定断连。
 
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
@@ -55,12 +57,13 @@ type WsPair = (
     futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>,
 );
 
-/// 单端点尝试建连（WS Upgrade + 首帧 + 等 {"ok":true}）
-async fn try_establish_url(
-    url_str: &str,
-    token: &str,
-    parsed: &ReqHead,
-) -> Result<WsPair, std::io::Error> {
+/// WS 会话分裂后的写端/读端（池化预建与 bind_target 共用）。
+type WsTx = futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>, Message>;
+type WsRx = futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>>;
+
+/// 单端点 WS Upgrade（仅建连，不声明目标）：供池化预建复用。
+/// 401 打稳定标记（establish 的自愈只认此标记）。
+async fn connect_ws(url_str: &str, token: &str) -> Result<(WsTx, WsRx), std::io::Error> {
     let mut req = url_str
         .into_client_request()
         .map_err(|e| io(format!("bad tunnel url: {e}")))?;
@@ -76,7 +79,6 @@ async fn try_establish_url(
     let (ws, _resp) = match upgrade {
         Ok(pair) => pair,
         Err(e) => {
-            // 401 打稳定标记：establish 的自愈只认此标记，不做模糊字符串匹配
             if let tokio_tungstenite::tungstenite::Error::Http(resp) = &e {
                 if resp.status() == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED {
                     return Err(io(AUTH_401_MARKER));
@@ -85,8 +87,16 @@ async fn try_establish_url(
             return Err(io(e));
         }
     };
-    let (mut ws_tx, mut ws_rx) = ws.split();
+    Ok(ws.split())
+}
 
+/// 在已建立（或池化取出）的 WS 会话上声明目标：Text 首帧 {host,port} → 等 {"ok":true}。
+/// 池化预建会话与全新建连共用此绑定步骤。
+async fn bind_target(
+    mut ws_tx: WsTx,
+    mut ws_rx: WsRx,
+    parsed: &ReqHead,
+) -> Result<(WsTx, WsRx), std::io::Error> {
     let first = serde_json::json!({ "host": parsed.host, "port": parsed.port }).to_string();
     ws_tx.send(Message::Text(first)).await.map_err(io)?;
 
@@ -115,8 +125,22 @@ async fn try_establish_url(
     }
 }
 
+/// 单端点全流程建连（WS Upgrade + 首帧 + 等 {"ok":true}）——冷建连路径。
+async fn try_establish_url(
+    url_str: &str,
+    token: &str,
+    parsed: &ReqHead,
+) -> Result<WsPair, std::io::Error> {
+    let (tx, rx) = connect_ws(url_str, token).await?;
+    bind_target(tx, rx, parsed).await
+}
+
 /// 建连阶段：支持多中继端点自动切换（CF 节点不可达/被拒时无缝回退备用 Vercel/Node 节点）。
 /// 返回成功使用的端点 URL，供流量统计按出口（CF/Vercel）归账。
+///
+/// 性能专项（方案 A）：优先从待命池 checkout（已预建 WS Upgrade，热态），
+/// 命中则只做首帧声明（1 RTT）即可写 200；池 miss / 池会话死亡（bind 失败）
+/// 回落到冷建连全流程。池命中失败绝不静默回落到错误端点——按 host 优先级取端点。
 async fn establish(
     cfg: &EngineConfig,
     parsed: &ReqHead,
@@ -137,6 +161,20 @@ async fn establish(
     // P2-3：按目标 host 重排端点优先级（Google → Vercel 优先；非 Google → CF 优先），
     // 与 gate-policy 门禁口径一致，避免非 Google 流量被默认 Vercel 优先拖慢、Google 流量先吃 CF denied。
     let urls = order_endpoints(urls, &parsed.host);
+
+    // 方案 A：先取池会话（按 host 重排后的端点优先级），bind 热态首帧。
+    // 池会话死亡（静默关闭）→ bind 失败 → 落到冷建连重试路径，不比无池化更差。
+    if let Some((tx, rx, used_url)) = cfg.pool.checkout(&urls) {
+        match bind_target(tx, rx, parsed).await {
+            Ok(pair) => {
+                log::debug!("tunnel established from pool via {used_url} for {}", parsed.host);
+                return Ok((pair, used_url));
+            }
+            Err(e) => {
+                log::warn!("pooled session bind failed for {} on {used_url}: {e}", parsed.host);
+            }
+        }
+    }
 
     let mut last_err = None;
     let mut saw_401 = false;
@@ -247,6 +285,214 @@ fn order_endpoints<'a>(urls: Vec<&'a str>, host: &str) -> Vec<&'a str> {
         }
     });
     list
+}
+
+/// 待命 WS 会话：已完成 TCP+TLS+WS Upgrade（跨洲 ~4 RTT），尚未发送首帧。
+/// 首帧 `{host,port}` 在 checkout 时才声明目标，协议天然支持预建。
+struct IdleSession {
+    tx: WsTx,
+    rx: WsRx,
+    born: tokio::time::Instant,
+}
+
+/// 待命隧道池（性能专项，方案 A）：CONNECT 到达前按端点预建 WS 会话，
+/// establish 从 ~5 RTT（TCP+TLS+Upgrade+首帧）压到 1 RTT（首帧声明）。
+///
+/// 与 server 端（crates/server connect.rs TunnelPool）对齐，桌面端差异：
+/// - **按端点分组**（HashMap<endpoint, Vec<IdleSession>>）：桌面端按 host 重排端点
+///   （P2-3），checkout 必须按 host 优先级取对应端点，否则 Google 流量可能命中
+///   CF 池、非 Google 命中 Vercel 池，违背端点策略；
+/// - **watch 热更新清池**：tunnel 配置（url/token）变化时清空重建，防旧端点/token
+///   的待命会话被 checkout；
+/// - **Weak 自引用**：maintain 任务不持有强引用，EngineConfig 被 drop（引擎关闭）
+///   后自动退出，不泄漏后台任务。
+pub struct TunnelPool {
+    idle: std::sync::Mutex<std::collections::HashMap<String, Vec<IdleSession>>>,
+    notify: tokio::sync::Notify,
+    /// 每个端点的待命会话数。
+    size: usize,
+    /// tunnel 配置 watch（url/token），maintain 据此预建并监听变化清池。
+    /// 用 tokio::sync::Mutex 包裹：changed() 需要 &mut，且为异步调用。
+    tunnel_watch: tokio::sync::Mutex<watch::Receiver<(Option<String>, Option<String>)>>,
+    /// maintain 幂等启动守卫（start_maintain 只在首次 spawn）。
+    started: std::sync::atomic::AtomicBool,
+}
+
+/// 每个端点的待命会话数（默认双端点 ≈2 条 TCP+TLS 连接，内存/句柄可控）。
+const POOL_SIZE_PER_ENDPOINT: usize = 1;
+/// 待命会话最大存活：CF WS 空闲回收前主动轮换（30s，避免 checkout 到死会话）。
+#[cfg(not(test))]
+const IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+/// 补给巡检间隔。
+#[cfg(not(test))]
+const REFILL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+#[cfg(test)]
+const REFILL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// 建连失败退避（避免 gate 不可达时热循环）。
+#[cfg(not(test))]
+const REFILL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const REFILL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
+
+impl std::fmt::Debug for TunnelPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelPool")
+            .field("size_per_endpoint", &self.size)
+            .finish()
+    }
+}
+
+impl TunnelPool {
+    /// 生产构造：立即在后台预建并维持待命会话。返回 Arc，EngineConfig 持有。
+    pub fn new(tunnel_watch: watch::Receiver<(Option<String>, Option<String>)>) -> Arc<Self> {
+        Self::with_size(tunnel_watch, POOL_SIZE_PER_ENDPOINT)
+    }
+
+    /// 指定每端点池大小；size=0 禁池化（checkout 恒 None，maintain 空转）。
+    /// 不在此 spawn maintain：`with_size` 可能在非 Tokio 上下文被调用（同步测试 / 托盘
+    /// 菜单处理器），tokio::spawn 会 panic "no reactor running"。由 `start_maintain`
+    /// 在异步上下文（engine::run / async 测试）显式启动。
+    pub fn with_size(
+        tunnel_watch: watch::Receiver<(Option<String>, Option<String>)>,
+        size: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            idle: std::sync::Mutex::new(std::collections::HashMap::new()),
+            notify: tokio::sync::Notify::new(),
+            size,
+            tunnel_watch: tokio::sync::Mutex::new(tunnel_watch),
+            started: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// 启动后台补给任务（幂等）。必须从 Tokio 运行时上下文调用：
+    /// engine::run 启动时、或 #[tokio::test] 内。size=0 时无操作。
+    pub fn start_maintain(self: &Arc<Self>) {
+        if self.size == 0 {
+            return;
+        }
+        use std::sync::atomic::Ordering as AOrd;
+        if self.started.swap(true, AOrd::SeqCst) {
+            return; // 已启动
+        }
+        // Weak 自引用：EngineConfig drop 后唯一强引用消失，maintain 退出
+        let weak = Arc::downgrade(self);
+        tokio::spawn(Self::maintain(weak));
+    }
+
+    /// 按 host 端点优先级取一条未过期待命会话；过期会话 drop。返回命中端点的 URL。
+    fn checkout(&self, ordered_urls: &[&str]) -> Option<(WsTx, WsRx, String)> {
+        let mut guard = self.idle.lock().unwrap_or_else(|p| p.into_inner());
+        for u in ordered_urls {
+            if let Some(vec) = guard.get_mut(*u) {
+                while let Some(s) = vec.pop() {
+                    if s.born.elapsed() < IDLE_TTL {
+                        drop(guard);
+                        self.notify.notify_one(); // 唤醒补给立即回填
+                        return Some((s.tx, s.rx, (*u).to_string()));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 当前池内会话总数（测试断言用）。
+    #[cfg(test)]
+    fn idle_total(&self) -> usize {
+        self.idle
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .map(|v| v.len())
+            .sum()
+    }
+
+    /// 后台补给：读 watch → 端点变化清池 → 逐端点补足 → 等待（定时/唤醒/watch 变化）。
+    async fn maintain(weak: std::sync::Weak<Self>) {
+        let Some(pool) = weak.upgrade() else { return };
+        let mut last_key: Option<Vec<String>> = None;
+        loop {
+            // 若持有者（EngineConfig）已 drop，退出后台任务
+            if weak.upgrade().is_none() {
+                return;
+            }
+            let (url_raw, token) = {
+                let rx = pool.tunnel_watch.lock().await;
+                let (u, t) = rx.borrow().clone();
+                (u, t)
+            };
+            match (url_raw, token) {
+                (Some(url_raw), Some(token)) => {
+                    let endpoints: Vec<String> = url_raw
+                        .split([',', ';', '\n'])
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    // 端点集合或顺序变化 → 清池重建（旧端点的待命会话失效）
+                    if last_key.as_ref() != Some(&endpoints) {
+                        pool.idle.lock().unwrap_or_else(|p| p.into_inner()).clear();
+                        last_key = Some(endpoints.clone());
+                    }
+                    // 逐端点补足到 size
+                    let mut healthy = true;
+                    for ep in &endpoints {
+                        let need = {
+                            let g = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
+                            pool.size.saturating_sub(g.get(ep).map(|v| v.len()).unwrap_or(0))
+                        };
+                        for _ in 0..need {
+                            match connect_ws(ep, &token).await {
+                                Ok((tx, rx)) => {
+                                    pool.idle
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner())
+                                        .entry(ep.clone())
+                                        .or_default()
+                                        .push(IdleSession {
+                                            tx,
+                                            rx,
+                                            born: tokio::time::Instant::now(),
+                                        });
+                                }
+                                Err(e) => {
+                                    log::warn!("tunnel pool refill {ep} failed: {e}");
+                                    healthy = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    let wait = if healthy { REFILL_INTERVAL } else { REFILL_BACKOFF };
+                    // watch 配置变化立即醒来清池重建（send 后 changed() 返回）。
+                    // async 块把锁与 changed() 封装在一起：select 取消分支时 guard 随 future 释放。
+                    tokio::select! {
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = pool.notify.notified() => {}
+                        _ = async {
+                            let mut rx = pool.tunnel_watch.lock().await;
+                            let _ = rx.changed().await;
+                        } => {}
+                    }
+                }
+                // 未配置隧道：清池并等待配置出现
+                _ => {
+                    pool.idle.lock().unwrap_or_else(|p| p.into_inner()).clear();
+                    last_key = None;
+                    // sender 全 drop（watch 关闭）→ changed() 立即 Err，退避睡眠避免空转
+                    let closed = {
+                        let mut rx = pool.tunnel_watch.lock().await;
+                        rx.changed().await.is_err()
+                    };
+                    if closed {
+                        tokio::time::sleep(REFILL_BACKOFF).await;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// 站点拨测（仪表盘「链接状态」）：经指定 gate 端点完成 WS 升级 + 首帧 {"host","port"} 握手，
@@ -652,5 +898,162 @@ mod tests {
         let ordered = order_endpoints(urls, "random.host.io");
         assert_eq!(ordered[0], "wss://custom-a.example/ws");
         assert_eq!(ordered[1], "wss://custom-b.example/ws");
+    }
+
+    // ---- 方案 A：待命隧道池 ----
+
+    /// 计数型 fake gate：接受连接数可断言（验证 establish 复用了池会话而非冷建连）。
+    /// 每连接 spawn 独立任务，支持并发：池预建会话等待首帧时仍可接受冷建连。
+    async fn spawn_counting_gate(
+        first_ok: bool,
+        conns: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> std::io::Result<std::net::SocketAddr> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let conns2 = Arc::clone(&conns);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                conns2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    while let Some(Ok(msg)) = ws.next().await {
+                        if let Message::Text(_) = msg {
+                            let reply = if first_ok {
+                                serde_json::json!({ "ok": true }).to_string()
+                            } else {
+                                serde_json::json!({ "ok": false, "reason": "denied" }).to_string()
+                            };
+                            let _ = ws.send(Message::Text(reply)).await;
+                            if first_ok {
+                                while let Some(Ok(msg)) = ws.next().await {
+                                    if let Message::Binary(b) = msg {
+                                        let _ = ws.send(Message::Binary(b)).await;
+                                    } else if msg.is_close() {
+                                        break;
+                                    }
+                                }
+                            }
+                            let _ = ws.close(None).await;
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        Ok(addr)
+    }
+
+    fn cfg_with_pool(urls: String, pool: Arc<TunnelPool>) -> EngineConfig {
+        let (_ttx, trx) = watch::channel((Some(urls), Some("mock-token".into())));
+        EngineConfig { tunnel: trx, pool, ..Default::default() }
+    }
+
+    /// 池应后台预建待命会话（无需任何 CONNECT 流量）。
+    #[tokio::test]
+    async fn tunnel_pool_preconnects_without_traffic() {
+        let conns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let addr = spawn_counting_gate(true, Arc::clone(&conns)).await.unwrap();
+        let urls = format!("ws://{addr}");
+        let (_tx, rx) = watch::channel((Some(urls), Some("mock-token".into())));
+        let pool = TunnelPool::with_size(rx, 1);
+        pool.start_maintain();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.idle_total() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池未在 5s 内预建会话");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(conns.load(std::sync::atomic::Ordering::SeqCst) >= 1, "gate 应收到预建连接");
+    }
+
+    /// checkout 按传入（host 已重排）的端点顺序取池；同端点同序稳定。
+    #[tokio::test]
+    async fn tunnel_pool_checkout_follows_endpoint_order() {
+        let (a_addr, _) = spawn_fake_gate(true).await.unwrap();
+        let (b_addr, _) = spawn_fake_gate(true).await.unwrap();
+        let urls = format!("ws://{a_addr},ws://{b_addr}");
+        let (_tx, rx) = watch::channel((Some(urls.clone()), Some("mock-token".into())));
+        let pool = TunnelPool::with_size(rx, 1);
+        pool.start_maintain();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.idle_total() < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "池未预建双端点会话: {}", pool.idle_total());
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // 传入顺序 [b, a] → 应命中 b 端点
+        let url_a = format!("ws://{a_addr}");
+        let url_b = format!("ws://{b_addr}");
+        let got = pool.checkout(&[url_b.as_str(), url_a.as_str()]);
+        assert!(got.is_some(), "应按序命中端点");
+        let (_, _, used) = got.unwrap();
+        assert_eq!(used, url_b, "checkout 应优先返回传入顺序靠前的端点");
+    }
+
+    /// watch 配置变化 → 清池重建（旧端点待命会话失效）。
+    #[tokio::test]
+    async fn tunnel_pool_clears_and_rebuilds_on_watch_change() {
+        let (a_addr, _) = spawn_fake_gate(true).await.unwrap();
+        let (b_addr, _) = spawn_fake_gate(true).await.unwrap();
+        let (tx, rx) = watch::channel((Some(format!("ws://{a_addr}")), Some("mock-token".into())));
+        let pool = TunnelPool::with_size(rx, 1);
+        pool.start_maintain();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.idle_total() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池未预建");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // 切换端点：a → b
+        tx.send((Some(format!("ws://{b_addr}")), Some("mock-token".into()))).unwrap();
+        let deadline2 = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let got = pool.checkout(&[format!("ws://{b_addr}").as_str()]);
+            if got.is_some() {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline2, "watch 变化后未重建为新端点会话");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// establish 命中池会话（热态）：单连接 fake gate 下冷建连必然超时失败，
+    /// 成功即证明复用池会话（而非新建连接）。
+    #[tokio::test]
+    async fn establish_reuses_pooled_hot_session() {
+        let (addr, _handle) = spawn_fake_gate(true).await.unwrap();
+        let urls = format!("ws://{addr}");
+        let (_tx, rx) = watch::channel((Some(urls.clone()), Some("mock-token".into())));
+        let pool = TunnelPool::with_size(rx, 1);
+        pool.start_maintain();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.idle_total() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池未预建");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let cfg = cfg_with_pool(urls, pool);
+        let parsed = ReqHead { kind: Kind::Connect, host: "oauth2.googleapis.com".into(), port: 443 };
+        let result = establish(&cfg, &parsed).await;
+        // 单连接 gate：冷建连会因无第二次 accept 而 DIAL_TIMEOUT 失败；成功=复用池会话
+        assert!(result.is_ok(), "应经池会话建立（冷建连会超时）: {result:?}");
+    }
+
+    /// 池会话 bind 失败（死会话/denied）→ 回落到冷建连路径，不比其他更差。
+    #[tokio::test]
+    async fn establish_falls_back_when_pooled_session_bind_fails() {
+        // 端点 A：denied（池预建其会话，bind 时被拒）；端点 B：ok
+        let a_addr = spawn_counting_gate(false, Arc::new(std::sync::atomic::AtomicUsize::new(0))).await.unwrap();
+        let b_addr = spawn_counting_gate(true, Arc::new(std::sync::atomic::AtomicUsize::new(0))).await.unwrap();
+        let urls = format!("ws://{a_addr},ws://{b_addr}");
+        let (_tx, rx) = watch::channel((Some(urls.clone()), Some("mock-token".into())));
+        let pool = TunnelPool::with_size(rx, 1);
+        pool.start_maintain();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.idle_total() < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "池未预建双端点: {}", pool.idle_total());
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let cfg = cfg_with_pool(urls, pool);
+        // 非 Google host：按原始顺序 [A, B]，checkout 先取 A（denied）→ 回落冷建连命中 B
+        let parsed = ReqHead { kind: Kind::Connect, host: "www.youtube.com".into(), port: 443 };
+        let result = establish(&cfg, &parsed).await;
+        assert!(result.is_ok(), "池会话 bind 失败应回落并命中次端点: {result:?}");
     }
 }

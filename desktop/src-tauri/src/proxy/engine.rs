@@ -48,6 +48,8 @@ pub struct EngineConfig {
     pub tunnel: watch::Receiver<(Option<String>, Option<String>)>,
     /// 远端上游代理热更新通道（chained 模式；Some 时优先于 WS gate）
     pub upstream: watch::Receiver<Option<Upstream>>,
+    /// 待命隧道池（性能专项）：预建 WS 会话，establish 冷建连压到热态首帧。
+    pub pool: std::sync::Arc<super::engine_tunnel::TunnelPool>,
 }
 
 impl Default for EngineConfig {
@@ -57,12 +59,14 @@ impl Default for EngineConfig {
         let (_mtx, mrx) = watch::channel(pac::ProxyMode::Whitelist);
         let (_ttx, trx) = watch::channel((None, None));
         let (_utx, urx) = watch::channel(None);
+        let (_ptx, prx) = watch::channel((None, None));
         EngineConfig {
             listen_addr: "127.0.0.1:18900".into(),
             whitelist: rx,
             mode: mrx,
             tunnel: trx,
             upstream: urx,
+            pool: super::engine_tunnel::TunnelPool::with_size(prx, 0),
         }
     }
 }
@@ -92,6 +96,8 @@ pub type SharedStats = Arc<EngineStats>;
 
 /// 启动引擎循环（由 tauri setup / 命令调用；返回前先绑定端口）。
 pub async fn run(cfg: EngineConfig, stats: SharedStats) -> std::io::Result<()> {
+    // 方案 A：启动待命隧道池补给（异步上下文，幂等）
+    cfg.pool.start_maintain();
     let listener = TcpListener::bind(&cfg.listen_addr).await?;
     let cfg = Arc::new(cfg);
     loop {

@@ -679,9 +679,13 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
         let rx = ensure_watch().subscribe();
         let rx_mode = ensure_mode_watch().subscribe();
         let rx_tunnel = ensure_tunnel_watch().subscribe();
+        let rx_pool = ensure_tunnel_watch().subscribe();
         let rx_upstream = ensure_upstream_watch().subscribe();
         let stats = get_or_init_engine_stats();
         let rx_clone = rx.clone();
+        // 方案 A：待命隧道池（预建 WS，establish 热态首帧）——池持有独立 tunnel watch，
+        // 端点/token 变化时自动清池重建
+        let pool = proxy::engine_tunnel::TunnelPool::new(rx_pool);
         let handle = tauri::async_runtime::spawn(async move {
             let cfg = proxy::engine::EngineConfig {
                 listen_addr: "127.0.0.1:18900".into(),
@@ -689,6 +693,7 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
                 mode: rx_mode,
                 tunnel: rx_tunnel,
                 upstream: rx_upstream,
+                pool,
             };
             if let Err(e) = proxy::engine::run(cfg, stats).await { log::warn!("proxy engine exited: {e}"); }
         });
