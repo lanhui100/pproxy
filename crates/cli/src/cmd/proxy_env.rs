@@ -341,82 +341,133 @@ pub fn status() -> Result<i32, String> {
     Ok(EXIT_OK)
 }
 
-/// 代理外网连通性探测（Google & GitHub）
-pub fn probe_connectivity(data_plane: &str) -> Vec<(&'static str, Result<(u16, u128), String>)> {
-    let targets = [
-        ("Google", "https://www.google.com/generate_204"),
-        ("GitHub", "https://api.github.com/zen"),
-    ];
+/// 代理外网连通性探测（优先探测已配置路由，附带正向隧道状态探测）
+pub fn probe_connectivity(data_plane: &str) -> Vec<(String, Result<(u16, u128), String>)> {
+    let mut results = Vec::new();
+    let db_path = pproxy_core::store::default_db_path();
 
-    let proxy = match reqwest::Proxy::all(data_plane) {
-        Ok(p) => p,
-        Err(e) => {
-            return targets
-                .iter()
-                .map(|(name, _)| (*name, Err(format!("代理配置无效: {e}"))))
-                .collect();
-        }
-    };
+    // 1. 尝试从本地 Store 获取活跃 Token 和已启用路由进行真实反代测速
+    if let Ok((store, _)) = pproxy_core::Store::open(&db_path) {
+        let active_token = store
+            .list_tokens()
+            .ok()
+            .and_then(|tokens| {
+                tokens
+                    .into_iter()
+                    .find(|t| t.status == "active" && t.name != "__admin__")
+                    .map(|t| t.name)
+            });
 
-    let client = match reqwest::blocking::Client::builder()
-        .proxy(proxy)
-        .timeout(std::time::Duration::from_millis(2500))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            return targets
-                .iter()
-                .map(|(name, _)| (*name, Err(format!("创建探测客户端失败: {e}"))))
-                .collect();
-        }
-    };
+        if let (Some(token_name), Ok(routes)) = (active_token, store.list_routes()) {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_millis(3000))
+                .build()
+                .ok();
 
-    targets
-        .iter()
-        .map(|(name, url)| {
-            let start = std::time::Instant::now();
-            let res = client
-                .get(*url)
-                .header("User-Agent", "pproxy-probe/1.0")
-                .send();
-            match res {
-                Ok(resp) => {
+            if let Some(client) = client {
+                for r in routes.into_iter().filter(|r| r.enabled).take(3) {
+                    let probe_url = format!("{}/{}/{}", data_plane.trim_end_matches('/'), token_name, r.name);
+                    let start = std::time::Instant::now();
+                    let res = client
+                        .get(&probe_url)
+                        .header("User-Agent", "pproxy-probe/1.0")
+                        .send();
                     let elapsed = start.elapsed().as_millis();
-                    (*name, Ok((resp.status().as_u16(), elapsed)))
-                }
-                Err(e) => {
-                    let elapsed = start.elapsed().as_millis();
-                    let err_msg = if e.is_timeout() {
-                        "超时 (Timeout)".to_string()
-                    } else if e.is_connect() {
-                        "无法连接代理端口".to_string()
-                    } else {
-                        format!("连接失败 ({elapsed}ms)")
-                    };
-                    (*name, Err(err_msg))
+                    match res {
+                        Ok(resp) => {
+                            results.push((r.name, Ok((resp.status().as_u16(), elapsed))));
+                        }
+                        Err(e) => {
+                            let err_msg = if e.is_connect() {
+                                "数据面未启动".to_string()
+                            } else if e.is_timeout() {
+                                "上游超时".to_string()
+                            } else {
+                                format!("{e}")
+                            };
+                            results.push((r.name, Err(err_msg)));
+                        }
+                    }
                 }
             }
-        })
-        .collect()
+        }
+    }
+
+    // 2. 若未从路由中探测到任何条目，回落至标准 Google / GitHub 正向代理探测
+    if results.is_empty() {
+        let targets = [
+            ("GitHub", "https://api.github.com/zen"),
+            ("Google", "https://www.google.com/generate_204"),
+        ];
+
+        let proxy = match reqwest::Proxy::all(data_plane) {
+            Ok(p) => p,
+            Err(e) => {
+                return targets
+                    .iter()
+                    .map(|(name, _)| (name.to_string(), Err(format!("代理配置无效: {e}"))))
+                    .collect();
+            }
+        };
+
+        let client = match reqwest::blocking::Client::builder()
+            .proxy(proxy)
+            .timeout(std::time::Duration::from_millis(2500))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return targets
+                    .iter()
+                    .map(|(name, _)| (name.to_string(), Err(format!("创建探测客户端失败: {e}"))))
+                    .collect();
+            }
+        };
+
+        for (name, url) in targets {
+            let start = std::time::Instant::now();
+            let res = client
+                .get(url)
+                .header("User-Agent", "pproxy-probe/1.0")
+                .send();
+            let elapsed = start.elapsed().as_millis();
+            match res {
+                Ok(resp) => {
+                    results.push((name.to_string(), Ok((resp.status().as_u16(), elapsed))));
+                }
+                Err(e) => {
+                    let err_msg = if e.is_timeout() {
+                        "未配置 Gate 隧道出口".to_string()
+                    } else if e.is_connect() {
+                        "无法连接本地代理端口".to_string()
+                    } else {
+                        "连接失败".to_string()
+                    };
+                    results.push((name.to_string(), Err(err_msg)));
+                }
+            }
+        }
+    }
+
+    results
 }
 
 /// 打印代理外网连通性测速卡片
 pub fn print_connectivity_card(data_plane: &str) {
-    eprintln!("┌─ 代理外网连通性测速 (Egress Probe) ────────────────");
+    eprintln!("┌─ 代理上游连通性测速 (Egress Probe) ────────────────");
     let results = probe_connectivity(data_plane);
     for (name, res) in results {
         match res {
             Ok((status, ms)) => {
-                let status_display = if (200..=299).contains(&status) || status == 301 || status == 302 {
+                let status_display = if (200..=299).contains(&status) || status == 301 || status == 302 || status == 404 || status == 421 {
                     format!("\x1b[1;32m✓ {status} OK\x1b[0m")
                 } else {
                     format!("\x1b[1;33m! HTTP {status}\x1b[0m")
                 };
-                eprintln!("│  🌐 {name:<8} {status_display} ({ms} ms)");
+                eprintln!("│  🌐 {name:<10} {status_display} ({ms} ms)");
             }
             Err(err) => {
-                eprintln!("│  🌐 {name:<8} \x1b[1;31m✗ 失败\x1b[0m ({err})");
+                eprintln!("│  🌐 {name:<10} \x1b[1;33m- {err}\x1b[0m");
             }
         }
     }

@@ -765,8 +765,11 @@ mod tests {
 
     // ---- TunnelConfig::from_pool_config_and_env ----
 
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+
     #[test]
     fn from_pool_config_derives_zero_config_tunnel() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
         std::env::remove_var("PPROXY_TUNNEL_TOKEN");
         std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
@@ -788,6 +791,7 @@ mod tests {
 
     #[test]
     fn from_env_reads_and_overrides_pool_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
         std::env::remove_var("PPROXY_TUNNEL_TOKEN");
         std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
