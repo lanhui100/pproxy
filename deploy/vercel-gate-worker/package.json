@@ -2,9 +2,9 @@
   "name": "pony-gate-node",
   "version": "0.1.0",
   "type": "module",
-  "main": "api/index.js",
+  "main": "api/ws.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node standalone-server.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

@@ -40,12 +40,13 @@ function validHost(h) {
 
 export function createGateServer() {
   const server = http.createServer((req, res) => {
-    if (req.url === '/debug') {
+    const parsed = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
+    if (parsed.pathname === '/debug' || parsed.searchParams.has('debug')) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ set: typeof process.env.TUNNEL_TOKEN_HASH === 'string' }))
+      res.end(JSON.stringify({ set: typeof process.env.TUNNEL_TOKEN_HASH === 'string', len: (process.env.TUNNEL_TOKEN_HASH || '').length }))
       return
     }
-    if (req.url === '/' || req.url === '/api/ws') {
+    if (parsed.pathname === '/' || parsed.pathname === '/api/ws' || parsed.pathname === '/ws') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('Pony Gate (Node/Vercel) is running.')
       return
