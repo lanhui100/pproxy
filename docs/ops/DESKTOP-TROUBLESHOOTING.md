@@ -782,7 +782,8 @@ Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution
 - **P2-3 · 端点 host 感知优先级**：`engine_tunnel.rs` 新增 `is_google_host`/`order_endpoints`——Google 系 host（含 agy 域名）→ Vercel 合规出口优先；非 Google → CF 低延迟优先。与 gate-policy 口径一致，消除「全量 Vercel 优先拖慢非 Google 流量」与「Google 先吃 CF denied 往返」两个问题。
 - **P2-4 · 单 CF 端点旧配置迁移**：`migrate_tunnel_url` 对单独 `wss://gate.ponyjob.top/ws` 也自动补齐默认双端点。
 - **P2-5 · 前端站点测速走本地引擎**：新增 `proxy_test_site_local` 命令，`DashboardView` 站点行改为经本地引擎真实分流（命中白名单/全局走隧道、未命中直连），移除站点行的手动 C/V 切换（引擎已按 host 自动选出口）；接口行保留 gate RTT 测速。
-- 回归：gate-policy 51/51、desktop cargo 50/50、Vitest 78/78、vue-tsc 0 错、oxlint 0 警告。
+- **安装体验 · 安装成功自动启动 + 桌面图标**（`desktop/src-tauri/windows/installer-hooks.nsh`）：`NSIS_HOOK_POSTINSTALL` 无条件调用 `CreateOrUpdateDesktopShortcut`（GUI 未勾选/升级残留图标场景下桌面图标始终存在并指向当前版本），非静默安装完成后经 `nsis_tauri_utils::RunAsUser` 自动启动应用（单实例锁防重复；静默/自动更新路径由 tauri updater 自行重启，不在此拉起）。
+- 回归：gate-policy 51/51、desktop cargo 50/50、Vitest 78/78、vue-tsc 0 错、oxlint 0 警告、NSIS installer 编译通过。
 
 
 ---
