@@ -29,8 +29,28 @@ fn get_lock_path_for_port(port: u16) -> PathBuf {
     parent.join(format!("pproxy_{port}.lock"))
 }
 
-pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
-    let addr = listen_addr.unwrap_or("127.0.0.1:8899").to_string();
+/// 自动探测本机在局域网中的真实内网 IP 地址（例如 192.168.x.x）
+pub fn get_local_lan_ip() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").or_else(|_| socket.connect("1.1.1.1:80")).ok()?;
+    Some(socket.local_addr().ok()?.ip())
+}
+
+/// 解析最终监听地址（优先级：显式 --listen > --lan/--port 组合 > 默认 127.0.0.1:8899）
+pub fn resolve_listen_addr(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> String {
+    if let Some(addr) = listen_addr {
+        return addr.to_string();
+    }
+    let port = port.unwrap_or(8899);
+    if lan {
+        format!("0.0.0.0:{port}")
+    } else {
+        format!("127.0.0.1:{port}")
+    }
+}
+
+pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i32, String> {
+    let addr = resolve_listen_addr(listen_addr, lan, port);
 
     let port: u16 = addr
         .split(':')
@@ -58,7 +78,7 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
             eprintln!("\n┌─ [ERROR] 端口 {port} 服务启动冲突 ──────────────────────────");
             eprintln!("│ 无法访问实例锁文件 ({e})：已有 pproxy 实例正在监听端口 {port}。");
             eprintln!("│ ");
-            eprintln!("│ 👉 若需停止后台进程，请在原终端按 Ctrl+C，或运行: pproxy stop (Linux)");
+            eprintln!("│ 👉 若需停止后台进程，请在原终端按 Ctrl+C，或运行: pproxy stop");
             eprintln!("│ 👉 若需启动另一前台实例，请指定新端口: pproxy serve --listen 127.0.0.1:{}", port + 1);
             eprintln!("└─────────────────────────────────────────────────────────────\n");
             return Ok(EXIT_FAILURE);
@@ -69,7 +89,7 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
         eprintln!("\n┌─ [ERROR] 端口 {port} 服务启动冲突 ──────────────────────────");
         eprintln!("│ 无法获取实例锁：已有 pproxy 实例正在监听端口 {port}。");
         eprintln!("│ ");
-        eprintln!("│ 👉 若需停止后台进程，请在原终端按 Ctrl+C，或运行: pproxy stop (Linux)");
+        eprintln!("│ 👉 若需停止后台进程，请在原终端按 Ctrl+C，或运行: pproxy stop");
         eprintln!("│ 👉 若需启动另一前台实例，请指定新端口: pproxy serve --listen 127.0.0.1:{}", port + 1);
         eprintln!("└─────────────────────────────────────────────────────────────\n");
         return Ok(EXIT_FAILURE);
@@ -157,9 +177,17 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
         }
 
         if addr.starts_with("0.0.0.0") {
-            println!("\n⚠ 局域网共享模式已开启：");
-            println!("  同局域网设备可通过 本机IP:{port} 连接代理（如 http://192.168.x.x:{port}）。");
-            println!("  提示: 若局域网无法连接，请放行防火墙 (如: sudo ufw allow {port}/tcp)。");
+            let lan_ip = get_local_lan_ip()
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "本机局域网IP".to_string());
+            println!("\n\x1b[1;33m⚠ 局域网共享模式已开启 (0.0.0.0:{port})：\x1b[0m");
+            println!("  本机访问地址:     http://127.0.0.1:{port}");
+            println!("  局域网设备请连接: \x1b[1;32mhttp://{lan_ip}:{port}\x1b[0m");
+            println!("  手机/平板连接同一 WiFi 后，代理主机填入 {lan_ip}，端口填入 {port} 即可。");
+            println!("  提示: 若手机无法连接，请放行防火墙端口 (如: netsh advfirewall / sudo ufw allow {port}/tcp)。");
+        } else {
+            println!("\n  访问模式: 本机独享 (127.0.0.1:{port})");
+            println!("  提示: 如需供同局域网手机/设备使用，请使用快捷选项: \x1b[1;36mpproxy serve --lan\x1b[0m");
         }
 
         println!("\n✓ 代理服务已就绪！按 Ctrl+C 退出服务。\n");
@@ -213,4 +241,21 @@ mod tests {
         drop(file1);
         assert!(file2.try_lock_exclusive().is_ok());
     }
+
+    #[test]
+    fn test_resolve_listen_addr() {
+        // 默认 127.0.0.1:8899
+        assert_eq!(resolve_listen_addr(None, false, None), "127.0.0.1:8899");
+        // 自定义端口
+        assert_eq!(resolve_listen_addr(None, false, Some(9000)), "127.0.0.1:9000");
+        // 开启局域网共享 --lan
+        assert_eq!(resolve_listen_addr(None, true, None), "0.0.0.0:8899");
+        assert_eq!(resolve_listen_addr(None, true, Some(9000)), "0.0.0.0:9000");
+        // 显式 --listen 优先级最高
+        assert_eq!(
+            resolve_listen_addr(Some("192.168.1.5:8080"), true, Some(9000)),
+            "192.168.1.5:8080"
+        );
+    }
 }
+

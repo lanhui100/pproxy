@@ -40,9 +40,15 @@ struct Cli {
 enum Command {
     /// 独立启动嵌入式网关服务（前台运行）
     Serve {
-        /// 监听地址（默认 127.0.0.1:8899；局域网共享可用 0.0.0.0:8899）
+        /// 自定义监听地址（默认 127.0.0.1:8899）
         #[arg(long)]
         listen: Option<String>,
+        /// 开启局域网共享模式（绑定 0.0.0.0，同局域网手机/设备可直接使用）
+        #[arg(long, short = 'g', alias = "share")]
+        lan: bool,
+        /// 自定义监听端口（默认 8899）
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
     },
     /// 用户管理（Basic Auth 用户名/密码）
     User {
@@ -93,27 +99,35 @@ enum Command {
         #[command(subcommand)]
         cmd: EnvCmd,
     },
+    /// 启动后台网关守护进程（Linux systemd 服务）
     Start,
+    /// 停止运行中的网关服务（终止本地 serve 进程或 systemd 服务）
     Stop,
+    /// 重启后台网关守护进程（Linux systemd 服务）
     Restart,
+    /// 路由转发规则管理（查看/添加/删除上游路由，控制 AI 模型服务分流）
     Route {
         #[command(subcommand)]
         cmd: RouteCmd,
     },
+    /// 访问凭证管理（生成/查看/吊销供客户端调用代理的数据面 Token）
     Token {
         #[command(subcommand)]
         cmd: TokenCmd,
     },
-    /// 用量报表
+    /// 用量报表统计（统计分析近期各路由与令牌的请求次数与流量明细）
     Usage {
+        /// 统计回溯时间窗口（小时，默认 24 小时）
         #[arg(long, default_value_t = 24)]
         hours: u64,
+        /// 仅按指定路由名称过滤
         #[arg(long)]
         route: Option<String>,
+        /// 仅按指定令牌 ID 过滤
         #[arg(long)]
         token_id: Option<i64>,
     },
-    /// 全路由体检
+    /// 网关健康体检（全路由上游探测与出海 WebSocket 隧道打通测试）
     Doctor {
         /// 数据面抽样探测用的明文 token（缺省跳过该环节）
         #[arg(long)]
@@ -122,6 +136,7 @@ enum Command {
         #[arg(long)]
         tunnel_host: Option<String>,
     },
+    /// 配置与客户端集成（导出 Clash/Cursor/Surge 配置、设置出海隧道等）
     Config {
         #[command(subcommand)]
         cmd: ConfigCmd,
@@ -141,6 +156,21 @@ enum Command {
         /// 自定义下载镜像基址
         #[arg(long)]
         mirror: Option<String>,
+    },
+    /// 手机与客户端 Clash Meta 配置生成与扫码导入（一键生成/订阅URL/终端二维码）
+    Clash {
+        /// 覆盖访问令牌（缺省自动使用或创建）
+        #[arg(long)]
+        token: Option<String>,
+        /// 覆盖局域网 IP（缺省自动探测本机局域网 IP）
+        #[arg(long)]
+        lan_ip: Option<String>,
+        /// 覆盖代理端口（默认 8899）
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
+        /// 仅打印订阅 URL 链接
+        #[arg(long)]
+        url_only: bool,
     },
 }
 
@@ -204,40 +234,58 @@ enum EnvCmd {
 
 #[derive(Subcommand)]
 enum RouteCmd {
+    /// 列出所有已配置的路由规则及当前状态与上游
     List,
+    /// 添加一条新的转发路由规则
     Add {
+        /// 路由标识名称（如 openai、claude、gemini 等）
         name: String,
+        /// 目标服务域名（如 api.openai.com、api.anthropic.com）
         target_host: String,
         /// override 上游（worker|vercel|已配置上游名）；缺省自动选择
         #[arg(long)]
         upstream: Option<String>,
     },
+    /// 删除指定的路由规则
     Rm {
+        /// 要删除的路由名称
         name: String,
     },
+    /// 测试路由的连通性与可用性
     Test {
+        /// 要测试的路由名称
         name: Option<String>,
         /// 测全部 enabled 路由（与 <NAME> 二选一）
         #[arg(long)]
         all: bool,
     },
+    /// 启用指定的路由规则
     Enable {
+        /// 待启用的路由名称
         name: String,
     },
+    /// 禁用指定的路由规则（请求将不再转发）
     Disable {
+        /// 待禁用的路由名称
         name: String,
     },
 }
 
 #[derive(Subcommand)]
 enum TokenCmd {
+    /// 创建新的访问令牌（用于客户端请求代理时的身份鉴权）
     Create {
+        /// 令牌名称或备注（如 cursor、phone-clash、alice-dev）
         name: String,
+        /// 令牌有效天数（缺省为永久有效）
         #[arg(long)]
         expires_days: Option<u64>,
     },
+    /// 列出所有已生成的访问令牌及其使用状态
     List,
+    /// 吊销指定的访问令牌（立即切断该令牌的代理权限）
     Revoke {
+        /// 要吊销的令牌 ID（数字）
         id: i64,
     },
 }
@@ -254,6 +302,9 @@ enum ConfigCmd {
         /// 数据面明文 token（缺省自动使用第一个有效 token）
         #[arg(long)]
         token: Option<String>,
+        /// 生成终端二维码并保存本地配置文件（针对 clash）
+        #[arg(long)]
+        qr: bool,
     },
     /// 设置出海隧道 Gate URL 与 Token（持久化至 config.toml 与 .pproxy.env）
     SetTunnel {
@@ -325,8 +376,15 @@ fn run(cli: Cli) -> Result<i32, RunError> {
     }
 
     // 1. serve 独立起服
-    if let Command::Serve { listen } = &cli.command {
-        return cmd::serve::run(listen.as_deref()).map_err(RunError::Msg);
+    if let Command::Serve { listen, lan, port } = &cli.command {
+        return cmd::serve::run(listen.as_deref(), *lan, *port).map_err(RunError::Msg);
+    }
+
+    // 1.1 clash 手机配置生成与扫码导入
+    if let Command::Clash { token, lan_ip, port, url_only } = &cli.command {
+        let cfg = config::load().unwrap_or_default();
+        return cmd::clash::run(&cfg, token.as_deref(), lan_ip.as_deref(), *port, *url_only)
+            .map_err(RunError::Msg);
     }
 
     // 2. user 用户管理
@@ -374,15 +432,12 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         return cmd::deploy::run(t, &cfg).map_err(RunError::Msg);
     }
 
-    // 6. start/stop/restart 纯本机 systemd
-    let action = match &cli.command {
-        Command::Start => Some("start"),
-        Command::Stop => Some("stop"),
-        Command::Restart => Some("restart"),
-        _ => None,
-    };
-    if let Some(action) = action {
-        return cmd::service::systemd_action(action).map_err(RunError::Msg);
+    // 6. start/stop/restart 服务生命周期控制
+    match &cli.command {
+        Command::Start => return cmd::service::start().map_err(RunError::Msg),
+        Command::Stop => return cmd::service::stop().map_err(RunError::Msg),
+        Command::Restart => return cmd::service::restart().map_err(RunError::Msg),
+        _ => {}
     }
 
     // 7. on/off/env 环境代理开关
@@ -460,8 +515,14 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             tunnel_host.as_deref().unwrap_or("oauth2.googleapis.com:443"),
         ),
         Command::Config {
-            cmd: ConfigCmd::Export { service, route, token },
-        } => cmd::export_cmd::run(&cfg, service, route.as_deref(), token.as_deref()),
+            cmd: ConfigCmd::Export { service, route, token, qr },
+        } => {
+            if service.eq_ignore_ascii_case("clash") && *qr {
+                cmd::clash::run(&cfg, token.as_deref(), None, None, false)
+            } else {
+                cmd::export_cmd::run(&cfg, service, route.as_deref(), token.as_deref())
+            }
+        }
         Command::Config {
             cmd: ConfigCmd::SetTunnel { gate_url, token },
         } => {
@@ -503,6 +564,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             return Ok(EXIT_OK);
         }
         Command::Serve { .. }
+        | Command::Clash { .. }
         | Command::User { .. }
         | Command::Sync { .. }
         | Command::Init { .. }

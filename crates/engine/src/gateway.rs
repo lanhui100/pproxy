@@ -41,6 +41,8 @@ pub fn build_data_router(state: GatewayState) -> Router {
     Router::new()
         .route("/", get(info_endpoint))
         .route("/__pproxy_health", get(health_endpoint))
+        .route("/clash", get(clash_profile_handler))
+        .route("/clash.yaml", get(clash_profile_handler))
         .route(
             "/*rest",
             get(forward_handler)
@@ -63,6 +65,84 @@ async fn info_endpoint() -> Response {
         "auth": "Basic Auth (user:pass) or X-Pony-Token",
     }))
     .into_response()
+}
+
+/// Clash Meta 客户端配置订阅端点（供手机直接扫码或通过 URL 订阅导入）。
+async fn clash_profile_handler(headers: HeaderMap) -> Response {
+    let db_path = pproxy_core::store::default_db_path();
+    let parent = db_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let clash_file = parent.join("clash.yaml");
+
+    if let Ok(yaml_bytes) = tokio::fs::read(&clash_file).await {
+        return (
+            StatusCode::OK,
+            [
+                ("content-type", "application/yaml; charset=utf-8"),
+                (
+                    "content-disposition",
+                    "inline; filename=\"clash.yaml\"",
+                ),
+            ],
+            yaml_bytes,
+        )
+            .into_response();
+    }
+
+    // 若本地 clash.yaml 不存在，根据请求 host 动态合成默认配置
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("127.0.0.1:8899");
+    let (ip, port) = host.rsplit_once(':').unwrap_or((host, "8899"));
+
+    let fallback_yaml = format!(
+        r#"# Pony Proxy — Clash Meta 默认配置
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+
+proxies:
+  - name: "Pony-Proxy"
+    type: http
+    server: {ip}
+    port: {port}
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "Pony-Proxy"
+      - DIRECT
+
+rules:
+  - DOMAIN-SUFFIX,openai.com,PROXY
+  - DOMAIN-SUFFIX,chatgpt.com,PROXY
+  - DOMAIN-SUFFIX,oaistatic.com,PROXY
+  - DOMAIN-SUFFIX,oaiusercontent.com,PROXY
+  - DOMAIN-SUFFIX,anthropic.com,PROXY
+  - DOMAIN-SUFFIX,claude.ai,PROXY
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-SUFFIX,googleapis.com,PROXY
+  - DOMAIN-SUFFIX,github.com,PROXY
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+"#
+    );
+
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/yaml; charset=utf-8"),
+            (
+                "content-disposition",
+                "inline; filename=\"clash.yaml\"",
+            ),
+        ],
+        fallback_yaml,
+    )
+        .into_response()
 }
 
 /// 实例握手探活端点（无鉴权，返回唯一 Instance UUID 防假活）。
@@ -90,7 +170,7 @@ pub async fn auth_middleware(
     let path = req.uri().path().to_string();
 
     // 1. 公开端点豁免鉴权
-    if path == "/" || path == "/__pproxy_health" || path.starts_with("/dsk/") {
+    if path == "/" || path == "/__pproxy_health" || path == "/clash" || path == "/clash.yaml" || path.starts_with("/dsk/") {
         return next.run(req).await;
     }
 
