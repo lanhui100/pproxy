@@ -14,7 +14,7 @@ pub fn strip_ansi(s: &str) -> String {
         if c == '\x1b' {
             if let Some(&'[') = chars.peek() {
                 chars.next(); // consume '['
-                while let Some(sc) = chars.next() {
+                for sc in chars.by_ref() {
                     if sc.is_ascii_alphabetic() || sc == 'm' {
                         break;
                     }

@@ -10,7 +10,8 @@ use crate::EXIT_OK;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GITHUB_REPO: &str = "lanhui100/pproxy";
-pub const DEFAULT_CDN_BASE: &str = "https://get.ponyjob.top/dist";
+pub const DEFAULT_GATEWAY_DIST: &str = "https://access.ponyjob.top/dsk";
+pub const DEFAULT_FALLBACK_DIST: &str = "https://dl.ponyjob.top";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GitHubReleaseAsset {
@@ -84,53 +85,65 @@ pub fn detect_target_binary() -> Result<&'static str, String> {
 
 /// 获取远端最新 Release 信息（带双通道探测）
 pub fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHubRelease, String> {
-    let api_url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let resp = client
+    // 1. 优先从官方网关 /dsk/latest.json 获取最新版本清单（免 GitHub 登录与私有权限限制，速度快且稳定）
+    let dist_bases = [
+        std::env::var("PONY_DIST_URL").ok(),
+        Some(DEFAULT_GATEWAY_DIST.to_string()),
+        Some(DEFAULT_FALLBACK_DIST.to_string()),
+    ];
+
+    #[derive(Deserialize)]
+    struct LatestManifest {
+        version: String,
+        #[serde(default)]
+        notes: Option<String>,
+        #[serde(default)]
+        pub_date: Option<String>,
+    }
+
+    for dist_opt in dist_bases.into_iter().flatten() {
+        let manifest_url = format!("{}/latest.json", dist_opt.trim_end_matches('/'));
+        if let Ok(resp) = client
+            .get(&manifest_url)
+            .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
+            .timeout(Duration::from_secs(6))
+            .send()
+        {
+            if resp.status().is_success() {
+                if let Ok(manifest) = resp.json::<LatestManifest>() {
+                    let tag = format!("desktop-v{}", manifest.version);
+                    return Ok(GitHubRelease {
+                        tag_name: tag,
+                        name: Some(format!("Pony Proxy v{}", manifest.version)),
+                        body: manifest.notes,
+                        published_at: manifest.pub_date,
+                        assets: vec![],
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. 备用通道：尝试 GitHub Releases 列表 API（支持读取 GITHUB_TOKEN / PONY_GITHUB_TOKEN）
+    let api_url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=1");
+    let mut req = client
         .get(&api_url)
         .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
         .header("Accept", "application/vnd.github.v3+json")
-        .timeout(Duration::from_secs(8))
-        .send();
+        .timeout(Duration::from_secs(8));
 
-    match resp {
+    if let Ok(token) = std::env::var("PONY_GITHUB_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN")) {
+        if !token.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", token.trim()));
+        }
+    }
+
+    match req.send() {
         Ok(r) if r.status().is_success() => {
-            let body = r.text().map_err(|e| format!("读取 Release 数据失败: {e}"))?;
-            serde_json::from_str::<GitHubRelease>(&body)
-                .map_err(|e| format!("解析 Release 元数据 JSON 失败: {e}"))
+            let list: Vec<GitHubRelease> = r.json().map_err(|e| format!("解析 GitHub Release 列表失败: {e}"))?;
+            list.into_iter().next().ok_or_else(|| "GitHub Release 列表为空".to_string())
         }
-        _ => {
-            // 回退到 CDN version.json 探测
-            let cdn_version_url = format!("{DEFAULT_CDN_BASE}/version.json");
-            let cdn_resp = client
-                .get(&cdn_version_url)
-                .timeout(Duration::from_secs(6))
-                .send()
-                .map_err(|e| format!("检测更新失败: 无法连接 GitHub API 及备用 CDN 源 ({e})"))?;
-
-            if !cdn_resp.status().is_success() {
-                return Err(format!("检测更新失败 (HTTP {})", cdn_resp.status()));
-            }
-
-            #[derive(Deserialize)]
-            struct CdnVersion {
-                version: String,
-                tag: Option<String>,
-                changelog: Option<String>,
-            }
-
-            let cdn_info: CdnVersion = cdn_resp
-                .json()
-                .map_err(|e| format!("解析 CDN 版本信息失败: {e}"))?;
-
-            let tag = cdn_info.tag.unwrap_or_else(|| format!("v{}", cdn_info.version));
-            Ok(GitHubRelease {
-                tag_name: tag,
-                name: Some(format!("Pony Proxy v{}", cdn_info.version)),
-                body: cdn_info.changelog,
-                published_at: None,
-                assets: vec![],
-            })
-        }
+        _ => Err("检测更新失败: 无法连接分发网关及 GitHub 备用源".to_string()),
     }
 }
 
@@ -203,17 +216,28 @@ fn download_binary(
         let base = mirror.trim_end_matches('/');
         candidate_urls.push(format!("{base}/{binary_name}"));
     } else {
-        // 1. 优先 CDN 镜像源
-        candidate_urls.push(format!("{DEFAULT_CDN_BASE}/{binary_name}"));
-        // 2. 备用 GitHub Release 链接
+        if let Ok(dist) = std::env::var("PONY_DIST_URL") {
+            let base = dist.trim_end_matches('/');
+            candidate_urls.push(format!("{base}/{binary_name}"));
+        }
+        // 1. 优先官方网关分发源
+        candidate_urls.push(format!("{DEFAULT_GATEWAY_DIST}/{binary_name}"));
+        // 2. 备用分发源
+        candidate_urls.push(format!("{DEFAULT_FALLBACK_DIST}/{binary_name}"));
+        // 3. 备用 GitHub Release 链接
         candidate_urls.push(format!(
             "https://github.com/{GITHUB_REPO}/releases/download/{target_tag}/{binary_name}"
         ));
-        // 3. 备用 GitHub latest 链接
+        // 4. 备用 GitHub latest 链接
         candidate_urls.push(format!(
             "https://github.com/{GITHUB_REPO}/releases/latest/download/{binary_name}"
         ));
     }
+
+    let auth_token = std::env::var("PONY_GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GITHUB_TOKEN"))
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     let mut last_err = String::new();
     for url in &candidate_urls {
@@ -221,11 +245,18 @@ fn download_binary(
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
 
-        let resp = client
+        let mut req = client
             .get(url)
             .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
-            .timeout(Duration::from_secs(60))
-            .send();
+            .timeout(Duration::from_secs(60));
+
+        if url.contains("github.com") {
+            if let Some(token) = &auth_token {
+                req = req.header("Authorization", format!("Bearer {token}"));
+            }
+        }
+
+        let resp = req.send();
 
         match resp {
             Ok(r) if r.status().is_success() => {
@@ -445,5 +476,33 @@ mod tests {
 
         let updated_data = std::fs::read(&old_exe).unwrap();
         assert_eq!(updated_data, new_bytes);
+    }
+
+    #[test]
+    fn test_gateway_manifest_parse() {
+        let json_data = r#"{
+            "version": "0.3.27",
+            "notes": "Release v0.3.27 notes",
+            "pub_date": "2026-09-02T08:56:21Z",
+            "platforms": {
+                "windows-x86_64": {
+                    "url": "https://access.ponyjob.top/dsk/Pony.Proxy_0.3.27_x64-setup.exe"
+                }
+            }
+        }"#;
+
+        #[derive(Deserialize)]
+        struct Manifest {
+            version: String,
+            notes: Option<String>,
+            pub_date: Option<String>,
+        }
+
+        let parsed: Result<Manifest, _> = serde_json::from_str(json_data);
+        assert!(parsed.is_ok());
+        let m = parsed.unwrap();
+        assert_eq!(m.version, "0.3.27");
+        assert_eq!(m.notes.as_deref(), Some("Release v0.3.27 notes"));
+        assert_eq!(m.pub_date.as_deref(), Some("2026-09-02T08:56:21Z"));
     }
 }

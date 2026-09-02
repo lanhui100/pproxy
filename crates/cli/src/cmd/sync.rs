@@ -48,6 +48,7 @@ fn check_and_record_nonce_at(path: &Path, nonce: &str, exp: u64, now: u64) -> Re
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&lock_path)
         .map_err(|e| format!("打开 Nonce 锁文件失败: {e}"))?;
 
@@ -121,13 +122,13 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     }
 
     let mut inner_hasher = Sha256::new();
-    inner_hasher.update(&i_key_pad);
+    inner_hasher.update(i_key_pad);
     inner_hasher.update(data);
     let inner_hash = inner_hasher.finalize();
 
     let mut outer_hasher = Sha256::new();
-    outer_hasher.update(&o_key_pad);
-    outer_hasher.update(&inner_hash);
+    outer_hasher.update(o_key_pad);
+    outer_hasher.update(inner_hash);
     let mut out = [0u8; 32];
     out.copy_from_slice(&outer_hasher.finalize());
     out

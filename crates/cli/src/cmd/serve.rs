@@ -34,7 +34,7 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
 
     let port: u16 = addr
         .split(':')
-        .last()
+        .next_back()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8899);
 
@@ -48,6 +48,7 @@ pub fn run(listen_addr: Option<&str>) -> Result<i32, String> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(&lock_path);
 
     let lock_file = match open_res {
@@ -191,6 +192,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&lock_path)
             .unwrap();
 
@@ -200,6 +202,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&lock_path)
             .unwrap();
 

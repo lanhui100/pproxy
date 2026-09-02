@@ -29,6 +29,8 @@ import {
   updateAvailable,
   updateVersion,
   updateError,
+  currentVersion,
+  initCurrentVersion,
 } from '@/composables/useUpdater'
 import {
   clearTunnelToken,
@@ -257,6 +259,7 @@ async function handleAutoProxyToggle(val: boolean): Promise<void> {
 }
 
 onMounted(async () => {
+  void initCurrentVersion()
   void refreshTunnel()
   void refreshWhitelist()
   void refreshAutoProxy()
@@ -755,10 +758,15 @@ async function handleCheckUpdate() {
         </div>
 
         <CardHeader class="pb-2">
-          <CardTitle class="text-sm flex items-center gap-2">
-            <Download class="h-4 w-4 text-emerald-600 shrink-0" />
-            软件更新
-          </CardTitle>
+          <div class="flex items-center justify-between">
+            <CardTitle class="text-sm flex items-center gap-2">
+              <Download class="h-4 w-4 text-emerald-600 shrink-0" />
+              软件更新
+            </CardTitle>
+            <span class="text-xs font-mono font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-md">
+              当前版本 v{{ currentVersion }}
+            </span>
+          </div>
           <CardDescription class="text-xs min-h-[2rem] flex items-center">
             <span v-if="downloading" class="text-emerald-600 font-medium">
               新版本安装包下载中 ({{ downloadProgress }}%)…
@@ -774,10 +782,10 @@ async function handleCheckUpdate() {
               检查失败：{{ updateError }}
             </span>
             <span v-else-if="updateAvailable" class="text-emerald-600 font-medium">
-              发现新版本 {{ updateVersion }}，可立即升级
+              发现新版本 v{{ updateVersion }}（当前 v{{ currentVersion }}），可立即升级
             </span>
             <span v-else class="text-muted-foreground">
-              当前已是最新版本，保持最新以获得最佳体验
+              当前已是最新版本 (v{{ currentVersion }})，保持最新以获得最佳体验
             </span>
           </CardDescription>
         </CardHeader>

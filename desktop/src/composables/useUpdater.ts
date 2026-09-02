@@ -11,6 +11,7 @@ import { isTauri } from '@/lib/config'
 
 const ENGINE_PROXY = 'http://127.0.0.1:18900'
 
+export const currentVersion = ref('0.3.27')
 export const checking = ref(false)
 export const updateAvailable = ref(false)
 export const updateVersion = ref('')
@@ -19,6 +20,17 @@ export const updateError = ref('')
 export const downloading = ref(false)
 export const downloadProgress = ref(0) // 0-100；NSIS passive 模式另有系统 UI
 export const downloaded = ref(false) // 下载完成待重启
+
+/** 初始化当前客户端版本号 */
+export async function initCurrentVersion(): Promise<void> {
+  if (!isTauri()) return
+  try {
+    const { getVersion } = await import('@tauri-apps/api/app')
+    currentVersion.value = await getVersion()
+  } catch {
+    // 降级使用静态默认值
+  }
+}
 
 /** 引擎是否在跑：在跑则返回本地代理地址（下载经系统加速通道），否则 null（直连）。 */
 async function engineProxy(): Promise<string | null> {
