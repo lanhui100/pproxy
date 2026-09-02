@@ -16,9 +16,17 @@ header 模式：    http://127.0.0.1:8899/{route}/{path}?{query}  +  Header: X-P
 - 转写为 `上游?url=https://{target_host}/{path}?{query}`，透传 method/body/业务 header
 - 剥离：hop-by-hop + geo 泄露头 + `x-pony-token`（S-P1-1，两种模式都删，防 token 泄露给上游）
 - body 上限 32MB（超限 413）；响应流式透传（SSE 兼容）
-- CONNECT 方法一律 `403 {"error":"connect_forbidden"}` 并关闭连接（P0-1）
 
-### 上游认证
+### 正向出海代理 (CONNECT 隧道)
+```
+CONNECT {host}:443 HTTP/1.1
+Proxy-Authorization: Basic {base64(username:password)} 或 X-Pony-Token: {token}
+```
+- **鉴权**：支持 Basic Auth（users 表校验）与 Token Auth；未鉴权一律返回 `407 Proxy Authentication Required`
+- **安全防爆破**：Gatekeeper 连续失败锁定 IP，返回 `429 Too Many Requests`
+- **Allowlist 策略**：仅放行白名单域名（默认 OpenAI/Anthropic/Google/GitHub 等，支持通配/自定义扩展），未命中返回 `403 Forbidden (no_tunnel_route)`
+- **传输**：通过 `TunnelPool` 待命 WebSocket 连接池向 `gate.ponyjob.top/ws` 发起 1-RTT 隧道绑定，随后进入双向二进制透传
+
 - 网关 → 上游：`X-Proxy-Secret`（服务器内注入，客户端无感）
 
 ### 路由 → 上游映射
@@ -88,7 +96,10 @@ Header: X-Proxy-Secret: <vercel secret>
 | 状态码 | 来源 | 含义 |
 |--------|------|------|
 | 401 unauthorized | 网关 | token 缺失/无效/撤销/过期（同体防枚举） |
-| 403 connect_forbidden | 网关 | CONNECT 隧道被拒（P0-1） |
+| 407 proxy_authentication_required | 正向代理 | CONNECT 隧道缺少或包含错误 Proxy-Authorization / Token |
+| 403 no_tunnel_route | 正向代理 | CONNECT 目标 host 未在 Allowlist 白名单中 |
+| 429 too_many_requests | 门禁 | 暴力破解多次失败触发 Gatekeeper IP 临时封锁 |
+| 502 tunnel_failed | 正向代理 | Gate WebSocket 隧道建连失败 |
 | 404 unknown_route | 网关 | route 名不在表中 |
 | 502 upstream_error | 网关 | 上游未配置或请求失败（日志不含完整 URL） |
 | 413 body_too_large | 网关 | body 超 32MB |

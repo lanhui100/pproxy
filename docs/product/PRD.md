@@ -1,50 +1,50 @@
 # Pony Proxy — PRD
 
-> 版本: v0.1 | 日期: 2026-08-21 | 状态: 已确认
+> 版本: v0.2 | 日期: 2026-09-02 | 状态: 已更新（M6 / 代理优先演进）
 
 ## 1. 定位
 
-自托管的**个人智能代理网关**：让国内设备（PC/手机）无障碍访问海外 API 服务（LLM 优先），用户友好、零信用卡成本、按需代理（不影响国内流量）。
+自托管的**现代开发者出海代理与智能 API 网关**：
+- **第一优先级（正向出海代理）**：为开发者设备（PC / CLI / 移动端）提供低延迟、高可靠的 HTTP/HTTPS 正向出海代理（CONNECT 隧道 + WebSocket 待命连接池），一键环境管理与全平台节点接入。
+- **第二优先级（API 反向代理网关）**：海外 API 服务（LLM 优先）的按需反向代理分发，零配置客户端 SDK，双上游智能路由与用量计量。
 
 ## 2. 用户故事
 
-- 作为用户，我打开 Pony Proxy 面板，一眼看到所有服务路由的健康状态和用量。
-- 作为用户，我一键添加新服务（如 Gemini），系统自动选择上游并生效。
-- 作为用户，我为每台设备生成独立 token；设备丢失时一键撤销。
-- 作为用户，我一键复制某服务的接入配置（base_url + token），粘贴即用。
-- 作为用户，任一上游用量超 80% 时收到告警。
-- 作为用户，我在外网/手机上也能使用和管理（经公网入口）。
+- 作为开发者，我在终端输入 `pproxy on` 即可瞬间让 Git / Cursor / npm / 命令行工具无缝出海，不用时输入 `pproxy off`。
+- 作为开发者，我可以在手机（Wi-Fi 或 Clash Meta / Shadowrocket）上把 `pproxy` 当作 HTTP 代理节点，实现外网访问或规则分流。
+- 作为开发者，我打开 Pony Proxy 桌面端面板，一眼看到出海隧道健康状态、反向路由与用量。
+- 作为开发者，我一键添加新 API 路由（如 Gemini），系统自动选择上游并生效。
+- 作为开发者，我为每台设备生成独立 token / Basic Auth 凭据，设备丢失时一键撤销。
 
 ## 3. 功能需求
 
-### P0 — MVP
+### P0 — 核心功能（已实现）
 | 模块 | 需求 |
 |------|------|
-| 数据面 | token 鉴权（路径 token `/{token}/{route}/...` 为主，`X-Pony-Token` header 为辅）；路由分发（现有 7 服务）；CONNECT 直连兜底 |
-| 管理面 | REST API：token CRUD、路由 CRUD、用量查询、健康检查、告警查询 |
-| 路由白名单 | 内置常用服务模板（OpenAI/Anthropic/Gemini/OpenRouter/Groq/Mistral/xAI/GitHub/HF/zen）；**自动上游选择**（CF 敏感服务 → Vercel，其余 → Worker）+ 手动覆盖；可增删 |
-| CLI | `pony status / start / stop / restart / route / token / usage / doctor / config export` |
-| Windows GUI | Tauri 2 瘦客户端：Dashboard、Routes、Tokens、Usage 图表、Settings |
-| 监控 | per-route/per-token 请求与字节计数 → SQLite（保留 30 天）；每小时轮询 CF/Vercel 官方限额 API；80% 阈值告警（GUI 通知 + webhook 预留） |
+| 正向出海代理 | HTTP/HTTPS CONNECT 隧道；Basic Auth / Token 鉴权；Gatekeeper 防爆破限流；TunnelPool 待命 WS 隧道（1 RTT 冷建连）；Allowlist 域名白名单与通用出海 |
+| 环境代理管理 | CLI `pproxy on / off / status / env (suspend/resume/generate-script)`，跨 Shell (Bash/Zsh/Fish/PowerShell) 自动配置与 K8s 集群地址免代理探测 |
+| 反向 API 网关 | token 鉴权（路径 token `/{token}/{route}/...`为主，`X-Pony-Token`为辅）；多上游路由分发（CF Worker / Vercel）；用量监控与 SQLite 存留 |
+| 桌面端 | Tauri 2 客户端：系统托盘、Proxy 白名单/直连切换、Dashboard、Routes、Tokens、Usage 图表、自更新 |
+| 管理面 API | REST API：token CRUD、user CRUD、路由 CRUD、用量查询、健康检查、实时测速 |
 
-### P1
-- CF Tunnel 公网入口集成（手机/外网接入，域名 `access.ponyjob.top`）
-- 服务模板一键导入库扩充
-- 告警渠道扩展（webhook / 邮件）
+### P1 — 扩展与增强
+- CF Tunnel 公网入口集成（手机/外网公网接入，域名 `access.ponyjob.top`）
+- 通配 / 自定义出海 Allowlist 规则热管理
+- 告警渠道扩展（webhook / 邮件 / 80% 用量阈值告警）
 
-### P2
-- Mobile（Tauri 2 iOS/Android）
-- 自定义上游（用户自有 VPS / HTTP 代理）
-- 多用户支持
+### P2 — 移动端与多节点
+- Mobile 原生 App（Tauri 2 iOS/Android 控制端）
+- 自定义多上游出口与智能多路径测速切换
 
 ## 4. 非目标（明确不做）
 
-- 系统级全局代理 / TUN 设备 / MITM 解密（与上游 `?url=` 转发模式矛盾）
-- 透明接管国内流量（按需代理，零影响国内访问）
-- 多租户/商业化
+- **服务端 MITM 解密**：服务端坚持透明端到端 TLS 转发，绝不窃取或解密客户端 HTTPS 流量。
+- **服务端原生 UDP 隧道**：底层依赖 Cloudflare Edge 运行时环境，仅支持 TCP 协议，不支持原生 UDP 游戏加速。
+- **多租户 / 商业化**：专注个人与小团队极简自托管体验。
 
 ## 5. 关键体验指标
 
-- 新服务从添加到可用：< 1 分钟
-- 新设备接入：复制一行 base_url 即用
-- Dashboard 数据延迟：< 1 小时（限额）/ 实时（请求计数）
+- 正向出海建连延迟：池化命中 < 100ms
+- 环境代理切换：1 键即时生效
+- 新 API 路由生效：< 1 秒
+- 新设备接入：复制一行 proxy_url / base_url 即用

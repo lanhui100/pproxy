@@ -1,56 +1,63 @@
 # 当前系统架构（现状）
 
-> 更新: 2026-08-25 | 状态: 生产运行中（dev 服务器）+ 桌面端 v0.3.5 已发布
+> 更新: 2026-09-02 | 状态: 生产运行中（CLI / dev 服务器 + Windows 桌面端 v0.3.5）
 
 ## 拓扑
 
 ```
-[本机 SDK]
-   │ http://127.0.0.1:8899/{route}/...
-[手机 4G SDK]（M4 公网入口）
-   │ https://access.ponyjob.top/{token}/{route}/...  ← CF 边缘 TLS 终结
-   ▼ CF Tunnel（cloudflared, systemd: pony-tunnel.service，出站 http2，零入站端口）
-   ▼
-pproxy-server (Rust, systemd: pproxy.service)
-   ├─ 数据面 :8899（网关分发）
-   ├─ 管理面 :8900（/stats /refresh）
-   │
-   ├─[Worker 上游]──> https://edge.ponyjob.top/?url=<target>
-   │                    └─ CF Worker: 剥离 geo/hop-by-hop 头 → fetch 目标 → 流式回传
-   │                        覆盖: anthropic / google / github / x / facebook
-   │
-   └─[Vercel 上游]──> https://vedge.ponyjob.top/api/proxy?url=<target>
-                        └─ Vercel Function (Node, maxDuration 300s):
-                            出口 AWS us-east 真实 IP
-                            覆盖: openai / opencode（对 CF 数据中心 IP 敏感的服务）
-
-[Windows 桌面] pony-desktop v0.3.5（M6 白名单代理，独立隧道通道）
-   ├─ 本地引擎 127.0.0.1:18900：白名单命中 → wss 隧道；未命中 → 直连
-   ├─ 自更新: access.ponyjob.top/dsk/latest.json → 网关公开路由 /dsk/*（读本地分发目录）
-   ▼ CF Worker gate（deploy/cf-gate-worker/，gate.ponyjob.top）
-      Bearer tunnel_token 哈希校验 → ACL 443-only → cloudflare:sockets TLS 密文透传出站
+[开发终端 / CLI (pproxy on)]       [手机客户端 (Wi-Fi / Clash Meta)]       [Windows 桌面端 (Tauri 2)]
+         │                                    │                                    │
+         └────────────────────────────────────┼────────────────────────────────────┘
+                                              ▼
+                    ┌──────────────────────────────────────────────────┐
+                    │ pproxy-server / pproxy-engine (127.0.0.1:8899)  │
+                    │ ├─ 鉴权: Basic Auth / Token Auth / Gatekeeper 限流 │
+                    │ ├─ 路由: SQLite 热加载 (state.db) / 用量统计      │
+                    └─────────┬──────────────────────────────┬─────────┘
+                              │ (1. 正向 CONNECT 隧道)        │ (2. 反向 API 网关 /{token}/{route}/*)
+                              ▼                              ▼
+             ┌─────────────────────────────────┐   ┌───────────────────────────────────┐
+             │ TunnelPool 待命 WS 隧道 (1 RTT)  │   │ EdgeClient 协议转发 (?url=...)    │
+             └────────────────┬────────────────┘   └─────────┬─────────────────────────┘
+                              │                              ├─ CF Worker (edge.ponyjob.top)
+                              ▼                              │   (anthropic/google/github/x)
+             ┌─────────────────────────────────┐             └─ Vercel 函数 (vedge.ponyjob.top)
+             │ CF gate-worker (gate.ponyjob.top)│                 (openai/opencode, AWS IP)
+             │ ├─ Token 验签 + 443 ACL 门禁    │
+             │ └─ cloudflare:sockets WS↔TCP透传│
+             └────────────────┬────────────────┘
+                              ▼
+                   [海外目标站点 (TCP:443)]
 ```
 
 ## 数据面协议
 
-1. 客户端请求 `http://127.0.0.1:8899/{route}/{path}?{query}`
-2. server 查路由表 → 目标 `https://{target_host}/{path}?{query}`
-3. 经上游 `?url=` 转发：透传 method/body/业务 header，剥离 hop-by-hop 与 geo 头
-4. 响应流式透传（SSE 兼容，`resp.chunk()` 循环）
-5. CONNECT 请求：池空时直连目标（兜底，当前池已停用）
+### 1. 正向出海代理 (Forward CONNECT Proxy)
+1. 客户端发起 `CONNECT host:443 HTTP/1.1` 请求并携带 `Proxy-Authorization: Basic <base64>` 或 `X-Pony-Token`。
+2. `pproxy-engine` 校验凭据与 Gatekeeper 防爆破门禁；未通过返回 `407 / 429`。
+3. 校验目标 host 命中 Allowlist（默认 AI/开发站点，支持自定义扩展）。
+4. 从 `TunnelPool` 连接池中取出预建的 WebSocket 会话（或新建连），发送首帧 JSON 声明目标。
+5. 返回 `HTTP/1.1 200 Connection Established`，进入高吞吐双向透传（支持 Ping/Pong 保活与半关闭）。
+
+### 2. 反向 API 网关 (Reverse API Gateway)
+1. 客户端请求 `http://127.0.0.1:8899/{token}/{route}/{path}?{query}`。
+2. server 查 SQLite 路由表 $\to$ 目标 `https://{target_host}/{path}?{query}`。
+3. 经上游 `?url=` 转发：透传 method/body/业务 header，剥离 hop-by-hop 与 geo 头。
+4. 响应流式透传（SSE 兼容，`resp.chunk()` 循环）。
 
 ## 关键组件
 
 | 组件 | 位置 | 职责 |
 |------|------|------|
-| EdgeClient | crates/core/src/edge.rs | 上游转发协议（URL 拼装、secret 注入、header 过滤） |
-| 网关分发 | crates/server/src/main.rs | CONNECT/HTTP 分流、路由解析、流式回写 |
-| Pool | crates/core/src/pool.rs | 免费代理池（已停用：countries=[] 时跳过） |
-| CF Worker | deploy/cf-worker/worker.js | 公网出口 1（geo 头剥离防泄露真实 IP） |
-| Vercel 函数 | deploy/vercel/api/proxy.js | 公网出口 2（AWS IP，300s） |
-| gate Worker | deploy/cf-gate-worker/worker.js | 桌面隧道通道（M6）：token 哈希门 + ACL + WS↔TCP 透传，独立于 edge |
-| /dsk 分发 | crates/server/src/dsk.rs | updater 产物公开分发（豁免鉴权，minisign 验签防篡改） |
-| pony-desktop | desktop/（Tauri 2） | 托盘/Proxy 白名单页/本地引擎 18900/自更新（v0.3.5） |
+| pproxy-transport | crates/transport/ | 底层传输抽象（WS 隧道建立、待命池维护、Ping-Pong、双向 relay） |
+| pproxy-engine | crates/engine/ | 嵌入式网关核心引擎（CONNECT 处理、Basic/Token 鉴权、Gatekeeper 门禁、Axum 数据面） |
+| pproxy-core | crates/core/ | SQLite 存储层（tokens/users/routes/usage）、EdgeClient 上游协议 |
+| pproxy-server | crates/server/ | 独立守护进程（网关分发 + 管理面 REST API） |
+| pproxy-cli | crates/cli/ | CLI 客户端（`pproxy on/off/status/env`、token/route 管理） |
+| pony-desktop | desktop/ | Tauri 2 桌面端（系统托盘、代理开关、白名单配置、本地引擎） |
+| gate Worker | deploy/cf-gate-worker/ | 出海正向隧道端点（Token 哈希验签 + ACL + WS↔TCP 密文透传） |
+| edge Worker | deploy/cf-worker/ | 反向网关公网出口 1（CF 边缘，去 IP 标识） |
+| Vercel 函数 | deploy/vercel/ | 反向网关公网出口 2（AWS 出口 IP，规避 CF 敏感服务） |
 
 ## 配置
 
@@ -58,9 +65,9 @@ pproxy-server (Rust, systemd: pproxy.service)
 - `systemd/pproxy.service`：User=dm，Restart=always，RUST_LOG=info
 - 凭据：`.secrets.env`（600），运行时不依赖
 
-## 已知限制
+## 已知限制与运行边界
 
-- 上游为 `?url=` 明文转发模式，无法承载加密 CONNECT 隧道 → 不支持系统级全局代理
-- Vercel Hobby 函数上限 300s（超长 LLM 响应会被掐断）
-- CF Worker 出口被 OpenAI/zen 地区策略拦截（已由 Vercel 上游规避）
-- 国内 DNS 过滤含 "proxy" 的子域名 → 子域命名避开该词（edge/vedge/access）
+- **TCP Only 出口**：基于 WebSocket/Cloudflare Sockets 隧道，仅支持 TCP（HTTPS/HTTP）流量，不支持原生 UDP（如 UDP 游戏）。
+- **Allowlist 策略**：正向代理模式受 Allowlist 控制（默认覆盖 OpenAI/Claude/Google/GitHub 等），需配置通配符 `*` 方可作为全网梯子使用。
+- **Vercel 函数限制**：Hobby 计划单请求上限 300s（超长 LLM 响应会被掐断）。
+
