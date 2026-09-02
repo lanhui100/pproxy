@@ -126,6 +126,22 @@ enum Command {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// 检查并升级 pproxy CLI 至最新版本 (支持 update 别名)
+    #[command(alias = "update")]
+    Upgrade {
+        /// 仅检查最新版本，不执行升级
+        #[arg(long)]
+        check: bool,
+        /// 强制重新下载并覆盖当前版本
+        #[arg(long, short)]
+        force: bool,
+        /// 升级或降级至指定版本 (如 v0.3.26)
+        #[arg(long)]
+        version: Option<String>,
+        /// 自定义下载镜像基址
+        #[arg(long)]
+        mirror: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -302,6 +318,12 @@ impl From<String> for RunError {
 }
 
 fn run(cli: Cli) -> Result<i32, RunError> {
+    // 0. upgrade 自升级命令（无需本地服务端配置）
+    if let Command::Upgrade { check, force, version, mirror } = &cli.command {
+        return cmd::upgrade::run(*check, *force, version.as_deref(), mirror.as_deref())
+            .map_err(RunError::Msg);
+    }
+
     // 1. serve 独立起服
     if let Command::Serve { listen } = &cli.command {
         return cmd::serve::run(listen.as_deref()).map_err(RunError::Msg);
@@ -490,7 +512,8 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         | Command::Restart
         | Command::On { .. }
         | Command::Off { .. }
-        | Command::Env { .. } => {
+        | Command::Env { .. }
+        | Command::Upgrade { .. } => {
             unreachable!("handled above")
         }
     };
