@@ -13,7 +13,7 @@ export default defineConfig({
   },
   // Tauri 端口约定：固定避免 devUrl 漂移；仅监听回环
   server: {
-    port: 5173,
+    port: 5178,
     strictPort: true,
     host: '127.0.0.1',
   },

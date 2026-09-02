@@ -1,0 +1,17 @@
+[package]
+name = "pproxy-transport"
+version = "0.1.0"
+edition = "2021"
+description = "Pony Proxy 纯净网络传输层（WS 隧道、待命连接池、TCP 半关闭透传与智能路由）"
+
+[dependencies]
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -306,8 +306,8 @@ interface SiteRow {
 }
 
 const ifaceRows = ref<IfaceRow[]>([
-  { id: 'cf', name: 'Cloudflare 接口', endpoint: 'gate.ponyjob.top', history: [], testing: false },
-  { id: 'vercel', name: 'Vercel 接口', endpoint: 'vgate.ponyjob.top', history: [], testing: false },
+  { id: 'cf', name: 'C出口', endpoint: '', history: [], testing: false },
+  { id: 'vercel', name: 'V出口', endpoint: '', history: [], testing: false },
 ])
 
 const siteRows = ref<SiteRow[]>([
@@ -1020,9 +1020,8 @@ async function submitImportOrChained() {
           :key="row.id"
           class="flex items-center justify-between gap-3 py-2.5"
         >
-          <div class="flex flex-col min-w-0">
+          <div class="flex items-center min-w-0">
             <div class="text-sm font-medium leading-none truncate">{{ row.name }}</div>
-            <div class="text-xs text-muted-foreground font-mono mt-1 truncate">{{ row.endpoint }}</div>
           </div>
           <div class="flex items-center gap-3 shrink-0">
             <LatencyBars :history="row.history" />

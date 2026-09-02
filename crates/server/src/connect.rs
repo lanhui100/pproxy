@@ -18,31 +18,22 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::SinkExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
+
+pub use pproxy_transport::{WsSink as WsTx, WsStream as WsRx};
+
+use crate::gateway::GatewayState;
+
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
 /// 与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
 const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
 
-
-use futures::stream::{SplitSink, SplitStream};
-use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
-
-use crate::gateway::GatewayState;
-
-/// 首帧等待超时（沿桌面端 10s）。
-const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// 网络类失败重试：总尝试 2 次（首次 + 1 重试）；denied 不重试（spec §3.3）。
 const MAX_ATTEMPTS: u32 = 2;
 const RETRY_DELAY: Duration = Duration::from_millis(400);
-
-type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-type WsTx = SplitSink<WsStream, Message>;
-type WsRx = SplitStream<WsStream>;
 
 /// 默认开箱即用的白名单（覆盖主流 AI 模型 API、OAuth 认证和代码平台）。
 pub const DEFAULT_ALLOWLIST: &[&str] = &[
@@ -257,129 +248,60 @@ enum EstablishError {
 }
 
 /// 待命 WS 会话：已完成 TCP+TLS+WS Upgrade（跨洲 ~4 RTT），尚未发送首帧。
-/// 首帧 `{host,port}` 在 checkout 时才声明目标，协议天然支持预建（两个
-/// gate worker 实现均以首帧为目标声明，upgrade 阶段不携带目标信息）。
-struct IdleSession {
-    tx: WsTx,
-    rx: WsRx,
-    born: tokio::time::Instant,
-}
-
-/// 待命隧道池（性能专项）：CONNECT 到达前预建 WS 会话，establish 从
-/// ~5 RTT（TCP+TLS+Upgrade+首帧，250ms RTT 下 ≈1.25-1.75s，用户感知
-/// 1-2s 的主因）压到 1 RTT（首帧声明 ≈250ms）。
-///
-/// 正确性兜底：待命会话可能已静默死亡（CF 空闲回收/NAT 超时）——checkout
-/// 后 bind 失败按 Network 错误走既有重试路径，第二次尝试全新建连，不会
-/// 比无池化更差。TTL 50s < CF WS 空闲回收窗口，最大限度避免取到死会话。
+/// 待命隧道池：CONNECT 到达前预建 WS 会话，将冷建连 RTT 从 ~5 RTT 压至 1 RTT。
 pub struct TunnelPool {
     cfg: TunnelConfig,
-    idle: std::sync::Mutex<Vec<IdleSession>>,
-    notify: tokio::sync::Notify,
-    size: usize,
+    inner: Arc<pproxy_transport::TunnelPool>,
+    _tx: tokio::sync::watch::Sender<(Option<String>, Option<String>)>,
 }
 
-/// 池化目标待命会话数（每会话约一个 TCP+TLS 连接的内存与文件描述符）。
 const POOL_SIZE: usize = 2;
-/// 待命会话最大存活：CF WS 空闲回收前主动轮换（30s：对抗审核 P1——闲置不
-/// poll 的会话接近 TTL 时大概率已死，缩短 TTL 降低 checkout 到死会话概率）。
-const IDLE_TTL: Duration = Duration::from_secs(30);
-/// 补给巡检间隔。
-const REFILL_INTERVAL: Duration = Duration::from_secs(2);
-/// 建连失败时的退避（避免 gate 不可达时热循环）。
-const REFILL_BACKOFF: Duration = Duration::from_secs(5);
-/// 单次 WS 建连超时（对抗审核 P2：connect_async 无超时，gate 半开时
-/// maintain 会永久卡住、池悄悄停止补给）。
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl TunnelPool {
-    /// 生产构造：立即在后台预建并维持 `POOL_SIZE` 条待命会话。
-    /// 生命周期说明：maintain 任务持有 Arc 自引用，随进程常驻（生产单例语义）。
     pub fn new(cfg: TunnelConfig) -> Arc<Self> {
         Self::with_size(cfg, POOL_SIZE)
     }
 
-    /// 指定池大小构造；size=0 时禁池化（checkout 恒 None），仍 spawn 空转
-    /// 补给任务（size=0 时 need=0，无网络活动，仅每 2s 一次空巡检）。
     pub fn with_size(cfg: TunnelConfig, size: usize) -> Arc<Self> {
-        let pool = Arc::new(Self {
-            cfg,
-            idle: std::sync::Mutex::new(Vec::new()),
-            notify: tokio::sync::Notify::new(),
-            size,
-        });
-        tokio::spawn(Self::maintain(Arc::clone(&pool)));
-        pool
-    }
-
-    /// 禁池化构造（测试用）：checkout 恒 None、无后台任务，行为等同旧路径。
-    #[cfg(test)]
-    pub fn disabled(cfg: TunnelConfig) -> Arc<Self> {
+        let (tx, rx) = tokio::sync::watch::channel((
+            Some(cfg.gate_url.clone()),
+            Some(cfg.token.clone()),
+        ));
+        let inner = pproxy_transport::TunnelPool::with_size(rx, size);
+        inner.start_maintain();
         Arc::new(Self {
             cfg,
-            idle: std::sync::Mutex::new(Vec::new()),
-            notify: tokio::sync::Notify::new(),
-            size: 0,
+            inner,
+            _tx: tx,
         })
     }
 
-    /// 当前待命会话数（测试断言用：避免以 stub accept 计数推断入池时机的竞态）。
     #[cfg(test)]
-    fn idle_len(&self) -> usize {
-        self.idle.lock().unwrap_or_else(|p| p.into_inner()).len()
+    pub fn disabled(cfg: TunnelConfig) -> Arc<Self> {
+        let (tx, rx) = tokio::sync::watch::channel((
+            Some(cfg.gate_url.clone()),
+            Some(cfg.token.clone()),
+        ));
+        let inner = pproxy_transport::TunnelPool::with_size(rx, 0);
+        Arc::new(Self {
+            cfg,
+            inner,
+            _tx: tx,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn idle_len(&self) -> usize {
+        self.inner.idle_total()
     }
 
     pub fn config(&self) -> &TunnelConfig {
         &self.cfg
     }
 
-    /// 取一条未过期待命会话；过期会话 drop（即关闭底层连接）。
-    fn checkout(&self) -> Option<(WsTx, WsRx)> {
-        let mut guard = self.idle.lock().unwrap_or_else(|p| p.into_inner());
-        while let Some(s) = guard.pop() {
-            if s.born.elapsed() < IDLE_TTL {
-                drop(guard);
-                // 唤醒补给任务立即回填
-                self.notify.notify_one();
-                return Some((s.tx, s.rx));
-            }
-        }
-        None
-    }
-
-    /// 后台补给：清过期 → 补足到 size → 睡眠/等待唤醒；失败退避。
-    async fn maintain(pool: Arc<Self>) {
-        loop {
-            {
-                let mut guard = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
-                guard.retain(|s| s.born.elapsed() < IDLE_TTL);
-            }
-            let need = pool
-                .size
-                .saturating_sub(pool.idle.lock().unwrap_or_else(|p| p.into_inner()).len());
-            let mut healthy = true;
-            for _ in 0..need {
-                match connect_ws(&pool.cfg).await {
-                    Ok((tx, rx)) => {
-                        pool.idle.lock().unwrap_or_else(|p| p.into_inner()).push(IdleSession {
-                            tx,
-                            rx,
-                            born: tokio::time::Instant::now(),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "tunnel pool refill failed");
-                        healthy = false;
-                        break;
-                    }
-                }
-            }
-            let wait = if healthy { REFILL_INTERVAL } else { REFILL_BACKOFF };
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => {}
-                _ = pool.notify.notified() => {}
-            }
-        }
+    pub fn checkout(&self) -> Option<(WsTx, WsRx)> {
+        let endpoints: Vec<&str> = self.cfg.gate_url.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        self.inner.checkout(&endpoints).map(|(tx, rx, _)| (tx, rx))
     }
 }
 
@@ -512,137 +434,44 @@ async fn connect_ws(cfg: &TunnelConfig) -> Result<(WsTx, WsRx), EstablishError> 
 
     let mut last_err = None;
     for endpoint in endpoints {
-        let req_result = endpoint.into_client_request();
-        let mut req = match req_result {
-            Ok(r) => r,
+        match pproxy_transport::connect_ws(endpoint, &cfg.token).await {
+            Ok(pair) => return Ok(pair),
             Err(e) => {
-                last_err = Some(EstablishError::Network(format!("bad gate url '{endpoint}': {e}")));
-                continue;
-            }
-        };
-        if let Ok(val) = WsHeaderValue::from_str(&format!("Bearer {}", cfg.token)) {
-            req.headers_mut().insert("authorization", val);
-        }
-
-        match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(req)).await {
-            Ok(Ok((ws, _resp))) => {
-                return Ok(ws.split());
-            }
-            Ok(Err(e)) => {
-                last_err = Some(EstablishError::Network(format!("{endpoint}: {e}")));
-            }
-            Err(_) => {
-                last_err = Some(EstablishError::Network(format!("{endpoint}: timeout")));
+                last_err = Some(e);
             }
         }
     }
 
-    Err(last_err.unwrap_or_else(|| EstablishError::Network("no valid gate endpoints configured".into())))
+    Err(EstablishError::Network(
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no valid gate endpoints configured".into()),
+    ))
 }
 
 /// 在已建立的 WS 上声明目标（Text 首帧 `{host,port}` → 等 `{"ok":true}`）。
 /// 池化会话与新建会话共用此绑定步骤。
-async fn bind_target(mut tx: WsTx, mut rx: WsRx, host: &str, port: u16) -> Result<(WsTx, WsRx), EstablishError> {
-    let first = serde_json::json!({ "host": host, "port": port }).to_string();
-    tx.send(Message::Text(first))
+async fn bind_target(tx: WsTx, rx: WsRx, host: &str, port: u16) -> Result<(WsTx, WsRx), EstablishError> {
+    pproxy_transport::bind_target(tx, rx, host, port)
         .await
-        .map_err(|e| EstablishError::Network(e.to_string()))?;
-
-    let deadline = tokio::time::Instant::now() + FIRST_FRAME_TIMEOUT;
-    loop {
-        let msg = tokio::time::timeout_at(deadline, rx.next())
-            .await
-            .map_err(|_| EstablishError::Network("first-frame timeout".into()))?
-            .ok_or_else(|| EstablishError::Network("closed before ok".into()))?
-            .map_err(|e| EstablishError::Network(e.to_string()))?;
-        match msg {
-            Message::Text(t) => {
-                let v: serde_json::Value = serde_json::from_str(&t)
-                    .map_err(|_| EstablishError::Network("bad first-frame json".into()))?;
-                if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-                    return Ok((tx, rx));
-                }
-                return Err(EstablishError::Denied(
-                    v.get("reason").and_then(|r| r.as_str()).unwrap_or("?").into(),
-                ));
+        .map_err(|e| {
+            let s = e.to_string();
+            if s.contains("denied:") {
+                EstablishError::Denied(s.trim_start_matches("denied:").trim().into())
+            } else {
+                EstablishError::Network(s)
             }
-            Message::Ping(p) => tx
-                .send(Message::Pong(p))
-                .await
-                .map_err(|e| EstablishError::Network(e.to_string()))?,
-            Message::Close(c) => return Err(EstablishError::Network(format!("closed: {c:?}"))),
-            _ => {}
-        }
-    }
+        })
 }
 
-
-/// 双向透传（行为沿桌面端 relay，泛化 IO）：客户端读 ↔ WS 读 select 驱动，
-/// 应答 WS Ping/Pong（CF 空闲判定不误杀）；任一端关闭即结束。
-async fn relay<S>(client: S, leftover: Vec<u8>, mut ws_tx: WsTx, mut ws_rx: WsRx)
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
-{
-    let (mut cr, mut cw) = tokio::io::split(client);
-    let mut buf = vec![0u8; 8192];
-    tracing::debug!("relay: starting bidirectional relay");
-
-    // 优先将握手前随包到达的管道化数据（如 TLS ClientHello 前缀）送入 WS
-    if !leftover.is_empty() {
-        tracing::debug!("relay: sending {} leftover bytes to ws", leftover.len());
-        if ws_tx.send(Message::Binary(leftover)).await.is_err() {
-            tracing::debug!("relay: ws send error for leftover");
-            let _ = cw.shutdown().await;
-            return;
-        }
+/// 双向透传：支持 WS Ping/Pong 保活和 TCP 半关闭。
+async fn relay(mut client: TcpStream, leftover: Vec<u8>, mut ws_tx: WsTx, ws_rx: WsRx) {
+    if !leftover.is_empty() && ws_tx.send(Message::Binary(leftover)).await.is_err() {
+        let _ = client.shutdown().await;
+        return;
     }
 
-    loop {
-        tokio::select! {
-            n = cr.read(&mut buf) => match n {
-                Ok(0) => {
-                    tracing::debug!("relay: client closed");
-                    break;
-                }
-                Err(e) => {
-                    tracing::debug!("relay: client read error: {e}");
-                    break;
-                }
-                Ok(n) => {
-                    tracing::debug!("relay: client -> ws {} bytes", n);
-                    if ws_tx.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
-                        tracing::debug!("relay: ws send error");
-                        break;
-                    }
-                    tracing::trace!("relay: client -> ws ok");
-                }
-            },
-            msg = ws_rx.next() => match msg {
-                Some(Ok(Message::Binary(b))) => {
-                    tracing::debug!("relay: ws -> client {} bytes", b.len());
-                    if cw.write_all(&b).await.is_err() {
-                        tracing::debug!("relay: client write error");
-                        break;
-                    }
-                    tracing::trace!("relay: ws -> client ok");
-                }
-                Some(Ok(Message::Ping(p))) => {
-                    let _ = ws_tx.send(Message::Pong(p)).await;
-                }
-                Some(Ok(Message::Close(_))) | None => {
-                    tracing::debug!("relay: ws closed");
-                    break;
-                }
-                Some(Err(e)) => {
-                    tracing::debug!("relay: ws error: {e}");
-                    break;
-                }
-                _ => {}
-            },
-        }
-    }
-    tracing::debug!("relay: done");
-    let _ = cw.shutdown().await;
+    let _ = pproxy_transport::relay_bidir_ws(client, ws_tx, ws_rx, pproxy_transport::Egress::Cf, &()).await;
 }
 
 
@@ -652,9 +481,11 @@ where
 mod tests {
     use std::sync::Arc;
     use super::*;
+    use futures::StreamExt;
     use pproxy_core::{Store, TokenService, UsageTracker};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
+    use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
 
     // ---- allowlist_match ----

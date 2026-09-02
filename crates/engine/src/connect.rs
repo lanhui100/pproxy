@@ -10,34 +10,24 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::stream::{SplitSink, SplitStream};
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use pproxy_core::gatekeeper::AuthGatekeeper;
 use pproxy_core::token::TokenService;
 use pproxy_core::user::UserService;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue as WsHeaderValue;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+
+pub use pproxy_transport::{WsSink as WsTx, WsStream as WsRx};
 
 use crate::auth::parse_basic_auth;
 
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws。
 const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
 
-/// 单次 WS 建连超时。
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// 首帧等待超时。
-const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// 网络类失败重试：总尝试 2 次。
 const MAX_ATTEMPTS: u32 = 2;
 const RETRY_DELAY: Duration = Duration::from_millis(400);
-
-type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-type WsTx = SplitSink<WsStream, Message>;
-type WsRx = SplitStream<WsStream>;
 
 /// 默认开箱即用的白名单（覆盖主流 AI 模型 API、OAuth 认证和代码平台）。
 pub const DEFAULT_ALLOWLIST: &[&str] = &[
@@ -122,25 +112,14 @@ impl TunnelConfig {
     }
 }
 
-/// 待命 WS 会话。
-struct IdleSession {
-    tx: WsTx,
-    rx: WsRx,
-    born: tokio::time::Instant,
-}
-
 /// 待命隧道池：CONNECT 到达前预建 WS 会话，将冷建连 RTT 从 ~5 RTT 压至 1 RTT。
 pub struct TunnelPool {
     cfg: TunnelConfig,
-    idle: std::sync::Mutex<Vec<IdleSession>>,
-    notify: tokio::sync::Notify,
-    size: usize,
+    inner: Arc<pproxy_transport::TunnelPool>,
+    _tx: tokio::sync::watch::Sender<(Option<String>, Option<String>)>,
 }
 
 const POOL_SIZE: usize = 2;
-const IDLE_TTL: Duration = Duration::from_secs(30);
-const REFILL_INTERVAL: Duration = Duration::from_secs(2);
-const REFILL_BACKOFF: Duration = Duration::from_secs(5);
 
 impl TunnelPool {
     pub fn new(cfg: TunnelConfig) -> Arc<Self> {
@@ -148,29 +127,36 @@ impl TunnelPool {
     }
 
     pub fn with_size(cfg: TunnelConfig, size: usize) -> Arc<Self> {
-        let pool = Arc::new(Self {
+        let (tx, rx) = tokio::sync::watch::channel((
+            Some(cfg.gate_url.clone()),
+            Some(cfg.token.clone()),
+        ));
+        let inner = pproxy_transport::TunnelPool::with_size(rx, size);
+        inner.start_maintain();
+        Arc::new(Self {
             cfg,
-            idle: std::sync::Mutex::new(Vec::new()),
-            notify: tokio::sync::Notify::new(),
-            size,
-        });
-        tokio::spawn(Self::maintain(Arc::clone(&pool)));
-        pool
+            inner,
+            _tx: tx,
+        })
     }
 
     #[cfg(test)]
     pub fn disabled(cfg: TunnelConfig) -> Arc<Self> {
+        let (tx, rx) = tokio::sync::watch::channel((
+            Some(cfg.gate_url.clone()),
+            Some(cfg.token.clone()),
+        ));
+        let inner = pproxy_transport::TunnelPool::with_size(rx, 0);
         Arc::new(Self {
             cfg,
-            idle: std::sync::Mutex::new(Vec::new()),
-            notify: tokio::sync::Notify::new(),
-            size: 0,
+            inner,
+            _tx: tx,
         })
     }
 
     #[cfg(test)]
     pub fn idle_len(&self) -> usize {
-        self.idle.lock().unwrap_or_else(|p| p.into_inner()).len()
+        self.inner.idle_total()
     }
 
     pub fn config(&self) -> &TunnelConfig {
@@ -178,49 +164,8 @@ impl TunnelPool {
     }
 
     pub fn checkout(&self) -> Option<(WsTx, WsRx)> {
-        let mut guard = self.idle.lock().unwrap_or_else(|p| p.into_inner());
-        while let Some(s) = guard.pop() {
-            if s.born.elapsed() < IDLE_TTL {
-                drop(guard);
-                self.notify.notify_one();
-                return Some((s.tx, s.rx));
-            }
-        }
-        None
-    }
-
-    async fn maintain(pool: Arc<Self>) {
-        loop {
-            {
-                let mut guard = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
-                guard.retain(|s| s.born.elapsed() < IDLE_TTL);
-            }
-            let need = pool
-                .size
-                .saturating_sub(pool.idle.lock().unwrap_or_else(|p| p.into_inner()).len());
-            let mut healthy = true;
-            for _ in 0..need {
-                match connect_ws(&pool.cfg).await {
-                    Ok((tx, rx)) => {
-                        pool.idle.lock().unwrap_or_else(|p| p.into_inner()).push(IdleSession {
-                            tx,
-                            rx,
-                            born: tokio::time::Instant::now(),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "tunnel pool refill failed");
-                        healthy = false;
-                        break;
-                    }
-                }
-            }
-            let wait = if healthy { REFILL_INTERVAL } else { REFILL_BACKOFF };
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => {}
-                _ = pool.notify.notified() => {}
-            }
-        }
+        let endpoints: Vec<&str> = self.cfg.gate_url.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        self.inner.checkout(&endpoints).map(|(tx, rx, _)| (tx, rx))
     }
 }
 
@@ -457,78 +402,38 @@ pub async fn connect_ws(cfg: &TunnelConfig) -> Result<(WsTx, WsRx), EstablishErr
 
     let mut last_err = None;
     for endpoint in endpoints {
-        let req_result = endpoint.into_client_request();
-        let mut req = match req_result {
-            Ok(r) => r,
+        match pproxy_transport::connect_ws(endpoint, &cfg.token).await {
+            Ok(pair) => return Ok(pair),
             Err(e) => {
-                last_err = Some(EstablishError::Handshake(format!("bad gate url '{endpoint}': {e}")));
-                continue;
-            }
-        };
-
-        if let Ok(val) = WsHeaderValue::from_str(&format!("Bearer {}", cfg.token)) {
-            req.headers_mut().insert("authorization", val);
-        }
-
-        match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(req)).await {
-            Ok(Ok((ws_stream, _))) => {
-                return Ok(ws_stream.split());
-            }
-            Ok(Err(e)) => {
-                last_err = Some(EstablishError::Network(format!("{endpoint}: {e}")));
-            }
-            Err(_) => {
-                last_err = Some(EstablishError::Network(format!("{endpoint}: ws connect timeout")));
+                last_err = Some(e);
             }
         }
     }
 
-    Err(last_err.unwrap_or_else(|| EstablishError::Network("no valid gate endpoints configured".into())))
+    Err(EstablishError::Network(
+        last_err
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no valid gate endpoints configured".into()),
+    ))
 }
 
 /// 在已建立的 WS 会话上声明目标（首帧 Text JSON {"host":..., "port":...} → 等 {"ok":true}）。
 pub async fn bind_target(
-    mut tx: WsTx,
-    mut rx: WsRx,
+    tx: WsTx,
+    rx: WsRx,
     host: &str,
     port: u16,
 ) -> Result<(WsTx, WsRx), EstablishError> {
-    let first = serde_json::json!({ "host": host, "port": port }).to_string();
-    tx.send(Message::Text(first))
+    pproxy_transport::bind_target(tx, rx, host, port)
         .await
-        .map_err(|e| EstablishError::Network(e.to_string()))?;
-
-    let deadline = tokio::time::Instant::now() + FIRST_FRAME_TIMEOUT;
-    loop {
-        let msg = tokio::time::timeout_at(deadline, rx.next())
-            .await
-            .map_err(|_| EstablishError::Network("first-frame timeout".into()))?
-            .ok_or_else(|| EstablishError::Network("closed before ok".into()))?
-            .map_err(|e| EstablishError::Network(e.to_string()))?;
-
-        match msg {
-            Message::Text(t) => {
-                let v: serde_json::Value = serde_json::from_str(&t)
-                    .map_err(|_| EstablishError::Network("bad first-frame json".into()))?;
-                if v.get("ok").and_then(|b| b.as_bool()) == Some(true) {
-                    return Ok((tx, rx));
-                }
-                let reason = v
-                    .get("reason")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("denied")
-                    .to_string();
-                return Err(EstablishError::Denied(reason));
+        .map_err(|e| {
+            let s = e.to_string();
+            if s.contains("denied:") {
+                EstablishError::Denied(s.trim_start_matches("denied:").trim().into())
+            } else {
+                EstablishError::Network(s)
             }
-            Message::Ping(p) => {
-                tx.send(Message::Pong(p))
-                    .await
-                    .map_err(|e| EstablishError::Network(e.to_string()))?;
-            }
-            Message::Close(c) => return Err(EstablishError::Network(format!("closed: {c:?}"))),
-            _ => {}
-        }
-    }
+        })
 }
 
 /// 全新建连：connect_ws + bind_target。
@@ -541,55 +446,25 @@ pub async fn establish(
     bind_target(tx, rx, host, port).await
 }
 
-/// 双向中继：单循环 tokio::select! 保证任意一端断开立即整体释放，支持 WebSocket Ping/Pong 保活。
+/// 双向中继：支持 WebSocket Ping/Pong 保活和 TCP 半关闭。
 async fn relay(
     mut tcp: TcpStream,
     leftover: Vec<u8>,
     mut ws_tx: WsTx,
-    mut ws_rx: WsRx,
+    ws_rx: WsRx,
 ) {
-    let (mut tcp_rx, mut tcp_tx) = tcp.split();
-    let mut buf = vec![0u8; 16384];
-
-    if !leftover.is_empty() {
-        if ws_tx.send(Message::Binary(leftover)).await.is_err() {
-            let _ = tcp_tx.shutdown().await;
-            return;
-        }
+    if !leftover.is_empty() && ws_tx.send(Message::Binary(leftover)).await.is_err() {
+        let _ = tcp.shutdown().await;
+        return;
     }
 
-    loop {
-        tokio::select! {
-            n = tcp_rx.read(&mut buf) => match n {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if ws_tx.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
-                        break;
-                    }
-                }
-            },
-            msg = ws_rx.next() => match msg {
-                Some(Ok(Message::Binary(bin))) => {
-                    if tcp_tx.write_all(&bin).await.is_err() {
-                        break;
-                    }
-                }
-                Some(Ok(Message::Ping(p))) => {
-                    let _ = ws_tx.send(Message::Pong(p)).await;
-                }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                _ => {}
-            }
-        }
-    }
-
-    let _ = tcp_tx.shutdown().await;
-    let _ = ws_tx.close().await;
+    let _ = pproxy_transport::relay_bidir_ws(tcp, ws_tx, ws_rx, pproxy_transport::Egress::Cf, &()).await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
 

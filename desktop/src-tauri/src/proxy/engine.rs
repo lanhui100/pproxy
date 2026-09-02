@@ -92,6 +92,24 @@ pub struct EngineStats {
     pub last_error: std::sync::Mutex<Option<String>>,
 }
 
+impl pproxy_transport::TrafficCounter for EngineStats {
+    fn record_up(&self, egress: pproxy_transport::Egress, bytes: u64) {
+        match egress {
+            pproxy_transport::Egress::Cf => &self.cf_up,
+            pproxy_transport::Egress::Vercel => &self.vercel_up,
+        }
+        .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn record_down(&self, egress: pproxy_transport::Egress, bytes: u64) {
+        match egress {
+            pproxy_transport::Egress::Cf => &self.cf_down,
+            pproxy_transport::Egress::Vercel => &self.vercel_down,
+        }
+        .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub type SharedStats = Arc<EngineStats>;
 
 /// 启动引擎循环（由 tauri setup / 命令调用；返回前先绑定端口）。

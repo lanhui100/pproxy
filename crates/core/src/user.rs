@@ -30,7 +30,7 @@ fn compute_iterated_hash(salt: &str, password: &str) -> String {
     let mut current = Sha256::digest(format!("{salt}:{password}").as_bytes());
     for _ in 1..HASH_ITERATIONS {
         let mut hasher = Sha256::new();
-        hasher.update(&current);
+        hasher.update(current);
         hasher.update(salt.as_bytes());
         hasher.update(password.as_bytes());
         current = hasher.finalize();

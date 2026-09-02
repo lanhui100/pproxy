@@ -1305,17 +1305,18 @@ fn proxy_auto_config_get() -> serde_json::Value { std::fs::read_to_string(app_co
 fn proxy_auto_config_set(patch: serde_json::Value) -> Result<(), String> { app_config_set(patch) }
 #[tauri::command]
 fn app_config_get() -> serde_json::Value { proxy_auto_config_get() }
+static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[tauri::command]
 fn app_config_set(patch: serde_json::Value) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let dir = data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut cur = proxy_auto_config_get();
     if let (Some(map_cur), Some(map_patch)) = (cur.as_object_mut(), patch.as_object()) {
         for (k,v) in map_patch { map_cur.insert(k.clone(), v.clone()); }
     } else { cur = patch; }
-    let tmp = dir.join("app_config.json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&cur).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, app_config_path()).map_err(|e| e.to_string())?;
+    std::fs::write(app_config_path(), serde_json::to_string_pretty(&cur).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     Ok(())
 }
 #[tauri::command]

@@ -817,3 +817,23 @@ keyring 3.6.3 一律按 **UTF-16** 解码凭据 blob（其 `set_password` 亦按
 4. `proxy_tunnel_get` 暴露 `cred_error` 与 token 指纹，`tunnel_self_check` 一键逐 gate 自检；
 5. **运维纪律**：写入 `tunnel_token.pony-desktop` 凭据必须通过桌面端（设置页/同步口令/连接口令）
    或 keyring 兼容工具（UTF-16 blob），严禁以 UTF-8 字节直接 CredWrite。
+
+---
+
+## 待命隧道池（方案 A）对抗审核与调优闭环 · 2026-09-02
+
+**背景**：
+在完成方案 A（待命隧道池 TunnelPool）初版实现后，经由 Agent Team（并发与内存安全审查员、协议与边界容错审查员）开展深度对抗审查，识别出 6 项高危/中危边界缺陷并全量加固。
+
+**发现与闭环清单**：
+1. **空闲过期未清理（假池化、真冷建）**：初版 `maintain` 缺 `vec.retain(|s| s.born.elapsed() < IDLE_TTL)`，空闲超过 30s 后池内遗留死连接，新请求 `checkout` 100% 发生 miss 并退化为冷建连。修复：`maintain` 循环头主动剔除过期会话并补齐。
+2. **Weak 引用失效导致任务永久泄漏**：初版 `maintain` 一进函数将 Weak 升级为局部 `Arc<TunnelPool>` 并贯穿全局，导致强引用永不归零。修复：将强引用严格约束在每次 loop 内部，宿主 drop 后后台任务在下个周期醒来干净退出。
+3. **Token 轮换不清池**：初版 `last_key` 仅比对端点 URL 列表。Token 变化时未清池，导致池中残留旧凭据死连接。修复：扩展为比对 `(endpoints, token)` 元组。
+4. **401 自愈冷却锁无条件提前置位**：初版进入 `saw_401` 即刷新时间戳，导致用户随后重新粘贴新口令后 30s 内仍被拦截。修复：仅在成功读出新 Token 并广播 watch 后才置位冷却时间戳。
+5. **WS 隧道缺少半关闭状态机**：客户端发完 Body 发送 EOF 时直接 break 退出，强行掐断下行 Response 导致连接重置。修复：重构 `relay` 引入 `client_done` 守卫，支持 TCP 半关闭。
+6. **路由与超时调优**：`is_google_or_ai_host` 扩展支持 Google 全球国别域及受限 AI 域名（OpenAI/Anthropic）直连 Vercel 美区出口；生产超时预算收敛为拨号 4s、首帧绑定 3.5s；单端点待命池容量调整为 2（双端点共 4 条连接），平滑 5 站并发测速。
+
+**验证结果**：
+- 新增针对性单测：`tunnel_pool_refills_expired_sessions_automatically` 与 `tunnel_pool_maintain_exits_when_owner_dropped`；
+- 全量单元与集成测试：`cargo test --lib` **57/57 通过**；
+- 静态质量检查：`cargo clippy --all-targets` **0 警告**。

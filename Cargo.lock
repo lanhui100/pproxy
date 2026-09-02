@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "pproxy-cli"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "anyhow",
  "base64",
@@ -1140,6 +1140,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "pproxy-core",
+ "pproxy-transport",
  "rand 0.8.7",
  "reqwest",
  "rustls",
@@ -1163,6 +1164,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "pproxy-core",
+ "pproxy-transport",
  "reqwest",
  "rustls",
  "serde",
@@ -1172,6 +1174,20 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "pproxy-transport"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
 ]
 
 [[package]]

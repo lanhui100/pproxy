@@ -1,6 +1,6 @@
 [package]
 name = "pony-desktop"
-version = "0.3.26"
+version = "0.3.27"
 description = "pony proxy 桌面管理端"
 authors = ["dm"]
 license = ""
@@ -32,8 +32,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 url = "2"
-pproxy-core = { path = "../../crates/core" }
-pproxy-engine = { path = "../../crates/engine" }
+pproxy-transport = { path = "../../crates/transport" }
 rand = "0.8"
 hex = "0.4"
 base64 = "0.22"
