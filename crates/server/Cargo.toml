@@ -3,6 +3,14 @@ name = "pproxy-server"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "pproxy_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pproxy-server"
+path = "src/main.rs"
+
 [dependencies]
 pproxy-core = { path = "../core" }
 pproxy-transport.workspace = true

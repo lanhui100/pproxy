@@ -177,6 +177,7 @@ impl AdminClient {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::custom(follow_redirect))
+            .no_proxy()
             .build()
             .map_err(ApiError::from_reqwest)?;
         Ok(Self {
@@ -192,6 +193,7 @@ impl AdminClient {
         c.http = reqwest::Client::builder()
             .timeout(Duration::from_secs(secs))
             .redirect(reqwest::redirect::Policy::custom(follow_redirect))
+            .no_proxy()
             .build()
             .unwrap_or_else(|_| c.http.clone());
         c

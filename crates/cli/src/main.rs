@@ -38,15 +38,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// 独立启动嵌入式网关服务（前台运行）
+    /// 独立启动嵌入式网关服务（前台运行，同时开启数据代理面与管理控制面）
     Serve {
-        /// 自定义监听地址（默认 127.0.0.1:8899）
+        /// 自定义数据代理监听地址（默认 127.0.0.1:8899）
         #[arg(long)]
         listen: Option<String>,
+        /// 自定义管理面监听地址（默认 127.0.0.1:8900，--lan 模式为 0.0.0.0:8900）
+        #[arg(long)]
+        admin_listen: Option<String>,
         /// 开启局域网共享模式（绑定 0.0.0.0，同局域网手机/设备可直接使用）
         #[arg(long, short = 'g', alias = "share")]
         lan: bool,
-        /// 自定义监听端口（默认 8899）
+        /// 自定义数据代理监听端口（默认 8899）
         #[arg(long, short = 'p')]
         port: Option<u16>,
     },
@@ -376,8 +379,8 @@ fn run(cli: Cli) -> Result<i32, RunError> {
     }
 
     // 1. serve 独立起服
-    if let Command::Serve { listen, lan, port } = &cli.command {
-        return cmd::serve::run(listen.as_deref(), *lan, *port).map_err(RunError::Msg);
+    if let Command::Serve { listen, admin_listen, lan, port } = &cli.command {
+        return cmd::serve::run(listen.as_deref(), admin_listen.as_deref(), *lan, *port).map_err(RunError::Msg);
     }
 
     // 1.1 clash 手机配置生成与扫码导入

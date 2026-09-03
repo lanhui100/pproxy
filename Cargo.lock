@@ -1086,9 +1086,10 @@ dependencies = [
 
 [[package]]
 name = "pproxy-cli"
-version = "0.3.29"
+version = "0.3.30"
 dependencies = [
  "anyhow",
+ "axum",
  "base64",
  "chacha20poly1305",
  "clap",
@@ -1098,6 +1099,7 @@ dependencies = [
  "libc",
  "pproxy-core",
  "pproxy-engine",
+ "pproxy-server",
  "qrcode",
  "rand 0.8.7",
  "reqwest",
@@ -1107,6 +1109,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

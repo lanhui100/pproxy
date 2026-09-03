@@ -1,6 +1,6 @@
 //! `pproxy serve` — 单机独立前台起服与守护进程（嵌入式网关运行时）。
 //!
-//! 具备端口级跨进程排他文件锁、端口自检、优雅退出与局域网网络提示。
+//! 具备端口级跨进程排他文件锁、端口自检、优雅退出、双端口（数据面+管理面）合一与局域网网络提示。
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -19,6 +19,10 @@ use pproxy_engine::connect::{TunnelConfig, TunnelPool};
 use pproxy_engine::{
     generate_instance_uuid, run_engine, EngineConfig, GatewayState, UpstreamManager,
 };
+use pproxy_server::api::{admin_router, AdminState};
+use pproxy_server::monitor::{spawn_monitor, MonitorConfig};
+use pproxy_server::tunnel::TunnelProvision;
+use rand::RngCore as _;
 
 use crate::config;
 use crate::{EXIT_FAILURE, EXIT_OK};
@@ -36,7 +40,7 @@ pub fn get_local_lan_ip() -> Option<std::net::IpAddr> {
     Some(socket.local_addr().ok()?.ip())
 }
 
-/// 解析最终监听地址（优先级：显式 --listen > --lan/--port 组合 > 默认 127.0.0.1:8899）
+/// 解析最终数据面监听地址（优先级：显式 --listen > --lan/--port 组合 > 默认 127.0.0.1:8899）
 pub fn resolve_listen_addr(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> String {
     if let Some(addr) = listen_addr {
         return addr.to_string();
@@ -49,14 +53,44 @@ pub fn resolve_listen_addr(listen_addr: Option<&str>, lan: bool, port: Option<u1
     }
 }
 
-pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i32, String> {
+/// 解析最终管理面监听地址（优先级：显式 --admin-listen > PPROXY_LISTEN_ADMIN 环境变量 > --lan 模式 0.0.0.0:8900 > 默认 127.0.0.1:8900）
+pub fn resolve_admin_listen_addr(admin_listen: Option<&str>, lan: bool) -> String {
+    if let Some(addr) = admin_listen {
+        return addr.to_string();
+    }
+    if let Ok(env_addr) = std::env::var("PPROXY_LISTEN_ADMIN") {
+        let trimmed = env_addr.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if lan {
+        "0.0.0.0:8900".to_string()
+    } else {
+        "127.0.0.1:8900".to_string()
+    }
+}
+
+pub fn run(
+    listen_addr: Option<&str>,
+    admin_listen: Option<&str>,
+    lan: bool,
+    port: Option<u16>,
+) -> Result<i32, String> {
     let addr = resolve_listen_addr(listen_addr, lan, port);
+    let admin_addr = resolve_admin_listen_addr(admin_listen, lan);
 
     let port: u16 = addr
         .split(':')
         .next_back()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8899);
+
+    let admin_port: u16 = admin_addr
+        .split(':')
+        .next_back()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8900);
 
     // 1. 端口级跨进程排他文件锁（支持多端口多实例，同时同一端口互斥）
     let lock_path = get_lock_path_for_port(port);
@@ -98,7 +132,7 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
     // 成功获取锁后，安全截断并记录当前 PID 与监听地址
     let mut file = lock_file;
     let _ = file.set_len(0);
-    let _ = writeln!(file, "pid={}\naddr={addr}", std::process::id());
+    let _ = writeln!(file, "pid={}\naddr={addr}\nadmin_addr={admin_addr}", std::process::id());
     let _ = file.flush();
 
     // 2. 异步运行时启动
@@ -112,12 +146,52 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
         let (store, is_fresh) = Store::open(&db_path).map_err(|e| e.to_string())?;
         let store = Arc::new(store);
 
+        let mut cfg = config::load().unwrap_or_default();
+        let mut config_modified = false;
+
+        if cfg.server.is_empty() {
+            cfg.server = format!("http://127.0.0.1:{admin_port}");
+            config_modified = true;
+        }
+
+        // 若本地未配置 admin token 且环境变量无注入，则检查或预先生成一个并持久化，使 CLI 命令无缝免配置直连
+        if cfg.admin_token.is_empty() && std::env::var("PPROXY_ADMIN_TOKEN").is_err() {
+            let has_admin = store
+                .list_tokens()
+                .map(|rows| rows.iter().any(|r| r.name == pproxy_core::token::ADMIN_NAME && r.revoked_at.is_none()))
+                .unwrap_or(false);
+            if !has_admin {
+                let mut bytes = [0u8; 24];
+                rand::thread_rng().fill_bytes(&mut bytes);
+                let new_token = format!("pony_admin_{}", hex::encode(bytes));
+                std::env::set_var("PPROXY_ADMIN_TOKEN", &new_token);
+                cfg.admin_token = new_token;
+                config_modified = true;
+            }
+        }
+        if config_modified {
+            let _ = config::save(&cfg);
+        }
+
         let tokens = Arc::new(TokenService::new(store.clone()).map_err(|e| e.to_string())?);
         let users = Arc::new(UserService::new(store.clone()).map_err(|e| e.to_string())?);
         let usage = Arc::new(UsageTracker::new(store.clone()));
         let gatekeeper = Arc::new(AuthGatekeeper::default());
 
-        let cfg = config::load().unwrap_or_default();
+        // 定时用量落库后台任务（每小时持久化）
+        {
+            let usage = Arc::clone(&usage);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+                interval.tick().await; // 第一次立即触发，跳过
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = usage.flush().await {
+                        tracing::warn!(error = %e, "usage flush failed");
+                    }
+                }
+            });
+        }
 
         let mut edges = HashMap::new();
         if let Some(secret) = &cfg.proxy_secret {
@@ -136,6 +210,12 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
         let (tunnel_gate_url, tunnel_token) = config::get_tunnel_config(&cfg);
         let tunnel_allowlist = std::env::var("PPROXY_TUNNEL_ALLOWLIST").ok();
 
+        let pool_config = PoolConfig {
+            worker_url: Some("https://edge.ponyjob.top".to_string()),
+            worker_secret: cfg.proxy_secret.clone(),
+            ..Default::default()
+        };
+
         let tunnel_cfg = match (tunnel_gate_url.as_deref(), tunnel_token.as_deref()) {
             (Some(u), Some(t)) => {
                 let custom = tunnel_allowlist.as_deref().map(|s| {
@@ -143,18 +223,55 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
                 });
                 Some(TunnelConfig::build(u, t, custom.as_deref()))
             }
-            _ => {
-                let pool_config = PoolConfig {
-                    worker_url: Some("https://edge.ponyjob.top".to_string()),
-                    worker_secret: cfg.proxy_secret.clone(),
-                    ..Default::default()
-                };
-                TunnelConfig::from_pool_config_and_env(&pool_config)
-            }
+            _ => TunnelConfig::from_pool_config_and_env(&pool_config),
         };
         let tunnel_pool = tunnel_cfg.map(TunnelPool::new);
 
         let instance_uuid = generate_instance_uuid();
+
+        // 组装管理面 (Admin API)
+        let monitor_cfg = MonitorConfig::from_env();
+        let monitor = spawn_monitor(Arc::clone(&store), monitor_cfg);
+        let tunnel_provision = TunnelProvision::from_pool_config_and_env(&pool_config);
+
+        let admin_state = AdminState {
+            tokens: Arc::clone(&tokens),
+            routes: Arc::clone(&routes),
+            usage: Arc::clone(&usage),
+            store: Arc::clone(&store),
+            monitor,
+            tunnel: tunnel_provision,
+        };
+        let admin_router = admin_router(admin_state);
+
+        let admin_listener = match tokio::net::TcpListener::bind(&admin_addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("\n┌─ [ERROR] 管理面端口绑定失败 ({admin_addr}) ─────────────────");
+                eprintln!("│ 无法监听管理面地址 ({e})。");
+                eprintln!("│ 👉 若需指定其他管理面端口，请添加: --admin-listen 127.0.0.1:{}", admin_port + 1);
+                eprintln!("└─────────────────────────────────────────────────────────────\n");
+                return Ok(EXIT_FAILURE);
+            }
+        };
+
+        // 注册退出信号
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut admin_rx = shutdown_rx.clone();
+
+        tokio::spawn(async move {
+            let _ = axum::serve(admin_listener, admin_router)
+                .with_graceful_shutdown(async move {
+                    let _ = admin_rx.changed().await;
+                })
+                .await;
+        });
+
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            println!("\n接收到终止信号，正在优雅关闭网关服务...");
+            let _ = shutdown_tx.send(true);
+        });
 
         let state = GatewayState {
             tokens,
@@ -172,18 +289,11 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
             max_connections: 512,
         };
 
-        // 注册退出信号
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            println!("\n接收到终止信号，正在优雅关闭网关服务...");
-            let _ = shutdown_tx.send(true);
-        });
-
         println!("\n╔════════════════════════════════════════════════════════════════╗");
-        println!("║            Pony Proxy 嵌入式独立网关 (v0.4.0)                  ║");
+        println!("║            Pony Proxy 嵌入式独立网关 (双面合一 v0.4.0)          ║");
         println!("╚════════════════════════════════════════════════════════════════╝");
-        println!("  监听地址: http://{addr}");
+        println!("  数据面 (HTTP/HTTPS 代理):  http://{addr}");
+        println!("  管理面 (Admin REST API):   http://{admin_addr}");
         println!("  实例签名: {instance_uuid}");
         if let Some(pool) = &tunnel_pool {
             println!("  出海隧道: \x1b[1;32m已就绪\x1b[0m (Gate: {})", pool.config().gate_url);
@@ -191,24 +301,24 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
             println!("  出海隧道: \x1b[1;33m未配置\x1b[0m (可通过 pproxy config set-tunnel 配置 Gate 端点)");
         }
         if is_fresh {
-            println!("  数据库: 全新创建 ({})", db_path.display());
+            println!("  数据库:   全新创建 ({})", db_path.display());
         }
 
         if addr.starts_with("0.0.0.0") {
             let lan_ip = get_local_lan_ip()
                 .map(|ip| ip.to_string())
                 .unwrap_or_else(|| "本机局域网IP".to_string());
-            println!("\n\x1b[1;33m⚠ 局域网共享模式已开启 (0.0.0.0:{port})：\x1b[0m");
-            println!("  本机访问地址:     http://127.0.0.1:{port}");
-            println!("  局域网设备请连接: \x1b[1;32mhttp://{lan_ip}:{port}\x1b[0m");
+            println!("\n\x1b[1;33m⚠ 局域网共享模式已开启：\x1b[0m");
+            println!("  数据面 (局域网设备代理):   \x1b[1;32mhttp://{lan_ip}:{port}\x1b[0m");
+            println!("  管理面 (远程/局域网管理):   \x1b[1;36mhttp://{lan_ip}:{admin_port}\x1b[0m");
             println!("  手机/平板连接同一 WiFi 后，代理主机填入 {lan_ip}，端口填入 {port} 即可。");
             println!("  提示: 若手机无法连接，请放行防火墙端口 (如: netsh advfirewall / sudo ufw allow {port}/tcp)。");
         } else {
-            println!("\n  访问模式: 本机独享 (127.0.0.1:{port})");
+            println!("\n  访问模式: 本机独享 (127.0.0.1)");
             println!("  提示: 如需供同局域网手机/设备使用，请使用快捷选项: \x1b[1;36mpproxy serve --lan\x1b[0m");
         }
 
-        println!("\n✓ 代理服务已就绪！按 Ctrl+C 退出服务。\n");
+        println!("\n✓ 代理与管理服务已全功能就绪！按 Ctrl+C 退出服务。\n");
 
         if let Err(e) = run_engine(engine_config, state, Some(shutdown_rx)).await {
             let err_str = e.to_string();
@@ -284,6 +394,55 @@ mod tests {
             resolve_listen_addr(Some("192.168.1.5:8080"), true, Some(9000)),
             "192.168.1.5:8080"
         );
+    }
+
+    #[test]
+    fn test_resolve_admin_listen_addr() {
+        // 默认 127.0.0.1:8900
+        assert_eq!(resolve_admin_listen_addr(None, false), "127.0.0.1:8900");
+        // 开启局域网共享 --lan
+        assert_eq!(resolve_admin_listen_addr(None, true), "0.0.0.0:8900");
+        // 显式 --admin-listen 优先级最高
+        assert_eq!(
+            resolve_admin_listen_addr(Some("192.168.1.100:9900"), true),
+            "192.168.1.100:9900"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serve_admin_router_integration() {
+        use tower::ServiceExt;
+
+        let test_admin_token = "pony_admin_integration_test_secret_123";
+        std::env::set_var("PPROXY_ADMIN_TOKEN", test_admin_token);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test_serve.db");
+        let (store, _) = Store::open(&db_path).unwrap();
+        let store = Arc::new(store);
+        let tokens = Arc::new(TokenService::new(store.clone()).unwrap());
+        let routes = Arc::new(RouteTable::new(store.clone(), Arc::new(HashMap::new())).unwrap());
+        let usage = Arc::new(UsageTracker::new(store.clone()));
+        let monitor = spawn_monitor(store.clone(), MonitorConfig::from_env());
+
+        let admin_state = AdminState {
+            tokens: tokens.clone(),
+            routes,
+            usage,
+            store,
+            monitor,
+            tunnel: None,
+        };
+        let app = admin_router(admin_state);
+
+        // 携带 Admin Token 访问 /api/health 端点
+        let req = axum::http::Request::builder()
+            .uri("/api/health")
+            .header("Authorization", format!("Bearer {test_admin_token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
     }
 }
 

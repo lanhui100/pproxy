@@ -3,12 +3,7 @@
 //! 4. Store::open + migrate_config_if_needed → 5. TokenService/RouteTable/UsageTracker →
 //! 6. usage 落库 interval task → 7. 数据面 + 管理面双端口 serve → 8. admin 非回环 warn。
 
-mod api;
-mod connect;
-mod dsk;
-mod gateway;
-mod monitor;
-mod tunnel;
+use pproxy_server::{api, connect, gateway, is_loopback_host, monitor, tunnel};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -184,17 +179,4 @@ async fn main() -> anyhow::Result<()> {
 
     #[allow(unreachable_code)]
     Ok(())
-}
-
-/// 回环判定（第 8 步）：host 为 127.* / localhost / ::1 / [::1] 视为回环；空 host（如 :8899）代表全网卡绑定，非回环。
-fn is_loopback_host(host: &str) -> bool {
-    if host == "localhost" || host == "[::1]" || host == "::1" {
-        return true;
-    }
-    if host.is_empty() {
-        return false;
-    }
-    host.parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
 }

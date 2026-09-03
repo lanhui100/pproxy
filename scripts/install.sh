@@ -152,7 +152,7 @@ After=network.target
 Type=simple
 EnvironmentFile=-/etc/pproxy/.pproxy.env
 EnvironmentFile=-/root/.pony/.pproxy.env
-ExecStart=${INSTALL_DIR}/pproxy serve --listen 0.0.0.0:8899
+ExecStart=${INSTALL_DIR}/pproxy serve --listen 0.0.0.0:8899 --admin-listen 0.0.0.0:8900
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -173,7 +173,7 @@ After=network.target
 [Service]
 Type=simple
 EnvironmentFile=-%h/.pony/.pproxy.env
-ExecStart=${INSTALL_DIR}/pproxy serve --listen 127.0.0.1:8899
+ExecStart=${INSTALL_DIR}/pproxy serve --listen 127.0.0.1:8899 --admin-listen 127.0.0.1:8900
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
