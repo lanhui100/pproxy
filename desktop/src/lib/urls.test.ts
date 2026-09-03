@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 
-import { cleanDomainInput, deriveDataPlane } from './urls'
+import { buildAccessUrlDev, cleanDomainInput, deriveDataPlane } from './urls'
+
+// node 测试环境无 localStorage：为 buildAccessUrlDev 的 dev 凭据读取提供最小 mock
+const storage = new Map<string, string>()
+;(globalThis as any).localStorage = {
+  getItem: (k: string) => storage.get(k) ?? null,
+  setItem: (k: string, v: string) => void storage.set(k, String(v)),
+  removeItem: (k: string) => void storage.delete(k),
+}
 
 describe('deriveDataPlane', () => {
   it('管理面端口替换为 8899', () => {
@@ -125,3 +133,49 @@ describe('parseServiceUrlInput', () => {
     expect(r?.inferredName).toBe('ollama')
   })
 })
+
+describe('buildAccessUrlDev（对齐 Rust proxy_access_url_generate）', () => {
+
+  it('带 https:// 的 Anthropic base_url 推导路由并生成本地/公网地址', () => {
+    const r = buildAccessUrlDev('https://api.anthropic.com')
+    expect(r.route).toBe('anthropic')
+    expect(r.local_url).toBe('http://127.0.0.1:8899/<token>/anthropic')
+    expect(r.public_url).toBe('https://access.ponyjob.top/<token>/anthropic')
+    expect(r.has_token).toBe(false)
+  })
+
+  it('不带 scheme 且带路径的 OpenAI base_url 同样正确处理', () => {
+    const r = buildAccessUrlDev('api.openai.com/v1/chat/completions')
+    expect(r.route).toBe('openai')
+    expect(r.local_url).toBe('http://127.0.0.1:8899/<token>/openai')
+  })
+
+  it('已保存 dev token 时令牌段自动填入', () => {
+    const prev = localStorage.getItem('pony-dev-tunnel-token')
+    localStorage.setItem('pony-dev-tunnel-token', 'dev-abc')
+    try {
+      const r = buildAccessUrlDev('https://api.groq.com')
+      expect(r.has_token).toBe(true)
+      expect(r.local_url).toBe('http://127.0.0.1:8899/dev-abc/groq')
+      expect(r.public_url).toBe('https://access.ponyjob.top/dev-abc/groq')
+    } finally {
+      if (prev === null) localStorage.removeItem('pony-dev-tunnel-token')
+      else localStorage.setItem('pony-dev-tunnel-token', prev)
+    }
+  })
+
+  it('非法输入抛出可读错误', () => {
+    expect(() => buildAccessUrlDev('   ')).toThrow(/base_url/)
+  })
+
+  it('对齐 Rust 路由推导：huggingface, twitter, 数字开头与 pony_ 前缀防御', async () => {
+    const { parseServiceUrlInput } = await import('./urls')
+    expect(parseServiceUrlInput('https://huggingface.co/models')?.inferredName).toBe('hf')
+    expect(parseServiceUrlInput('https://api.twitter.com/2/tweets')?.inferredName).toBe('x')
+    expect(parseServiceUrlInput('https://api.01.ai/v1')?.inferredName).toBe('x01')
+    expect(parseServiceUrlInput('https://pony_mirror.example.com')?.inferredName).toBe('xpony_mirror')
+    expect(parseServiceUrlInput('“https://api.openai.com”')?.inferredName).toBe('openai')
+    expect(parseServiceUrlInput('https://generativelanguage.googleapis.com:443')?.inferredName).toBe('gemini')
+  })
+})
+

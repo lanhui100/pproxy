@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import {
   Check,
   Download,
   LifeBuoy,
+  Link2,
   Plus,
   RefreshCw,
   Server,
   Share2,
   ShieldCheck,
   Sparkles,
+  Wand2,
   Zap,
 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
@@ -47,7 +49,7 @@ import {
   type TunnelSelfCheck,
 } from '@/lib/config'
 import InfoTip from '@/components/common/InfoTip.vue'
-import { cleanDomainInput } from '@/lib/urls'
+import { buildAccessUrlDev, cleanDomainInput, type AccessUrlResult } from '@/lib/urls'
 
 const toast = useToast()
 
@@ -112,6 +114,72 @@ async function removeWhitelistEntry(i: number): Promise<void> {
     if (target) toast.success(`已移除 ${target}`)
   } catch (e: any) {
     toast.error('移除失败', typeof e === 'string' ? e : e?.message || String(e))
+  }
+}
+
+// ---- API 反代地址生成（输入模型提供商 base_url → 一键生成本地/公网接入地址）----
+const providerBaseUrl = ref('')
+const accessGenerating = ref(false)
+const accessResult = ref<AccessUrlResult | null>(null)
+const accessCopied = ref<'local' | 'public' | null>(null)
+let accessCopyTimer: ReturnType<typeof setTimeout> | null = null
+
+onUnmounted(() => {
+  if (accessCopyTimer) {
+    clearTimeout(accessCopyTimer)
+    accessCopyTimer = null
+  }
+})
+
+const ACCESS_URL_TIP =
+  '粘贴模型提供商的 base_url（如 https://api.anthropic.com 或 api.openai.com/v1，带不带 https:// 均可）。' +
+  '一键推导服务路由（如 anthropic / openai），并用本机已保存的加速授权码自动填入令牌段，' +
+  '生成 SDK 可直接使用的反代地址（本地 127.0.0.1:8899 与公网 access.ponyjob.top 各一份）。'
+
+async function generateAccessUrls(): Promise<void> {
+  if (accessGenerating.value) return
+  const raw = providerBaseUrl.value.trim()
+  if (!raw) {
+    toast.error('请先输入模型提供商的 base_url', '例如 https://api.anthropic.com')
+    return
+  }
+  accessGenerating.value = true
+  try {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      accessResult.value = (await invoke('proxy_access_url_generate', { baseUrl: raw })) as AccessUrlResult
+    } else {
+      accessResult.value = buildAccessUrlDev(raw)
+    }
+    accessCopied.value = null // 新结果：清除旧的复制角标
+    if (!accessResult.value.has_token) {
+      toast.info('已生成，但未配置加速授权码', '令牌段为 <token> 占位，请在方案 A 保存授权码后重新生成')
+    }
+  } catch (e: any) {
+    accessResult.value = null // 生成失败清空陈旧结果，杜绝误拷贝
+    toast.error('生成失败', typeof e === 'string' ? e : e?.message ?? '未知错误')
+  } finally {
+    accessGenerating.value = false
+  }
+}
+
+async function copyAccessUrl(kind: 'local' | 'public'): Promise<void> {
+  const text = kind === 'local' ? accessResult.value?.local_url : accessResult.value?.public_url
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    if (accessCopyTimer) {
+      clearTimeout(accessCopyTimer)
+      accessCopyTimer = null
+    }
+    accessCopied.value = kind
+    toast.success(kind === 'local' ? '本机接入地址已复制' : '公网接入地址已复制')
+    accessCopyTimer = setTimeout(() => {
+      accessCopied.value = null
+      accessCopyTimer = null
+    }, 2000)
+  } catch {
+    toast.error('复制失败，请手动选择文本复制')
   }
 }
 
@@ -679,6 +747,106 @@ async function handleCheckUpdate() {
         </div>
         <div v-else class="rounded-lg border border-dashed border-border py-4 text-center text-xs text-muted-foreground">
           暂无自定义域名，可在上方输入框添加
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- API 反代地址生成 -->
+    <Card class="border-border shadow-sm">
+      <CardHeader class="pb-3">
+        <div class="flex items-center justify-between">
+          <CardTitle class="text-base flex items-center gap-2">
+            <Link2 class="h-4 w-4 text-primary" />
+            API 反代地址生成
+          </CardTitle>
+          <span class="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">一键生成</span>
+        </div>
+        <CardDescription>输入模型提供商的 base_url，自动推导路由并用本机授权码生成 SDK 接入地址</CardDescription>
+      </CardHeader>
+      <CardContent class="space-y-3">
+        <div class="flex gap-2">
+          <Input
+            v-model="providerBaseUrl"
+            placeholder="https://api.anthropic.com 或 api.openai.com/v1"
+            class="font-mono text-xs"
+            @keyup.enter="generateAccessUrls"
+          />
+          <Button
+            size="sm"
+            class="text-xs h-9 shrink-0 cursor-pointer"
+            :disabled="accessGenerating || !providerBaseUrl.trim()"
+            @click="generateAccessUrls"
+          >
+            <Wand2 v-if="!accessGenerating" class="h-3.5 w-3.5 mr-1" />
+            <RefreshCw v-else class="h-3.5 w-3.5 mr-1 animate-spin" />
+            {{ accessGenerating ? '生成中…' : '一键生成' }}
+          </Button>
+        </div>
+        <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <InfoTip :text="ACCESS_URL_TIP" />
+          <span>带不带 https:// 均可；路由自动识别（如 anthropic / openai / gemini）</span>
+        </div>
+
+        <!-- 生成结果 -->
+        <div v-if="accessResult" class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-2.5">
+          <div class="flex items-center justify-between">
+            <span class="inline-flex items-center gap-1.5 text-xs font-medium">
+              路由
+              <code class="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary">{{ accessResult.route }}</code>
+            </span>
+            <span
+              v-if="accessResult.has_token"
+              class="text-[11px] text-emerald-600 font-medium"
+            >
+              已自动填入本机加速授权码
+            </span>
+            <span v-else class="text-[11px] text-amber-600 font-medium">
+              <code class="font-mono">&lt;token&gt;</code> 占位：请在方案 A 保存授权码
+            </span>
+          </div>
+
+          <!-- 本机接入地址 -->
+          <div class="flex items-center gap-2">
+            <span class="w-16 shrink-0 text-[11px] text-muted-foreground">本机</span>
+            <code
+              class="min-w-0 flex-1 truncate rounded-md bg-background/70 px-2 py-1.5 font-mono text-xs"
+              :title="accessResult.local_url"
+            >{{ accessResult.local_url }}</code>
+            <Button
+              variant="outline"
+              size="sm"
+              class="text-[11px] h-7 px-2 shrink-0 cursor-pointer"
+              @click="copyAccessUrl('local')"
+            >
+              <Check v-if="accessCopied === 'local'" class="h-3 w-3 mr-1 text-emerald-600" />
+              <Share2 v-else class="h-3 w-3 mr-1" />
+              {{ accessCopied === 'local' ? '已复制' : '复制' }}
+            </Button>
+          </div>
+
+          <!-- 公网接入地址 -->
+          <div class="flex items-center gap-2">
+            <span class="w-16 shrink-0 text-[11px] text-muted-foreground">公网</span>
+            <code
+              class="min-w-0 flex-1 truncate rounded-md bg-background/70 px-2 py-1.5 font-mono text-xs"
+              :title="accessResult.public_url"
+            >{{ accessResult.public_url }}</code>
+            <Button
+              variant="outline"
+              size="sm"
+              class="text-[11px] h-7 px-2 shrink-0 cursor-pointer"
+              @click="copyAccessUrl('public')"
+            >
+              <Check v-if="accessCopied === 'public'" class="h-3 w-3 mr-1 text-emerald-600" />
+              <Share2 v-else class="h-3 w-3 mr-1" />
+              {{ accessCopied === 'public' ? '已复制' : '复制' }}
+            </Button>
+          </div>
+
+          <p class="text-[11px] leading-relaxed text-muted-foreground">
+            粘贴到 SDK / 客户端的 base_url 即可（如
+            <code class="font-mono">ANTHROPIC_BASE_URL=…</code>）；公网地址供手机或外网设备接入。
+          </p>
         </div>
       </CardContent>
     </Card>

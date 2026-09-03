@@ -84,7 +84,8 @@ export function parseServiceUrlInput(raw: string): ParsedServiceUrl | null {
 
   // 剥除两端包裹引号与 Markdown 链接语法 [text](url)
   s = s.replace(/^\[.*?\]\((.*?)\)$/, '$1').trim()
-  s = s.replace(/^["'`]/, '').replace(/["'`]$/, '').trim()
+  // 剥除中英文全半角引号、书名号与反引号
+  s = s.replace(/^[“"‘'『「`]/, '').replace(/[”"’'』」`]$/, '').trim()
 
   let extractedKey: string | undefined
   // 提取 query 中的 key= 或 api_key=
@@ -107,38 +108,44 @@ export function parseServiceUrlInput(raw: string): ParsedServiceUrl | null {
 
   if (!hostPort) return null
 
-  // 验证 host 部分
-  const hostOnly = hostPort.includes(':') ? (hostPort.split(':')[0] ?? '') : hostPort
+  // 验证 host 部分（剥离端口与末尾点）
+  const hostOnly = (hostPort.includes(':') ? (hostPort.split(':')[0] ?? '') : hostPort).replace(/\.+$/, '')
   const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostOnly)
   const isDomain = /^[a-z0-9_-]+(\.[a-z0-9_-]+)*$/.test(hostOnly)
 
   if (!isIp && !isDomain) return null
 
-  // 推导服务名称与预设
+  // 推导服务名称与预设（严格对齐 Rust PROVIDER_ROUTES 映射）
   let inferredName = 'custom'
   let suggestedPreset: ParsedServiceUrl['suggestedPreset'] = 'general'
 
-  if (hostPort.includes('openai.com')) {
+  if (hostOnly.includes('openai.com')) {
     inferredName = 'openai'
     suggestedPreset = 'openai'
-  } else if (hostPort.includes('anthropic.com') || hostPort.includes('claude')) {
+  } else if (hostOnly.includes('anthropic.com') || hostOnly.includes('claude')) {
     inferredName = 'anthropic'
     suggestedPreset = 'claude'
-  } else if (hostPort.includes('googleapis.com') || hostPort.includes('gemini')) {
+  } else if (hostOnly.includes('googleapis.com') || hostOnly.includes('gemini')) {
     inferredName = 'gemini'
     suggestedPreset = 'gemini'
-  } else if (hostPort.includes('groq.com')) {
+  } else if (hostOnly.includes('groq.com')) {
     inferredName = 'groq'
     suggestedPreset = 'openai'
-  } else if (hostPort.includes('openrouter.ai')) {
+  } else if (hostOnly.includes('openrouter.ai')) {
     inferredName = 'openrouter'
     suggestedPreset = 'openai'
-  } else if (hostPort.includes('mistral.ai')) {
+  } else if (hostOnly.includes('mistral.ai')) {
     inferredName = 'mistral'
     suggestedPreset = 'openai'
-  } else if (hostPort.includes('x.ai')) {
+  } else if (hostOnly.includes('x.ai')) {
     inferredName = 'xai'
     suggestedPreset = 'openai'
+  } else if (hostOnly.includes('twitter.com')) {
+    inferredName = 'x'
+    suggestedPreset = 'general'
+  } else if (hostOnly.includes('huggingface.co')) {
+    inferredName = 'hf'
+    suggestedPreset = 'general'
   } else if (hostPort.includes('11434') || hostPort.includes('ollama')) {
     inferredName = 'ollama'
     suggestedPreset = 'ollama'
@@ -158,6 +165,16 @@ export function parseServiceUrlInput(raw: string): ParsedServiceUrl | null {
       inferredName = hostOnly.replace(/[^a-z0-9]/gi, '') || 'service'
     }
   }
+
+  // 路由合法性对齐服务端 `^[a-z][a-z0-9_-]{0,63}$`：两端清理 - 与 _，首字符非字母垫付 x，防御 pony_ 前缀，截断 63
+  inferredName = inferredName.replace(/^[-_]+/, '').replace(/[-_]+$/, '')
+  if (!/^[a-z]/.test(inferredName)) {
+    inferredName = `x${inferredName}`
+  }
+  if (inferredName.startsWith('pony_')) {
+    inferredName = `x${inferredName}`
+  }
+  inferredName = inferredName.slice(0, 63)
 
   return {
     cleanHost: hostPort,
@@ -184,5 +201,34 @@ export async function openExternalUrl(url: string): Promise<void> {
   }
   if (typeof window !== 'undefined') {
     window.open(url, '_blank', 'noopener,noreferrer')
+  }
+}
+
+/**
+ * API 反代地址生成结果（对齐 Rust `proxy_access_url_generate` 命令返回结构）。
+ * 语义：反代地址 = {数据面基址}/{token}/{route}，本地 127.0.0.1:8899、公网 access.ponyjob.top。
+ */
+export interface AccessUrlResult {
+  /** 本地数据面接入地址，形如 http://127.0.0.1:8899/{token}/{route} */
+  local_url: string
+  /** 公网数据面接入地址，形如 https://access.ponyjob.top/{token}/{route} */
+  public_url: string
+  /** 推导出的服务路由名（如 anthropic / openai / gemini） */
+  route: string
+  /** 是否已使用本机保存的加速授权码填入令牌段；false 时为 <token> 占位 */
+  has_token: boolean
+}
+
+/** 浏览器 dev 环境的兜底推导：与 Rust normalize_provider_base_url + infer_route 对齐（打包产物不含此路径）。 */
+export function buildAccessUrlDev(baseUrl: string): AccessUrlResult {
+  const parsed = parseServiceUrlInput(baseUrl)
+  if (!parsed) throw new Error('无法识别的模型提供商地址，请粘贴形如 https://api.anthropic.com 的 base_url')
+  const token = (typeof localStorage !== 'undefined' ? localStorage.getItem('pony-dev-tunnel-token') : null)?.trim()
+  const seg = token || '<token>'
+  return {
+    local_url: `http://127.0.0.1:8899/${seg}/${parsed.inferredName}`,
+    public_url: `https://access.ponyjob.top/${seg}/${parsed.inferredName}`,
+    route: parsed.inferredName,
+    has_token: Boolean(token),
   }
 }
