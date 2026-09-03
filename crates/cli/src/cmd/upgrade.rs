@@ -83,11 +83,33 @@ pub fn detect_target_binary() -> Result<&'static str, String> {
     }
 }
 
-/// 获取远端最新 Release 信息（带双通道探测）
+/// 尝试获取 GitHub 授权 Token（支持环境变量与 gh auth token 原生凭据）
+pub fn resolve_github_token() -> Option<String> {
+    std::env::var("PONY_GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GITHUB_TOKEN"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::process::Command::new("gh")
+                .args(["auth", "token"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+/// 获取远端最新 Release 信息（带多通道自动容灾探测）
 pub fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHubRelease, String> {
-    // 1. 优先从官方网关 /dsk/latest.json 获取最新版本清单（免 GitHub 登录与私有权限限制，速度快且稳定）
+    // 1. 优先从分发网关 /dsk/latest.json 获取最新版本清单（免 GitHub 登录与私有权限限制，速度快且稳定）
+    // 包含本地网关端口，若当前运行在服务端机器可秒级直达
     let dist_bases = [
         std::env::var("PONY_DIST_URL").ok(),
+        Some("http://127.0.0.1:8899/dsk".to_string()),
+        Some("http://127.0.0.1:8900/dsk".to_string()),
         Some(DEFAULT_GATEWAY_DIST.to_string()),
         Some(DEFAULT_FALLBACK_DIST.to_string()),
     ];
@@ -106,7 +128,7 @@ pub fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHub
         if let Ok(resp) = client
             .get(&manifest_url)
             .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
-            .timeout(Duration::from_secs(6))
+            .timeout(Duration::from_secs(8))
             .send()
         {
             if resp.status().is_success() {
@@ -124,18 +146,17 @@ pub fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHub
         }
     }
 
-    // 2. 备用通道：尝试 GitHub Releases 列表 API（支持读取 GITHUB_TOKEN / PONY_GITHUB_TOKEN）
+    // 2. 备用通道：尝试 GitHub Releases 列表 API（支持读取环境变量或 gh CLI 登录凭据）
     let api_url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=1");
     let mut req = client
         .get(&api_url)
         .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
         .header("Accept", "application/vnd.github.v3+json")
-        .timeout(Duration::from_secs(8));
+        .timeout(Duration::from_secs(12));
 
-    if let Ok(token) = std::env::var("PONY_GITHUB_TOKEN").or_else(|_| std::env::var("GITHUB_TOKEN")) {
-        if !token.trim().is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", token.trim()));
-        }
+    let auth_token = resolve_github_token();
+    if let Some(ref token) = auth_token {
+        req = req.header("Authorization", format!("Bearer {token}"));
     }
 
     match req.send() {
@@ -143,7 +164,10 @@ pub fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHub
             let list: Vec<GitHubRelease> = r.json().map_err(|e| format!("解析 GitHub Release 列表失败: {e}"))?;
             list.into_iter().next().ok_or_else(|| "GitHub Release 列表为空".to_string())
         }
-        _ => Err("检测更新失败: 无法连接分发网关及 GitHub 备用源".to_string()),
+        Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND && auth_token.is_none() => {
+            Err("检测更新失败: 无法访问私有仓库 Release，请运行 'gh auth login' 或设置 GITHUB_TOKEN".to_string())
+        }
+        _ => Err("检测更新失败: 无法连接分发网关及 GitHub 备用源，若无外网权限请设置 GITHUB_TOKEN 或 PONY_DIST_URL".to_string()),
     }
 }
 
@@ -220,24 +244,24 @@ fn download_binary(
             let base = dist.trim_end_matches('/');
             candidate_urls.push(format!("{base}/{binary_name}"));
         }
-        // 1. 优先官方网关分发源
+        // 1. 本地网关源（dev 宿主机本地优先）
+        candidate_urls.push(format!("http://127.0.0.1:8899/dsk/{binary_name}"));
+        candidate_urls.push(format!("http://127.0.0.1:8900/dsk/{binary_name}"));
+        // 2. 官方网关分发源
         candidate_urls.push(format!("{DEFAULT_GATEWAY_DIST}/{binary_name}"));
-        // 2. 备用分发源
+        // 3. Vercel 静态分发源
         candidate_urls.push(format!("{DEFAULT_FALLBACK_DIST}/{binary_name}"));
-        // 3. 备用 GitHub Release 链接
+        // 4. GitHub Release 链接
         candidate_urls.push(format!(
             "https://github.com/{GITHUB_REPO}/releases/download/{target_tag}/{binary_name}"
         ));
-        // 4. 备用 GitHub latest 链接
+        // 5. GitHub latest 链接
         candidate_urls.push(format!(
             "https://github.com/{GITHUB_REPO}/releases/latest/download/{binary_name}"
         ));
     }
 
-    let auth_token = std::env::var("PONY_GITHUB_TOKEN")
-        .or_else(|_| std::env::var("GITHUB_TOKEN"))
-        .ok()
-        .filter(|s| !s.trim().is_empty());
+    let auth_token = resolve_github_token();
 
     let mut last_err = String::new();
     for url in &candidate_urls {
@@ -323,10 +347,10 @@ pub fn run(
 
     let (latest_ver_clean, target_tag) = if let Some(ver) = target_version {
         let clean = clean_version_str(ver).to_string();
-        let tag = if ver.starts_with('v') || ver.starts_with("cli-v") {
+        let tag = if ver.starts_with('v') || ver.starts_with("cli-v") || ver.starts_with("desktop-v") {
             ver.to_string()
         } else {
-            format!("v{clean}")
+            format!("desktop-v{clean}")
         };
         (clean, tag)
     } else {

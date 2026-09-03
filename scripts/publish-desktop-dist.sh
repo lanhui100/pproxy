@@ -47,6 +47,14 @@ cp "$EXE" "$STAGE/$NAME"
 cp "$SIG" "$STAGE/$NAME.sig"
 cp "$LATEST_JSON" "$STAGE/latest.json"
 
+# 同步复制 CLI 全平台二进制，确保 pproxy update 能从分发网关直接下载
+for bin in "$BUNDLE_DIR"/pproxy-*; do
+  if [[ -f "$bin" ]]; then
+    cp "$bin" "$STAGE/"
+    echo "包含 CLI 二进制分发: $(basename "$bin")"
+  fi
+done
+
 # 改写 $STAGE/latest.json 内各平台下载地址为 https://dl.ponyjob.top/<filename>
 node -e "
 const fs = require('fs');
@@ -64,7 +72,7 @@ if (d.platforms) {
 fs.writeFileSync(p, JSON.stringify(d, null, 2));
 " "$STAGE/latest.json" "dl.ponyjob.top"
 
-# 生成 vercel.json 缓存策略：latest.json 及时校验；exe 与 sig 边缘永久缓存
+# 生成 vercel.json 缓存策略：latest.json 及时校验；exe、sig 与 pproxy 二进制边缘永久缓存
 cat > "$STAGE/vercel.json" << 'EOF'
 {
   "headers": [
@@ -78,7 +86,7 @@ cat > "$STAGE/vercel.json" << 'EOF'
       ]
     },
     {
-      "source": "/(.*\\.(?:exe|sig))",
+      "source": "/(.*\\.(?:exe|sig)|pproxy-.*)",
       "headers": [
         {
           "key": "Cache-Control",
