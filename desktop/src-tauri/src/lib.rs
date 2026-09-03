@@ -189,7 +189,7 @@ pub fn run() {
       proxy_bypass_hosts,
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
       proxy_traffic_stats, proxy_test_egress, proxy_test_site_via, proxy_test_site_local,
-      proxy_access_url_generate,
+      proxy_access_url_generate, proxy_api_token_get, proxy_api_token_set,
       open_external_url,
     ])
     .build(ctx)
@@ -205,6 +205,7 @@ pub fn run() {
 
 const CREDENTIAL_SERVICE: &str = "pony-desktop";
 const CREDENTIAL_USER_TUNNEL: &str = "tunnel_token";
+const CREDENTIAL_USER_API_TOKEN: &str = "api_proxy_token";
 /// 方案 B（chained）远端代理密码的独立凭据槽；凭据按用途分槽，严禁混用。
 const CREDENTIAL_USER_PROXY: &str = "proxy_password";
 
@@ -1344,6 +1345,8 @@ const PROVIDER_ROUTES: &[(&str, &str)] = &[
     ("mistral.ai", "mistral"),
     ("api.x.ai", "xai"),
     ("x.ai", "xai"),
+    ("api.b.ai", "bai"),
+    ("b.ai", "bai"),
     ("huggingface.co", "hf"),
     ("github.com", "github"),
     ("ollama.com", "ollama"),
@@ -1385,21 +1388,16 @@ fn strip_wrapping_quotes_and_space(mut s: &str) -> &str {
     s.trim()
 }
 
-/// 规范化模型提供商 base_url：剥包裹引号（含全角），经 `url::Url` 解析提取 host（scheme 大小写不敏感，
-/// 无 scheme 时按裸 host 兜底），剥路径 / 查询 / hash，返回 host（可含端口，小写）。
-/// 带不带 https:// 均可；非法输入返回 None。
-fn normalize_provider_base_url(raw: &str) -> Option<String> {
+/// 规范化模型提供商 base_url，同时提取 Host（小写、端口保留）与请求子路径（如 /v1、/v1/chat/completions；无子路径为空串）。
+fn normalize_provider_base_url_and_path(raw: &str) -> Option<(String, String)> {
     let clean = strip_wrapping_quotes_and_space(raw);
     if clean.is_empty() {
         return None;
     }
     let mut s = clean.to_string();
-    // 协议相对 //host/path 输入：剥掉双斜杠后再解析
     if s.starts_with("//") {
         s = s[2..].to_string();
     }
-    // 带 scheme（http:// / https:// / 其他 xxx://）的输入必须解析出 host；
-    // 解析失败或缺 host（如 "https://"）不得回退裸 host 处理（否则剥出 "https:" 误判为合法）
     let has_scheme = s.len() >= 3 && {
         let scheme_end = s.find("://").map(|i| i + 3).unwrap_or(0);
         scheme_end > 0
@@ -1407,41 +1405,51 @@ fn normalize_provider_base_url(raw: &str) -> Option<String> {
             && s[..scheme_end - 3].chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
     };
     if has_scheme {
-        return url::Url::parse(&s)
-            .ok()
-            .and_then(|u| u.host_str().map(|h| match u.port() {
-                Some(p) if h.contains(':') => format!("[{h}]:{p}"),
-                Some(p) => format!("{h}:{p}"),
-                None => h.to_string(),
-            }))
-            .map(|h| h.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase())
-            .map(|h| h.trim_end_matches('.').to_string())
-            .filter(|h| !h.is_empty());
+        let u = url::Url::parse(&s).ok()?;
+        let h = u.host_str()?;
+        let host = match u.port() {
+            Some(p) if h.contains(':') => format!("[{h}]:{p}"),
+            Some(p) => format!("{h}:{p}"),
+            None => h.to_string(),
+        };
+        let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase().trim_end_matches('.').to_string();
+        if host.is_empty() {
+            return None;
+        }
+        let p = u.path();
+        let subpath = if p == "/" || p.is_empty() {
+            String::new()
+        } else {
+            p.trim_end_matches('/').to_string()
+        };
+        return Some((host, subpath));
     }
-    let host = url::Url::parse(&s)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| {
-            // 保留显式端口（如 Ollama 127.0.0.1:11434）；IPv6 保留括号
-            match u.port() {
-                Some(p) if h.contains(':') => format!("[{h}]:{p}"),
-                Some(p) => format!("{h}:{p}"),
-                None => h.to_string(),
-            }
-        }))
-        .or_else(|| {
-            // 无 scheme 输入（如 api.openai.com 或 api.openai.com/v1）：剥路径后按裸 host 处理
-            let bare = s.split(['/', '?', '#']).next().unwrap_or("").trim_end_matches('/').trim_end_matches('.');
-            if bare.is_empty() || !bare.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')) {
-                return None;
-            }
-            Some(bare.to_string())
-        })?;
-    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
-    let host = host.trim_end_matches('.').to_string();
+
+    // 无 scheme 裸输入（如 api.openai.com 或 api.b.ai/v1）
+    let (bare_host_part, rest_path) = match s.split_once('/') {
+        Some((h, p)) => (h, p),
+        None => (s.as_str(), ""),
+    };
+    let bare_host = bare_host_part.split(['?', '#']).next().unwrap_or("").trim_end_matches('.');
+    if bare_host.is_empty() || !bare_host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')) {
+        return None;
+    }
+    let host = bare_host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase().trim_end_matches('.').to_string();
     if host.is_empty() {
         return None;
     }
-    Some(host)
+    let clean_path = rest_path.split(['?', '#']).next().unwrap_or("").trim_end_matches('/');
+    let subpath = if clean_path.is_empty() {
+        String::new()
+    } else {
+        format!("/{clean_path}")
+    };
+    Some((host, subpath))
+}
+
+#[cfg(test)]
+fn normalize_provider_base_url(raw: &str) -> Option<String> {
+    normalize_provider_base_url_and_path(raw).map(|(h, _)| h)
 }
 
 /// 由 provider host 推导服务路由名（须满足服务端校验 `^[a-z][a-z0-9_-]{0,63}$` 且非 pony_ 前缀）。
@@ -1481,12 +1489,20 @@ fn infer_route(host: &str) -> Option<String> {
     let candidate = if labels.len() >= 3 {
         let first = labels[0];
         if ["api", "v1", "gateway", "proxy", "ai"].contains(&first) {
-            labels[1]
+            // 特殊处理单字母主体 + ai 域名，如 api.b.ai -> bai
+            if labels[1].len() == 1 && labels[1].chars().all(|c| c.is_ascii_alphabetic()) && labels[2] == "ai" {
+                format!("{}{}", labels[1], labels[2])
+            } else {
+                labels[1].to_string()
+            }
         } else {
-            first
+            first.to_string()
         }
+    } else if labels.len() == 2 && labels[0].len() == 1 && labels[0].chars().all(|c| c.is_ascii_alphabetic()) && labels[1] == "ai" {
+        // 如 b.ai -> bai, x.ai -> xai
+        format!("{}{}", labels[0], labels[1])
     } else {
-        labels[0]
+        labels[0].to_string()
     };
 
     // 5. 路由合法性过滤：严格对齐服务端 `^[a-z][a-z0-9_-]{0,63}$` 且非 pony_ 前缀
@@ -1512,31 +1528,83 @@ fn infer_route(host: &str) -> Option<String> {
     Some(route)
 }
 
-/// 构建反代地址 JSON（纯函数，便于单测）：route 由调用方推导，token 为 None 时用 <token> 占位。
-fn build_access_urls(route: &str, token: Option<&str>) -> serde_json::Value {
+/// 构建反代地址 JSON（纯函数，便于单测）：route 与 subpath 由调用方推导，token 为 None 时用 <token> 占位。
+fn build_access_urls(route: &str, subpath: &str, token: Option<&str>) -> serde_json::Value {
     let token_seg = token.unwrap_or("<token>");
-    let local_url = format!("http://127.0.0.1:8899/{token_seg}/{route}");
-    let public_url = format!("https://access.ponyjob.top/{token_seg}/{route}");
+    let local_url = format!("http://127.0.0.1:8899/{token_seg}/{route}{subpath}");
+    let public_url = format!("https://access.ponyjob.top/{token_seg}/{route}{subpath}");
     serde_json::json!({
         "local_url": local_url,
         "public_url": public_url,
         "route": route,
         "has_token": token.is_some(),
+        "token": token,
     })
 }
 
-/// 生成 API 反代接入地址：输入模型提供商 base_url（带不带 https:// 均可），
-/// 自动推导服务路由，并以本机已保存的加速授权码作为路径令牌，
-/// 生成本地（127.0.0.1:8899）与公网（access.ponyjob.top）两条反代地址。
-/// 未配置授权码时令牌段用 <token> 占位（has_token=false，前端提示先配置）。
+/// 获取有效的 API 反代数据面令牌：
+/// 1. 优先从专用凭据 CREDENTIAL_USER_API_TOKEN 读取（须以 pony_ 开头）；
+/// 2. 其次检查 CREDENTIAL_USER_TUNNEL 是否也是 pony_ 开头的网关令牌；
+/// 3. 若无或非 pony_ 开头（如 gate_ 出海隧道码），返回 None。
+fn get_api_proxy_token_impl() -> Option<String> {
+    if let Ok(Some(tok)) = cred_get_impl(CREDENTIAL_USER_API_TOKEN) {
+        let trimmed = tok.trim();
+        if !trimmed.is_empty() && trimmed.starts_with("pony_") {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Ok(Some(tok)) = cred_get_impl(CREDENTIAL_USER_TUNNEL) {
+        let trimmed = tok.trim();
+        if trimmed.starts_with("pony_") {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// 保存 API 反代数据面专用令牌（须以 pony_ 开头）
+fn set_api_proxy_token_impl(token: &str) -> Result<(), String> {
+    let t = token.trim();
+    if t.is_empty() {
+        let _ = cred_delete_impl(CREDENTIAL_USER_API_TOKEN);
+        return Ok(());
+    }
+    if !t.starts_with("pony_") {
+        return Err("API 反代数据面令牌必须以 pony_ 开头（例如 pony_31abc...）".into());
+    }
+    cred_set_impl(CREDENTIAL_USER_API_TOKEN, t.to_string())
+}
+
 #[tauri::command]
-fn proxy_access_url_generate(base_url: String) -> Result<serde_json::Value, String> {
-    let host = normalize_provider_base_url(&base_url)
+fn proxy_api_token_get() -> Result<Option<String>, String> {
+    Ok(get_api_proxy_token_impl())
+}
+
+#[tauri::command]
+fn proxy_api_token_set(token: String) -> Result<(), String> {
+    set_api_proxy_token_impl(&token)
+}
+
+/// 生成 API 反代接入地址：输入模型提供商 base_url（带不带 https:// 均可），
+/// 自动推导服务路由并保留原始子路径（如 /v1），并使用本机保存的 pony_ 反代数据面授权码，
+/// 生成本地（127.0.0.1:8899）与公网（access.ponyjob.top）两条反代地址。
+/// 若传入 custom_token（且非空），将校验并持久化到本地 API 反代凭据库。
+#[tauri::command]
+fn proxy_access_url_generate(base_url: String, custom_token: Option<String>) -> Result<serde_json::Value, String> {
+    let (host, subpath) = normalize_provider_base_url_and_path(&base_url)
         .ok_or_else(|| "无法识别的模型提供商地址，请粘贴形如 https://api.anthropic.com 的 base_url".to_string())?;
     let route = infer_route(&host)
         .ok_or_else(|| format!("无法从 {host} 推导服务路由，请检查地址"))?;
-    let token = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().filter(|t| !t.is_empty());
-    Ok(build_access_urls(&route, token.as_deref()))
+
+    if let Some(ref ct) = custom_token {
+        let trimmed = ct.trim();
+        if !trimmed.is_empty() {
+            set_api_proxy_token_impl(trimmed)?;
+        }
+    }
+
+    let token = get_api_proxy_token_impl();
+    Ok(build_access_urls(&route, &subpath, token.as_deref()))
 }
 
 /// 在默认浏览器中打开外部链接
@@ -1931,6 +1999,10 @@ mod tests {
         assert_eq!(infer_route("localhost").unwrap(), "ollama");
         assert_eq!(infer_route("localhost:11434").unwrap(), "ollama");
 
+        // 短主体 + ai 顶级域自动推导（如 b.ai / api.b.ai -> bai）
+        assert_eq!(infer_route("api.b.ai").unwrap(), "bai");
+        assert_eq!(infer_route("b.ai").unwrap(), "bai");
+
         // 带显式端口输入仍能命中静态已知表（防 :443 穿透失配）
         assert_eq!(infer_route("api.openai.com:443").unwrap(), "openai");
         assert_eq!(infer_route("generativelanguage.googleapis.com:443").unwrap(), "gemini");
@@ -1956,37 +2028,37 @@ mod tests {
     }
 
     #[test]
-    fn build_access_urls_placeholder_and_token() {
-        // 无凭据：<token> 占位
-        let res = build_access_urls("anthropic", None);
+    fn build_access_urls_placeholder_and_token_and_subpath() {
+        // 无凭据且无 subpath：<token> 占位
+        let res = build_access_urls("anthropic", "", None);
         assert_eq!(res["route"], "anthropic");
         assert_eq!(res["local_url"], "http://127.0.0.1:8899/<token>/anthropic");
         assert_eq!(res["public_url"], "https://access.ponyjob.top/<token>/anthropic");
         assert_eq!(res["has_token"], false);
-        // 有凭据：令牌段自动填入
-        let res2 = build_access_urls("openai", Some("tok_abc"));
-        assert_eq!(res2["local_url"], "http://127.0.0.1:8899/tok_abc/openai");
-        assert_eq!(res2["public_url"], "https://access.ponyjob.top/tok_abc/openai");
+
+        // 有凭据且带 subpath（如 /v1）：完整保留
+        let res2 = build_access_urls("bai", "/v1", Some("pony_31abc"));
+        assert_eq!(res2["local_url"], "http://127.0.0.1:8899/pony_31abc/bai/v1");
+        assert_eq!(res2["public_url"], "https://access.ponyjob.top/pony_31abc/bai/v1");
         assert_eq!(res2["has_token"], true);
     }
 
     #[test]
-    fn access_url_generate_derives_route_and_shape() {
-        // 命令层：本机可能已保存凭据（测试环境不确定），只断言路由推导与 URL 形态
-        let res = proxy_access_url_generate("https://api.anthropic.com".into()).unwrap();
-        assert_eq!(res["route"], "anthropic");
-        let local = res["local_url"].as_str().unwrap();
-        let public = res["public_url"].as_str().unwrap();
-        assert!(local.starts_with("http://127.0.0.1:8899/") && local.ends_with("/anthropic"), "local: {local}");
-        assert!(public.starts_with("https://access.ponyjob.top/") && public.ends_with("/anthropic"), "public: {public}");
+    fn access_url_generate_derives_route_and_subpath_and_custom_token() {
+        // 测试 api.b.ai/v1 正向用例：推导为 bai 并保留 /v1
+        let res = proxy_access_url_generate("api.b.ai/v1".into(), Some("pony_31abcbd448a003be0ea27524d60973d8".into())).unwrap();
+        assert_eq!(res["route"], "bai");
+        assert_eq!(res["local_url"], "http://127.0.0.1:8899/pony_31abcbd448a003be0ea27524d60973d8/bai/v1");
+        assert_eq!(res["public_url"], "https://access.ponyjob.top/pony_31abcbd448a003be0ea27524d60973d8/bai/v1");
+        assert_eq!(res["has_token"], true);
 
-        // 不带 scheme 与带路径输入同样正确处理
-        let res2 = proxy_access_url_generate("api.openai.com/v1".into()).unwrap();
+        // 带 https:// 与尾斜杠的输入同样正确处理
+        let res2 = proxy_access_url_generate("https://api.openai.com/v1/".into(), None).unwrap();
         assert_eq!(res2["route"], "openai");
-        assert!(res2["local_url"].as_str().unwrap().ends_with("/openai"));
+        assert!(res2["local_url"].as_str().unwrap().ends_with("/openai/v1"));
 
         // 非法输入明确报错
-        assert!(proxy_access_url_generate("   ".into()).is_err());
-        assert!(proxy_access_url_generate("hello world".into()).is_err());
+        assert!(proxy_access_url_generate("   ".into(), None).is_err());
+        assert!(proxy_access_url_generate("hello world".into(), None).is_err());
     }
 }

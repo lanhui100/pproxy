@@ -104,7 +104,7 @@ export function parseServiceUrlInput(raw: string): ParsedServiceUrl | null {
 
   const slashIdx = body.indexOf('/')
   const hostPort = (slashIdx >= 0 ? body.slice(0, slashIdx) : body).trim().toLowerCase()
-  const subPath = slashIdx >= 0 ? body.slice(slashIdx) : ''
+  const subPath = slashIdx >= 0 ? body.slice(slashIdx).replace(/\/+$/, '') : ''
 
   if (!hostPort) return null
 
@@ -140,6 +140,9 @@ export function parseServiceUrlInput(raw: string): ParsedServiceUrl | null {
   } else if (hostOnly.includes('x.ai')) {
     inferredName = 'xai'
     suggestedPreset = 'openai'
+  } else if (hostOnly.includes('b.ai')) {
+    inferredName = 'bai'
+    suggestedPreset = 'general'
   } else if (hostOnly.includes('twitter.com')) {
     inferredName = 'x'
     suggestedPreset = 'general'
@@ -153,14 +156,23 @@ export function parseServiceUrlInput(raw: string): ParsedServiceUrl | null {
     // 根据域名主体推导简短名称
     const parts = hostOnly.split('.')
     if (parts.length >= 3) {
-      // 如 api.openai.com -> openai, custom-proxy.example.com -> custom-proxy
       if (['api', 'v1', 'gateway', 'proxy', 'ai'].includes(parts[0] ?? '')) {
-        inferredName = parts[1] ?? 'service'
+        const body = parts[1] ?? 'service'
+        if (body.length === 1 && /^[a-z]$/i.test(body) && parts[2] === 'ai') {
+          inferredName = `${body}ai`
+        } else {
+          inferredName = body
+        }
       } else {
         inferredName = parts[0] ?? 'service'
       }
     } else if (parts.length === 2) {
-      inferredName = parts[0] ?? 'service'
+      const body = parts[0] ?? 'service'
+      if (body.length === 1 && /^[a-z]$/i.test(body) && parts[1] === 'ai') {
+        inferredName = `${body}ai`
+      } else {
+        inferredName = body
+      }
     } else {
       inferredName = hostOnly.replace(/[^a-z0-9]/gi, '') || 'service'
     }
@@ -206,29 +218,38 @@ export async function openExternalUrl(url: string): Promise<void> {
 
 /**
  * API 反代地址生成结果（对齐 Rust `proxy_access_url_generate` 命令返回结构）。
- * 语义：反代地址 = {数据面基址}/{token}/{route}，本地 127.0.0.1:8899、公网 access.ponyjob.top。
+ * 语义：反代地址 = {数据面基址}/{token}/{route}{subpath}，本地 127.0.0.1:8899、公网 access.ponyjob.top。
  */
 export interface AccessUrlResult {
-  /** 本地数据面接入地址，形如 http://127.0.0.1:8899/{token}/{route} */
+  /** 本地数据面接入地址，形如 http://127.0.0.1:8899/{token}/{route}{subpath} */
   local_url: string
-  /** 公网数据面接入地址，形如 https://access.ponyjob.top/{token}/{route} */
+  /** 公网数据面接入地址，形如 https://access.ponyjob.top/{token}/{route}{subpath} */
   public_url: string
-  /** 推导出的服务路由名（如 anthropic / openai / gemini） */
+  /** 推导出的服务路由名（如 anthropic / openai / gemini / bai） */
   route: string
-  /** 是否已使用本机保存的加速授权码填入令牌段；false 时为 <token> 占位 */
+  /** 是否已使用有效的数据面授权码填入令牌段；false 时为 <token> 占位 */
   has_token: boolean
+  /** 填入的 token 明文（或 null） */
+  token?: string | null
 }
 
-/** 浏览器 dev 环境的兜底推导：与 Rust normalize_provider_base_url + infer_route 对齐（打包产物不含此路径）。 */
-export function buildAccessUrlDev(baseUrl: string): AccessUrlResult {
+/** 浏览器 dev 环境的兜底推导：与 Rust normalize_provider_base_url_and_path + infer_route 对齐（打包产物不含此路径）。 */
+export function buildAccessUrlDev(baseUrl: string, customToken?: string): AccessUrlResult {
   const parsed = parseServiceUrlInput(baseUrl)
   if (!parsed) throw new Error('无法识别的模型提供商地址，请粘贴形如 https://api.anthropic.com 的 base_url')
-  const token = (typeof localStorage !== 'undefined' ? localStorage.getItem('pony-dev-tunnel-token') : null)?.trim()
+  const devToken = (
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem('pony-dev-api-token') || localStorage.getItem('pony-dev-tunnel-token')
+      : null
+  )?.trim()
+  const token = customToken?.trim() || devToken || ''
   const seg = token || '<token>'
+  const sub = parsed.subPath ? (parsed.subPath.startsWith('/') ? parsed.subPath : `/${parsed.subPath}`) : ''
   return {
-    local_url: `http://127.0.0.1:8899/${seg}/${parsed.inferredName}`,
-    public_url: `https://access.ponyjob.top/${seg}/${parsed.inferredName}`,
+    local_url: `http://127.0.0.1:8899/${seg}/${parsed.inferredName}${sub}`,
+    public_url: `https://access.ponyjob.top/${seg}/${parsed.inferredName}${sub}`,
     route: parsed.inferredName,
     has_token: Boolean(token),
+    token: token || null,
   }
 }

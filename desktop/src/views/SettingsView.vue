@@ -119,6 +119,9 @@ async function removeWhitelistEntry(i: number): Promise<void> {
 
 // ---- API 反代地址生成（输入模型提供商 base_url → 一键生成本地/公网接入地址）----
 const providerBaseUrl = ref('')
+const apiProxyTokenInput = ref('')
+const apiProxyTokenSaved = ref<string | null>(null)
+const showTokenConfig = ref(false)
 const accessGenerating = ref(false)
 const accessResult = ref<AccessUrlResult | null>(null)
 const accessCopied = ref<'local' | 'public' | null>(null)
@@ -132,31 +135,105 @@ onUnmounted(() => {
 })
 
 const ACCESS_URL_TIP =
-  '粘贴模型提供商的 base_url（如 https://api.anthropic.com 或 api.openai.com/v1，带不带 https:// 均可）。' +
-  '一键推导服务路由（如 anthropic / openai），并用本机已保存的加速授权码自动填入令牌段，' +
-  '生成 SDK 可直接使用的反代地址（本地 127.0.0.1:8899 与公网 access.ponyjob.top 各一份）。'
+  '粘贴模型提供商的 base_url（如 https://api.anthropic.com、api.openai.com/v1 或 api.b.ai/v1，带不带 https:// 均可）。' +
+  '一键推导服务路由（如 anthropic / openai / bai）并保留 /v1 等子路径，' +
+  '自动填入数据面反代访问令牌（形如 pony_xxx），生成 SDK 可直接使用的反代地址。'
+
+async function loadApiProxyToken(): Promise<void> {
+  try {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const t = (await invoke('proxy_api_token_get')) as string | null
+      apiProxyTokenSaved.value = t
+      if (t) apiProxyTokenInput.value = t
+    } else {
+      const t = localStorage.getItem('pony-dev-api-token')
+      apiProxyTokenSaved.value = t
+      if (t) apiProxyTokenInput.value = t
+    }
+  } catch (e) {
+    console.warn('Failed to load api proxy token:', e)
+  }
+}
+
+async function saveApiProxyToken(): Promise<void> {
+  const raw = apiProxyTokenInput.value.trim()
+  if (!raw) {
+    try {
+      if (isTauri()) {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('proxy_api_token_set', { token: '' })
+      } else {
+        localStorage.removeItem('pony-dev-api-token')
+      }
+      apiProxyTokenSaved.value = null
+      toast.success('已清空 API 反代令牌')
+    } catch (e: any) {
+      toast.error('清空失败', typeof e === 'string' ? e : e?.message)
+    }
+    return
+  }
+
+  if (raw.startsWith('gate_')) {
+    toast.error('令牌类型错误', 'gate_ 开头为方案 A 出海隧道码，API 反代必须使用形如 pony_xxx 的数据面访问令牌')
+    return
+  }
+  if (!raw.startsWith('pony_')) {
+    toast.error('格式不规范', 'API 反代令牌必须以 pony_ 开头（例如 pony_31abc...）')
+    return
+  }
+
+  try {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('proxy_api_token_set', { token: raw })
+    } else {
+      localStorage.setItem('pony-dev-api-token', raw)
+    }
+    apiProxyTokenSaved.value = raw
+    toast.success('API 反代令牌已保存生效！')
+  } catch (e: any) {
+    toast.error('保存失败', typeof e === 'string' ? e : e?.message)
+  }
+}
 
 async function generateAccessUrls(): Promise<void> {
   if (accessGenerating.value) return
   const raw = providerBaseUrl.value.trim()
   if (!raw) {
-    toast.error('请先输入模型提供商的 base_url', '例如 https://api.anthropic.com')
+    toast.error('请先输入模型提供商的 base_url', '例如 https://api.anthropic.com 或 api.b.ai/v1')
     return
   }
+  const tokenCandidate = apiProxyTokenInput.value.trim()
+  if (tokenCandidate && tokenCandidate.startsWith('gate_')) {
+    toast.error('提示：不可使用 gate_ 出海隧道码', 'API 反代数据面网关需要形如 pony_xxx 的访问令牌')
+    return
+  }
+
   accessGenerating.value = true
   try {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core')
-      accessResult.value = (await invoke('proxy_access_url_generate', { baseUrl: raw })) as AccessUrlResult
+      accessResult.value = (await invoke('proxy_access_url_generate', {
+        baseUrl: raw,
+        customToken: tokenCandidate || null,
+      })) as AccessUrlResult
+      if (accessResult.value.has_token && tokenCandidate) {
+        apiProxyTokenSaved.value = tokenCandidate
+      }
     } else {
-      accessResult.value = buildAccessUrlDev(raw)
+      accessResult.value = buildAccessUrlDev(raw, tokenCandidate)
+      if (tokenCandidate) {
+        localStorage.setItem('pony-dev-api-token', tokenCandidate)
+        apiProxyTokenSaved.value = tokenCandidate
+      }
     }
-    accessCopied.value = null // 新结果：清除旧的复制角标
+    accessCopied.value = null
     if (!accessResult.value.has_token) {
-      toast.info('已生成，但未配置加速授权码', '令牌段为 <token> 占位，请在方案 A 保存授权码后重新生成')
+      toast.info('已生成，但未配置反代访问令牌', '令牌段为 <token> 占位，请填写 pony_xxx 数据面令牌后重新生成')
     }
   } catch (e: any) {
-    accessResult.value = null // 生成失败清空陈旧结果，杜绝误拷贝
+    accessResult.value = null
     toast.error('生成失败', typeof e === 'string' ? e : e?.message ?? '未知错误')
   } finally {
     accessGenerating.value = false
@@ -331,6 +408,7 @@ onMounted(async () => {
   void refreshTunnel()
   void refreshWhitelist()
   void refreshAutoProxy()
+  void loadApiProxyToken()
 
   if (isTauri()) {
     try {
@@ -761,13 +839,55 @@ async function handleCheckUpdate() {
           </CardTitle>
           <span class="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">一键生成</span>
         </div>
-        <CardDescription>输入模型提供商的 base_url，自动推导路由并用本机授权码生成 SDK 接入地址</CardDescription>
+        <CardDescription>输入模型提供商的 base_url，自动推导路由并用反代访问令牌生成 SDK 接入地址</CardDescription>
       </CardHeader>
       <CardContent class="space-y-3">
+        <!-- Token 凭据栏 -->
+        <div class="flex items-center justify-between rounded-lg bg-muted/40 px-3 py-2 text-xs">
+          <div class="flex items-center gap-2">
+            <ShieldCheck class="h-3.5 w-3.5 text-primary" />
+            <span class="font-medium text-foreground">反代访问令牌</span>
+            <span v-if="apiProxyTokenSaved" class="text-[11px] text-emerald-600 font-mono">
+              {{ apiProxyTokenSaved.slice(0, 10) }}…{{ apiProxyTokenSaved.slice(-6) }}
+            </span>
+            <span v-else class="text-[11px] text-amber-600">未配置（将使用 &lt;token&gt; 占位）</span>
+          </div>
+          <button
+            type="button"
+            class="text-[11px] text-primary hover:underline cursor-pointer"
+            @click="showTokenConfig = !showTokenConfig"
+          >
+            {{ showTokenConfig ? '收起配置' : (apiProxyTokenSaved ? '修改令牌' : '配置令牌') }}
+          </button>
+        </div>
+
+        <!-- Token 修改展开区 -->
+        <div v-if="showTokenConfig" class="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2">
+          <div class="flex gap-2">
+            <Input
+              v-model="apiProxyTokenInput"
+              placeholder="请输入形如 pony_31abc... 的数据面访问令牌"
+              class="font-mono text-xs"
+              @keyup.enter="saveApiProxyToken"
+            />
+            <Button
+              size="sm"
+              variant="secondary"
+              class="text-xs h-9 shrink-0 cursor-pointer"
+              @click="saveApiProxyToken"
+            >
+              保存令牌
+            </Button>
+          </div>
+          <p class="text-[11px] text-muted-foreground leading-relaxed">
+            反代网关鉴权需使用形如 <code class="font-mono text-primary">pony_xxx</code> 的令牌。输入后持久化保存在系统凭据库，后续一键生成均自动填充。
+          </p>
+        </div>
+
         <div class="flex gap-2">
           <Input
             v-model="providerBaseUrl"
-            placeholder="https://api.anthropic.com 或 api.openai.com/v1"
+            placeholder="https://api.anthropic.com、api.openai.com/v1 或 api.b.ai/v1"
             class="font-mono text-xs"
             @keyup.enter="generateAccessUrls"
           />
@@ -784,7 +904,7 @@ async function handleCheckUpdate() {
         </div>
         <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
           <InfoTip :text="ACCESS_URL_TIP" />
-          <span>带不带 https:// 均可；路由自动识别（如 anthropic / openai / gemini）</span>
+          <span>带不带 https:// 均可；保留 /v1 等路径；路由自动识别（如 anthropic / openai / bai）</span>
         </div>
 
         <!-- 生成结果 -->
@@ -798,10 +918,10 @@ async function handleCheckUpdate() {
               v-if="accessResult.has_token"
               class="text-[11px] text-emerald-600 font-medium"
             >
-              已自动填入本机加速授权码
+              已填入反代访问令牌
             </span>
             <span v-else class="text-[11px] text-amber-600 font-medium">
-              <code class="font-mono">&lt;token&gt;</code> 占位：请在方案 A 保存授权码
+              <code class="font-mono">&lt;token&gt;</code> 占位：请配置 <code class="font-mono">pony_xxx</code> 令牌
             </span>
           </div>
 
