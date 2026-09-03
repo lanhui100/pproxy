@@ -20,7 +20,7 @@ use pproxy_engine::{
     generate_instance_uuid, run_engine, EngineConfig, GatewayState, UpstreamManager,
 };
 
-use crate::config::load;
+use crate::config;
 use crate::{EXIT_FAILURE, EXIT_OK};
 
 fn get_lock_path_for_port(port: u16) -> PathBuf {
@@ -117,7 +117,7 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
         let usage = Arc::new(UsageTracker::new(store.clone()));
         let gatekeeper = Arc::new(AuthGatekeeper::default());
 
-        let cfg = load().unwrap_or_default();
+        let cfg = config::load().unwrap_or_default();
 
         let mut edges = HashMap::new();
         if let Some(secret) = &cfg.proxy_secret {
@@ -133,12 +133,25 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
         let routes = Arc::new(RouteTable::new(store.clone(), edges_arc).map_err(|e| e.to_string())?);
         let upstream = Arc::new(UpstreamManager::new_direct(edges, routes.clone()));
 
-        let pool_config = PoolConfig {
-            worker_url: Some("https://edge.ponyjob.top".to_string()),
-            worker_secret: cfg.proxy_secret.clone(),
-            ..Default::default()
+        let (tunnel_gate_url, tunnel_token) = config::get_tunnel_config(&cfg);
+        let tunnel_allowlist = std::env::var("PPROXY_TUNNEL_ALLOWLIST").ok();
+
+        let tunnel_cfg = match (tunnel_gate_url.as_deref(), tunnel_token.as_deref()) {
+            (Some(u), Some(t)) => {
+                let custom = tunnel_allowlist.as_deref().map(|s| {
+                    s.split(',').map(str::trim).collect::<Vec<_>>()
+                });
+                Some(TunnelConfig::build(u, t, custom.as_deref()))
+            }
+            _ => {
+                let pool_config = PoolConfig {
+                    worker_url: Some("https://edge.ponyjob.top".to_string()),
+                    worker_secret: cfg.proxy_secret.clone(),
+                    ..Default::default()
+                };
+                TunnelConfig::from_pool_config_and_env(&pool_config)
+            }
         };
-        let tunnel_cfg = TunnelConfig::from_pool_config_and_env(&pool_config);
         let tunnel_pool = tunnel_cfg.map(TunnelPool::new);
 
         let instance_uuid = generate_instance_uuid();
@@ -149,7 +162,7 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
             upstream,
             usage,
             gatekeeper,
-            tunnel: tunnel_pool,
+            tunnel: tunnel_pool.clone(),
             instance_uuid: instance_uuid.clone(),
         };
 
@@ -172,6 +185,11 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
         println!("╚════════════════════════════════════════════════════════════════╝");
         println!("  监听地址: http://{addr}");
         println!("  实例签名: {instance_uuid}");
+        if let Some(pool) = &tunnel_pool {
+            println!("  出海隧道: \x1b[1;32m已就绪\x1b[0m (Gate: {})", pool.config().gate_url);
+        } else {
+            println!("  出海隧道: \x1b[1;33m未配置\x1b[0m (可通过 pproxy config set-tunnel 配置 Gate 端点)");
+        }
         if is_fresh {
             println!("  数据库: 全新创建 ({})", db_path.display());
         }
