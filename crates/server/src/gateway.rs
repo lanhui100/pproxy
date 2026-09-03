@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -55,6 +55,8 @@ pub struct GatewayState {
 pub fn data_router(state: GatewayState) -> Router {
     Router::new()
         .route("/", get(info_endpoint))
+        .route("/clash", get(clash_profile_handler))
+        .route("/clash.yaml", get(clash_profile_handler))
         .route("/dsk/:filename", get(crate::dsk::dsk_file_public))
         .route(
             "/*rest",
@@ -68,6 +70,85 @@ pub fn data_router(state: GatewayState) -> Router {
         )
         .layer(from_fn_with_state(state.clone(), auth_middleware))
         .with_state(state)
+}
+
+/// Clash Meta 客户端配置订阅端点（供手机直接扫码或通过 URL 订阅导入）。
+async fn clash_profile_handler(headers: HeaderMap) -> Response {
+    let db_path = pproxy_core::store::default_db_path();
+    let parent = db_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let clash_file = parent.join("clash.yaml");
+
+    if let Ok(yaml_bytes) = tokio::fs::read(&clash_file).await {
+        return (
+            StatusCode::OK,
+            [
+                ("content-type", "application/yaml; charset=utf-8"),
+                (
+                    "content-disposition",
+                    "inline; filename=\"clash.yaml\"",
+                ),
+            ],
+            yaml_bytes,
+        )
+            .into_response();
+    }
+
+    // 若本地 clash.yaml 不存在，根据请求 host 动态合成默认配置
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("127.0.0.1:8899");
+    let (ip, port) = host.split_once(':').unwrap_or((host, "8899"));
+    let fallback_yaml = format!(
+        r#"# ================================================================
+#  Pony Proxy — Clash Meta 默认代理配置 (动态合成)
+# ================================================================
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+
+proxies:
+  - name: "Pony-Proxy"
+    type: http
+    server: {ip}
+    port: {port}
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "Pony-Proxy"
+      - DIRECT
+
+rules:
+  - DOMAIN-SUFFIX,openai.com,PROXY
+  - DOMAIN-SUFFIX,chatgpt.com,PROXY
+  - DOMAIN-SUFFIX,oaistatic.com,PROXY
+  - DOMAIN-SUFFIX,oaiusercontent.com,PROXY
+  - DOMAIN-SUFFIX,anthropic.com,PROXY
+  - DOMAIN-SUFFIX,claude.ai,PROXY
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-SUFFIX,googleapis.com,PROXY
+  - DOMAIN-SUFFIX,github.com,PROXY
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+"#
+    );
+
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/yaml; charset=utf-8"),
+            (
+                "content-disposition",
+                "inline; filename=\"clash.yaml\"",
+            ),
+        ],
+        fallback_yaml,
+    )
+        .into_response()
 }
 
 /// 根路径信息端点（T3 §4.3）：无鉴权，仅服务形态，不列路由名。
@@ -87,10 +168,9 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    // 根路径 info 端点不鉴权（T3 §4.3）
+    // 根路径 info 端点与 clash 配置端点不鉴权
     let path = req.uri().path().to_string();
-    if path == "/" || path.starts_with("/dsk/") {
-        // 根信息端点（T3 §4.3）与 M6 桌面分发（非机密产物+客户端验签）不鉴权
+    if path == "/" || path == "/clash" || path == "/clash.yaml" || path.starts_with("/dsk/") {
         return next.run(req).await;
     }
 
