@@ -326,7 +326,14 @@ pub async fn handle_connect_raw(
         let pooled_session = if attempt == 0 { pool.checkout() } else { None };
         let used_pool = pooled_session.is_some();
         let result = match pooled_session {
-            Some((tx, rx)) => bind_target(tx, rx, &host, port).await,
+            Some((tx, rx)) => {
+                let bind_res = bind_target(tx, rx, &host, port).await;
+                if bind_res.is_err() {
+                    establish(pool.config(), &host, port).await
+                } else {
+                    bind_res
+                }
+            }
             None => establish(pool.config(), &host, port).await,
         };
         match result {
@@ -474,14 +481,36 @@ pub async fn bind_target(
         })
 }
 
-/// 全新建连：connect_ws + bind_target。
+/// 全新建连：支持逗号分隔多个 Gate 端点（如 wss://gate1,wss://gate2），按顺序故障转移。
 pub async fn establish(
     cfg: &TunnelConfig,
     host: &str,
     port: u16,
 ) -> Result<(WsTx, WsRx), EstablishError> {
-    let (tx, rx) = connect_ws(cfg).await?;
-    bind_target(tx, rx, host, port).await
+    let endpoints: Vec<&str> = cfg
+        .gate_url
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut last_err = None;
+    for endpoint in endpoints {
+        match pproxy_transport::connect_ws(endpoint, &cfg.token).await {
+            Ok((tx, rx)) => match bind_target(tx, rx, host, port).await {
+                Ok(pair) => return Ok(pair),
+                Err(e) => {
+                    tracing::warn!(endpoint, host, port, error = %e, "gate bind failed, trying next endpoint");
+                    last_err = Some(e);
+                }
+            },
+            Err(e) => {
+                last_err = Some(EstablishError::Network(e.to_string()));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| EstablishError::Network("no valid gate endpoints configured".into())))
 }
 
 /// 双向中继：支持 WebSocket Ping/Pong 保活和 TCP 半关闭。

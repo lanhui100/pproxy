@@ -400,7 +400,14 @@ pub async fn handle_connect_raw(
         let pooled_session = if attempt == 0 { pool.checkout() } else { None };
         let used_pool = pooled_session.is_some();
         let result = match pooled_session {
-            Some((tx, rx)) => bind_target(tx, rx, &host, port).await,
+            Some((tx, rx)) => {
+                let bind_res = bind_target(tx, rx, &host, port).await;
+                if bind_res.is_err() {
+                    establish(pool.config(), &host, port).await
+                } else {
+                    bind_res
+                }
+            }
             None => establish(pool.config(), &host, port).await,
         };
         match result {
@@ -455,15 +462,8 @@ fn split_host_port(authority: &str) -> Option<(String, u16)> {
 
 /// 建连（写 200 之前，可重试窗口）：WS Upgrade（Bearer token）→ Text 首帧
 /// `{host,port}` → 等 `{"ok":true}`。行为沿桌面端：10s 首帧超时、应答 Ping/Pong。
-async fn establish(cfg: &TunnelConfig, host: &str, port: u16) -> Result<(WsTx, WsRx), EstablishError> {
-    let (tx, rx) = connect_ws(cfg).await?;
-    bind_target(tx, rx, host, port).await
-}
-
-/// 仅完成 TCP+TLS+WS Upgrade（池化预建阶段）：此时尚未声明目标，
-/// 会话可驻留待命池，checkout 时由 [`bind_target`] 首帧声明目标。
 /// 支持逗号分隔多个 Gate 端点（如 wss://gate1,wss://gate2），按顺序故障转移。
-async fn connect_ws(cfg: &TunnelConfig) -> Result<(WsTx, WsRx), EstablishError> {
+async fn establish(cfg: &TunnelConfig, host: &str, port: u16) -> Result<(WsTx, WsRx), EstablishError> {
     let endpoints: Vec<&str> = cfg
         .gate_url
         .split(',')
@@ -474,19 +474,22 @@ async fn connect_ws(cfg: &TunnelConfig) -> Result<(WsTx, WsRx), EstablishError> 
     let mut last_err = None;
     for endpoint in endpoints {
         match pproxy_transport::connect_ws(endpoint, &cfg.token).await {
-            Ok(pair) => return Ok(pair),
+            Ok((tx, rx)) => match bind_target(tx, rx, host, port).await {
+                Ok(pair) => return Ok(pair),
+                Err(e) => {
+                    tracing::warn!(endpoint, host, port, error = %e, "gate bind failed, trying next endpoint");
+                    last_err = Some(e);
+                }
+            },
             Err(e) => {
-                last_err = Some(e);
+                last_err = Some(EstablishError::Network(e.to_string()));
             }
         }
     }
 
-    Err(EstablishError::Network(
-        last_err
-            .map(|e| e.to_string())
-            .unwrap_or_else(|| "no valid gate endpoints configured".into()),
-    ))
+    Err(last_err.unwrap_or_else(|| EstablishError::Network("no valid gate endpoints configured".into())))
 }
+
 
 /// 在已建立的 WS 上声明目标（Text 首帧 `{host,port}` → 等 `{"ok":true}`）。
 /// 池化会话与新建会话共用此绑定步骤。
