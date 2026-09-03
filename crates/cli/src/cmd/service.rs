@@ -170,6 +170,26 @@ fn kill_orphan_pproxy_windows(current_pid: u32) -> usize {
     killed
 }
 
+#[cfg(not(target_os = "windows"))]
+fn kill_orphan_pproxy_unix(current_pid: u32) -> usize {
+    let mut killed = 0;
+    for pattern in ["pproxy-server", "pproxy"] {
+        if let Ok(out) = Command::new("pgrep").args(["-f", pattern]).output() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            for line in s.lines() {
+                if let Ok(pid) = line.trim().parse::<u32>() {
+                    if pid != current_pid && is_process_alive(pid) {
+                        if kill_process(pid) {
+                            killed += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    killed
+}
+
 /// 停止运行中的 pproxy 服务（跨平台：基于端口锁文件 + 进程树终止 + systemd）。
 pub fn stop() -> Result<i32, String> {
     let mut stopped_count = 0;
@@ -213,29 +233,53 @@ pub fn stop() -> Result<i32, String> {
         }
     }
 
-    // 2. Linux 下停止 systemd 后台服务
+    // 2. Linux 下停止 systemd 后台服务（适配 pproxy-server 与 pproxy 服务名，包含 root 与 user 模式）
     #[cfg(target_os = "linux")]
     {
         if which_systemctl().is_some() {
             let is_root = unsafe { libc::geteuid() == 0 };
-            let cmd_args = if is_root {
-                vec!["stop", "pproxy"]
-            } else {
-                vec!["--user", "stop", "pproxy"]
-            };
-            if let Ok(status) = Command::new("systemctl").args(&cmd_args).status() {
-                if status.success() {
-                    println!("✓ 已停止 systemd pproxy 服务。");
-                    stopped_count += 1;
+            for unit in ["pproxy-server", "pproxy"] {
+                let check_args = if is_root {
+                    vec!["is-active", unit]
+                } else {
+                    vec!["--user", "is-active", unit]
+                };
+                let active = Command::new("systemctl")
+                    .args(&check_args)
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+                    .unwrap_or(false);
+
+                if active {
+                    println!("正在停止 systemd {unit} 后台守护服务...");
+                    let stop_args = if is_root {
+                        vec!["stop", *unit]
+                    } else {
+                        vec!["--user", "stop", *unit]
+                    };
+                    if let Ok(status) = Command::new("systemctl").args(&stop_args).status() {
+                        if status.success() {
+                            println!("✓ 已停止 systemd {unit} 服务。");
+                            stopped_count += 1;
+                        }
+                    }
                 }
             }
         }
     }
 
-    // 3. Windows 下兜底终止可能无锁文件的残留 pproxy.exe 实例
+    // 3. 跨平台兜底终止残留孤儿进程
     #[cfg(target_os = "windows")]
     {
         let killed = kill_orphan_pproxy_windows(current_pid);
+        if killed > 0 {
+            println!("✓ 已终止 {killed} 个残留的 pproxy 实例。");
+            stopped_count += killed;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let killed = kill_orphan_pproxy_linux(current_pid);
         if killed > 0 {
             println!("✓ 已终止 {killed} 个残留的 pproxy 实例。");
             stopped_count += killed;
@@ -305,14 +349,30 @@ pub fn systemd_action(action: &str) -> Result<i32, String> {
         }
 
         let is_root = unsafe { libc::geteuid() == 0 };
+        let mut target_unit = "pproxy-server";
+        for unit in ["pproxy-server", "pproxy"] {
+            let check_args = if is_root {
+                vec!["status", unit]
+            } else {
+                vec!["--user", "status", unit]
+            };
+            if let Ok(out) = Command::new("systemctl").args(&check_args).output() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if !s.contains("could not be found") && !s.contains("not-found") && !s.is_empty() {
+                    target_unit = unit;
+                    break;
+                }
+            }
+        }
+
         let status = if is_root {
             Command::new("systemctl")
-                .args([action, "pproxy"])
+                .args([action, target_unit])
                 .status()
                 .map_err(|e| format!("failed to spawn systemctl: {e}"))?
         } else {
             Command::new("systemctl")
-                .args(["--user", action, "pproxy"])
+                .args(["--user", action, target_unit])
                 .status()
                 .map_err(|e| format!("failed to spawn systemctl --user: {e}"))?
         };

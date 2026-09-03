@@ -193,7 +193,17 @@ pub fn run(listen_addr: Option<&str>, lan: bool, port: Option<u16>) -> Result<i3
         println!("\n✓ 代理服务已就绪！按 Ctrl+C 退出服务。\n");
 
         if let Err(e) = run_engine(engine_config, state, Some(shutdown_rx)).await {
-            eprintln!("服务运行异常退出: {e}");
+            let err_str = e.to_string();
+            eprintln!("服务运行异常退出: {err_str}");
+            if err_str.contains("Address already in use")
+                || err_str.contains("Address in use")
+                || err_str.contains("os error 98")
+                || err_str.contains("os error 10048")
+            {
+                eprintln!("\n💡 提示: 端口 {port} 已被占用！");
+                eprintln!("   1. 若您此前在后台启动了守护服务，请先运行: \x1b[1;36mpproxy stop\x1b[0m 停止后台服务。");
+                eprintln!("   2. 或指定其他空闲端口启动: \x1b[1;36mpproxy serve -g -p {}\x1b[0m\n", port + 1);
+            }
             return Ok(EXIT_FAILURE);
         }
 
