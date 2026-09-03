@@ -123,17 +123,55 @@ proxy-groups:
       - DIRECT
 
 rules:
+  # AI 与大模型服务
   - DOMAIN-SUFFIX,openai.com,PROXY
   - DOMAIN-SUFFIX,chatgpt.com,PROXY
   - DOMAIN-SUFFIX,oaistatic.com,PROXY
   - DOMAIN-SUFFIX,oaiusercontent.com,PROXY
   - DOMAIN-SUFFIX,anthropic.com,PROXY
   - DOMAIN-SUFFIX,claude.ai,PROXY
+  - DOMAIN-SUFFIX,deepmind.google,PROXY
+  - DOMAIN-SUFFIX,perplexity.ai,PROXY
+  - DOMAIN-SUFFIX,huggingface.co,PROXY
+  # Google 与 Android / 开发者服务
   - DOMAIN-SUFFIX,google.com,PROXY
   - DOMAIN-SUFFIX,googleapis.com,PROXY
+  - DOMAIN-SUFFIX,gstatic.com,PROXY
+  - DOMAIN-SUFFIX,googleusercontent.com,PROXY
+  - DOMAIN-SUFFIX,android.com,PROXY
+  - DOMAIN-SUFFIX,golang.org,PROXY
+  # 影音流媒体 (YouTube)
+  - DOMAIN-SUFFIX,youtube.com,PROXY
+  - DOMAIN-SUFFIX,googlevideo.com,PROXY
+  - DOMAIN-SUFFIX,ytimg.com,PROXY
+  - DOMAIN-SUFFIX,youtu.be,PROXY
+  # 社交与通讯 (X / Twitter / Telegram)
+  - DOMAIN-SUFFIX,x.com,PROXY
+  - DOMAIN-SUFFIX,twitter.com,PROXY
+  - DOMAIN-SUFFIX,twimg.com,PROXY
+  - DOMAIN-SUFFIX,t.co,PROXY
+  - DOMAIN-SUFFIX,telegram.org,PROXY
+  - DOMAIN-SUFFIX,t.me,PROXY
+  - DOMAIN-SUFFIX,telegram.me,PROXY
+  - DOMAIN-SUFFIX,telegra.ph,PROXY
+  # 开发者平台与通用知识库
   - DOMAIN-SUFFIX,github.com,PROXY
+  - DOMAIN-SUFFIX,githubusercontent.com,PROXY
+  - DOMAIN-SUFFIX,gitlab.com,PROXY
+  - DOMAIN-SUFFIX,docker.com,PROXY
+  - DOMAIN-SUFFIX,docker.io,PROXY
+  - DOMAIN-SUFFIX,stackoverflow.com,PROXY
+  - DOMAIN-SUFFIX,wikipedia.org,PROXY
+  - DOMAIN-SUFFIX,wikimedia.org,PROXY
+  # 国内与局域网直连保护（确保国内 App 不受影响）
+  - DOMAIN-SUFFIX,cn,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT
+  - IP-CIDR,172.16.0.0/12,DIRECT
+  - IP-CIDR,192.168.0.0/16,DIRECT
+  - IP-CIDR,10.0.0.0/8,DIRECT
   - GEOIP,CN,DIRECT
-  - MATCH,PROXY
+  # 兜底规则：未匹配项默认直连，国内网络裸奔顺畅
+  - MATCH,DIRECT
 "#
     );
 

@@ -29,8 +29,9 @@ const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
 const MAX_ATTEMPTS: u32 = 2;
 const RETRY_DELAY: Duration = Duration::from_millis(400);
 
-/// 默认开箱即用的白名单（覆盖主流 AI 模型 API、OAuth 认证和代码平台）。
+/// 默认开箱即用的白名单（覆盖主流海外常用服务、社交通讯、AI 模型与代码平台）。
 pub const DEFAULT_ALLOWLIST: &[&str] = &[
+    // Google 系与 Android / 开发服务
     "google.com",
     "googleapis.com",
     "gstatic.com",
@@ -38,14 +39,41 @@ pub const DEFAULT_ALLOWLIST: &[&str] = &[
     "accounts.google.com",
     "goog",
     "g.co",
+    "android.com",
+    "golang.org",
+    // 影音流媒体 (YouTube)
+    "youtube.com",
+    "googlevideo.com",
+    "ytimg.com",
+    "youtu.be",
+    // 社交与通讯平台 (X / Twitter / Telegram)
+    "x.com",
+    "twitter.com",
+    "twimg.com",
+    "t.co",
+    "telegram.org",
+    "t.me",
+    "telegram.me",
+    "telegra.ph",
+    // 主流 AI 与大模型
     "openai.com",
     "chatgpt.com",
     "oaistatic.com",
     "oaiusercontent.com",
     "anthropic.com",
     "claude.ai",
+    "deepmind.google",
+    "perplexity.ai",
+    "huggingface.co",
+    // 开发者基础设施与百科
     "github.com",
     "githubusercontent.com",
+    "gitlab.com",
+    "docker.com",
+    "docker.io",
+    "stackoverflow.com",
+    "wikipedia.org",
+    "wikimedia.org",
 ];
 
 /// 数据面隧道配置。
@@ -65,6 +93,13 @@ impl TunnelConfig {
             .collect::<Vec<_>>();
         if let Some(custom) = custom_allowlist {
             for item in custom {
+                let trimmed = item.trim();
+                if trimmed == "*" || trimmed.eq_ignore_ascii_case("all") {
+                    if !allowlist.contains(&"*".to_string()) {
+                        allowlist.push("*".to_string());
+                    }
+                    continue;
+                }
                 let s = normalize_host(item);
                 if !s.is_empty() && !allowlist.contains(&s) {
                     allowlist.push(s);
@@ -346,6 +381,9 @@ fn split_host_port(authority: &str) -> Option<(String, u16)> {
 }
 
 pub fn allowlist_match(host: &str, allowlist: &[String]) -> bool {
+    if allowlist.iter().any(|e| e == "*") {
+        return true;
+    }
     let h = normalize_host(host);
     if h.is_empty() {
         return false;
@@ -577,6 +615,16 @@ mod tests {
         assert!(!allowlist_match("notopenai.com", &allowlist));
         assert!(!allowlist_match("openai.com.evil.cn", &allowlist));
         assert!(!allowlist_match("google.com", &allowlist));
+
+        // 全网通通配符测试
+        let wildcard_list = vec!["*".to_string()];
+        assert!(allowlist_match("youtube.com", &wildcard_list));
+        assert!(allowlist_match("x.com", &wildcard_list));
+        assert!(allowlist_match("anything.evil.com", &wildcard_list));
+
+        let cfg = TunnelConfig::build("wss://gate.test/ws", "tok", Some(&["*"]));
+        assert!(cfg.allowlist.contains(&"*".to_string()));
+        assert!(allowlist_match("youtube.com", &cfg.allowlist));
     }
 
     #[tokio::test]

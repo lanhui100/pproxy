@@ -35,8 +35,9 @@ const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
 const MAX_ATTEMPTS: u32 = 2;
 const RETRY_DELAY: Duration = Duration::from_millis(400);
 
-/// 默认开箱即用的白名单（覆盖主流 AI 模型 API、OAuth 认证和代码平台）。
+/// 默认开箱即用的白名单（覆盖主流海外常用服务、社交通讯、AI 模型与代码平台）。
 pub const DEFAULT_ALLOWLIST: &[&str] = &[
+    // Google 系与 Android / 开发服务
     "google.com",
     "googleapis.com",
     "gstatic.com",
@@ -44,14 +45,41 @@ pub const DEFAULT_ALLOWLIST: &[&str] = &[
     "accounts.google.com",
     "goog",
     "g.co",
+    "android.com",
+    "golang.org",
+    // 影音流媒体 (YouTube)
+    "youtube.com",
+    "googlevideo.com",
+    "ytimg.com",
+    "youtu.be",
+    // 社交与通讯平台 (X / Twitter / Telegram)
+    "x.com",
+    "twitter.com",
+    "twimg.com",
+    "t.co",
+    "telegram.org",
+    "t.me",
+    "telegram.me",
+    "telegra.ph",
+    // 主流 AI 与大模型
     "openai.com",
     "chatgpt.com",
     "oaistatic.com",
     "oaiusercontent.com",
     "anthropic.com",
     "claude.ai",
+    "deepmind.google",
+    "perplexity.ai",
+    "huggingface.co",
+    // 开发者基础设施与百科
     "github.com",
     "githubusercontent.com",
+    "gitlab.com",
+    "docker.com",
+    "docker.io",
+    "stackoverflow.com",
+    "wikipedia.org",
+    "wikimedia.org",
 ];
 
 /// 从 worker_url 推导 gate_url（将 http/https 转换为 ws/wss 并确保以 /ws 结尾）。
@@ -180,6 +208,13 @@ fn parse_allowlist(raw: Option<&str>) -> Vec<String> {
 
     if let Some(custom) = raw {
         for item in custom.split(',') {
+            let trimmed = item.trim();
+            if trimmed == "*" || trimmed.eq_ignore_ascii_case("all") {
+                if !entries.contains(&"*".to_string()) {
+                    entries.push("*".to_string());
+                }
+                continue;
+            }
             let normalized = normalize_host(item);
             if !normalized.is_empty() && !entries.contains(&normalized) {
                 entries.push(normalized);
@@ -193,6 +228,9 @@ fn parse_allowlist(raw: Option<&str>) -> Vec<String> {
 /// 排障成本高，启动时点破。
 fn warn_suspicious_entries(entries: &[String]) {
     for e in entries {
+        if e == "*" {
+            continue;
+        }
         let suspicious = e.contains("://")
             || e.contains(':')
             || e.starts_with('.')
@@ -206,10 +244,11 @@ fn warn_suspicious_entries(entries: &[String]) {
 }
 
 /// host 是否命中 allowlist（后缀匹配：host==entry 或 `*.entry`，dot-boundary）。
-///
-/// 与桌面端差异（spec D4）：**不含**区域别名表与通用 `.com.xx` 规则——
-/// `googleapis.com` 不得命中 `googleapis.com.hk`（区分性测试钉死）。
+/// 若白名单包含 `*` 通配符，则无条件命中（全网通模式）。
 pub(crate) fn allowlist_match(host: &str, entries: &[String]) -> bool {
+    if entries.iter().any(|e| e == "*") {
+        return true;
+    }
     let h = normalize_host(host);
     if h.is_empty() {
         return false;
@@ -668,6 +707,20 @@ mod tests {
         std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
         std::env::remove_var("PPROXY_TUNNEL_TOKEN");
         std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
+    }
+
+    #[test]
+    fn allowlist_wildcard_matches_anything() {
+        let list = parse_allowlist(Some("*"));
+        assert!(list.contains(&"*".to_string()));
+        assert!(allowlist_match("youtube.com", &list));
+        assert!(allowlist_match("x.com", &list));
+        assert!(allowlist_match("twitter.com", &list));
+        assert!(allowlist_match("anything.xyz", &list));
+
+        let list_all = parse_allowlist(Some("all"));
+        assert!(list_all.contains(&"*".to_string()));
+        assert!(allowlist_match("youtube.com", &list_all));
     }
 
     // ---- 全链路（stub worker + serve_data_plane）----
