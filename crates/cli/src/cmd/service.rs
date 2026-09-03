@@ -253,9 +253,9 @@ pub fn stop() -> Result<i32, String> {
                 if active {
                     println!("正在停止 systemd {unit} 后台守护服务...");
                     let stop_args = if is_root {
-                        vec!["stop", *unit]
+                        vec!["stop", unit]
                     } else {
-                        vec!["--user", "stop", *unit]
+                        vec!["--user", "stop", unit]
                     };
                     if let Ok(status) = Command::new("systemctl").args(&stop_args).status() {
                         if status.success() {
@@ -279,7 +279,7 @@ pub fn stop() -> Result<i32, String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let killed = kill_orphan_pproxy_linux(current_pid);
+        let killed = kill_orphan_pproxy_unix(current_pid);
         if killed > 0 {
             println!("✓ 已终止 {killed} 个残留的 pproxy 实例。");
             stopped_count += killed;
