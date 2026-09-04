@@ -783,7 +783,7 @@ Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution
 - **P2-4 · 单 CF 端点旧配置迁移**：`migrate_tunnel_url` 对单独 `wss://gate.ponyjob.top/ws` 也自动补齐默认双端点。
 - **P2-5 · 前端站点测速走本地引擎**：新增 `proxy_test_site_local` 命令，`DashboardView` 站点行改为经本地引擎真实分流（命中白名单/全局走隧道、未命中直连），移除站点行的手动 C/V 切换（引擎已按 host 自动选出口）；接口行保留 gate RTT 测速。
 - **方案 A · 桌面端待命隧道池**（`engine_tunnel.rs` `TunnelPool`，对齐 `crates/server connect.rs`）：解决「经本地引擎测速 1s 内 → 1-3s」的口径问题——之前的测速命令把**冷建连成本**计入了计时，而旧 C/V 直拨测速用热态口径剥离了冷建连。池化后引擎按端点预建 WS 待命会话，establish 命中池时只需热态首帧（1 RTT）。桌面端差异：按端点分组 + host 感知 checkout（P2-3 端点策略）+ watch 热更新清池 + Weak 自引用防泄漏；`engine::run` 异步上下文幂等启动。
-- **安装体验 · 安装成功自动启动 + 桌面图标**（`desktop/src-tauri/windows/installer-hooks.nsh`）：`NSIS_HOOK_POSTINSTALL` 无条件调用 `CreateOrUpdateDesktopShortcut`（GUI 未勾选/升级残留图标场景下桌面图标始终存在并指向当前版本），非静默安装完成后经 `nsis_tauri_utils::RunAsUser` 自动启动应用（单实例锁防重复；静默/自动更新路径由 tauri updater 自行重启，不在此拉起）。
+- **安装体验 · 安装/升级成功自动打开（默认勾选）+ 桌面图标**（`desktop/src-tauri/windows/installer-hooks.nsh`）：`NSIS_HOOK_POSTINSTALL` 无条件调用 `CreateOrUpdateDesktopShortcut`（GUI 未勾选/升级残留图标场景下桌面图标始终存在并指向当前版本）；自动打开走模板自带机制、hook 内不得直接拉起——GUI 安装由完成页「运行」复选框触发（`MUI_FINISHPAGE_RUN` 默认勾选、用户可取消，点完成后经 `RunMainBinary` 以 `RunAsUser` 拉起，单实例锁防重复），被动/静默升级（updater 下发 `/P /UPDATE /R`）完成页被跳过、由 `.onInstSuccess` 凭 `/R` 携带 `/ARGS` 拉起。
 - 回归：gate-policy 51/51、desktop cargo 55/55、Vitest 78/78、vue-tsc 0 错、oxlint 0 警告、NSIS installer 编译通过。
 
 

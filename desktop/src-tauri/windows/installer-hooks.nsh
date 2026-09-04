@@ -29,18 +29,15 @@
   !insertmacro _PPROXY_REMOVE_LEGACY_LNK "$DESKTOP\pony-desktop.lnk"
   !insertmacro _PPROXY_REMOVE_LEGACY_LNK "$SMPROGRAMS\pony-desktop.lnk"
 
-  ; 更新桌面图标：模板只在 silent/passive 或完成页勾选时创建桌面快捷方式，
-  ; 这里无条件补齐——保证 GUI 未勾选、升级后旧图标残留等场景下桌面图标
-  ; 始终存在且指向当前版本 exe（Pony Proxy.lnk）。
+  ; 安装/升级成功后自动打开：依赖模板自带机制，此处不得直接拉起——
+  ; GUI 安装由完成页 "运行 Pony Proxy" 复选框触发（MUI_FINISHPAGE_RUN，
+  ; 未定义 NOTCHECKED 即默认勾选，用户可取消；点完成后经 RunMainBinary
+  ; 以 RunAsUser 拉起，单实例锁防重复）；
+  ; 被动/静默升级（updater 下发 /P /UPDATE /R）完成页被跳过，由模板
+  ; .onInstSuccess 凭 /R 携带 /ARGS 拉起。此处若无条件拉起，既无视用户
+  ; 取消勾选，又会在更新模式下与 /R 路径双重启动（且本次拉起丢 /ARGS）。
   ; 注意：函数在模板末尾定义，NSIS 允许前向引用（模板自身第 701 行即前向调用）。
   Call CreateOrUpdateDesktopShortcut
-
-  ; 安装成功自动启动应用：交互式安装完成即拉起（单实例锁保证与完成页
-  ; "Run" 复选框重复启动互斥，无重复进程）。静默/自动更新路径不在此拉起，
-  ; 由 tauri 更新器自行重启，避免双重启动冲突。
-  ${IfNot} ${Silent}
-    nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
-  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
