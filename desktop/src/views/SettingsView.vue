@@ -1,21 +1,17 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   Check,
+  Copy,
   Download,
   LifeBuoy,
-  Link2,
+  Pencil,
   Plus,
   RefreshCw,
-  Server,
-  Share2,
-  ShieldCheck,
-  Sparkles,
-  Wand2,
-  Zap,
+  Trash2,
+  X,
 } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
@@ -53,10 +49,42 @@ import { buildAccessUrlDev, cleanDomainInput, type AccessUrlResult } from '@/lib
 
 const toast = useToast()
 
+// ---- Tooltip 简明说明（去技术黑话） ----
+const GATE_INPUT_TIP = '用于开通出口通道。支持粘贴 pony-gate:// 口令或授权码。由服务管理员提供。'
+const TUNNEL_URL_TIP = '出网通道接入点地址，默认已优化，通常保持默认即可。'
+const SYNC_URI_TIP = '粘贴 pproxy-sync:// 或 pproxy:// 口令，一键同步节点配置与凭据。'
+const REMOTE_PASS_TIP = '自建服务器认证密码，仅保存在本机系统凭据库。'
+const API_TOKEN_TIP = '用于调用本地 API 代理的访问密钥（形如 pony_xxx）。由服务提供方提供。'
+const ACCESS_URL_TIP = '输入模型 base_url（如 api.openai.com/v1），自动推导路由并生成接入地址。'
+
+// ---- 输入框 Ref 引用（用于进入编辑态时自动聚焦） ----
+const gateInputRef = ref<HTMLInputElement | null>(null)
+const tunnelUrlInputRef = ref<HTMLInputElement | null>(null)
+const importSyncInputRef = ref<HTMLInputElement | null>(null)
+const remoteHostInputRef = ref<HTMLInputElement | null>(null)
+const whitelistInputRef = ref<HTMLInputElement | null>(null)
+const apiTokenInputRef = ref<HTMLInputElement | null>(null)
+
 // ---- 自定义加速域名名单（白名单）----
 const whitelistEntries = ref<string[]>([])
 const newWhitelistEntry = ref('')
+const isAddingWhitelist = ref(false)
 const isAddingDomain = ref(false)
+
+// ---- 破坏性操作二次确认状态 ----
+const confirmingClearTunnel = ref(false)
+const confirmingClearApiToken = ref(false)
+
+function closeAllEditing(): void {
+  isEditingGate.value = false
+  isEditingTunnelUrl.value = false
+  isImportingSync.value = false
+  isEditingRemote.value = false
+  isAddingWhitelist.value = false
+  isEditingApiToken.value = false
+  confirmingClearTunnel.value = false
+  confirmingClearApiToken.value = false
+}
 
 async function refreshWhitelist(): Promise<void> {
   if (!isTauri()) {
@@ -72,6 +100,18 @@ async function refreshWhitelist(): Promise<void> {
   } catch (e: any) {
     console.error('Failed to load whitelist:', e)
   }
+}
+
+function startAddWhitelist(): void {
+  closeAllEditing()
+  newWhitelistEntry.value = ''
+  isAddingWhitelist.value = true
+  void nextTick(() => whitelistInputRef.value?.focus())
+}
+
+function cancelAddWhitelist(): void {
+  newWhitelistEntry.value = ''
+  isAddingWhitelist.value = false
 }
 
 async function addWhitelistEntry(domainToAdd?: string): Promise<void> {
@@ -93,7 +133,8 @@ async function addWhitelistEntry(domainToAdd?: string): Promise<void> {
       await invoke('proxy_whitelist_set', { entries: next })
     }
     whitelistEntries.value = next
-    if (!domainToAdd) newWhitelistEntry.value = ''
+    newWhitelistEntry.value = ''
+    isAddingWhitelist.value = false
     toast.success(`已添加 ${v}`, '加速名单已实时生效')
   } catch (e: any) {
     toast.error('添加失败', typeof e === 'string' ? e : e?.message || String(e))
@@ -117,11 +158,11 @@ async function removeWhitelistEntry(i: number): Promise<void> {
   }
 }
 
-// ---- API 反代地址生成（输入模型提供商 base_url → 一键生成本地/公网接入地址）----
+// ---- API 反代地址生成 ----
 const providerBaseUrl = ref('')
 const apiProxyTokenInput = ref('')
 const apiProxyTokenSaved = ref<string | null>(null)
-const showTokenConfig = ref(false)
+const isEditingApiToken = ref(false)
 const accessGenerating = ref(false)
 const accessResult = ref<AccessUrlResult | null>(null)
 const accessCopied = ref<'local' | 'public' | null>(null)
@@ -133,11 +174,6 @@ onUnmounted(() => {
     accessCopyTimer = null
   }
 })
-
-const ACCESS_URL_TIP =
-  '粘贴模型提供商的 base_url（如 https://api.anthropic.com、api.openai.com/v1 或 api.b.ai/v1，带不带 https:// 均可）。' +
-  '一键推导服务路由（如 anthropic / openai / bai）并保留 /v1 等子路径，' +
-  '自动填入数据面反代访问令牌（形如 pony_xxx），生成 SDK 可直接使用的反代地址。'
 
 async function loadApiProxyToken(): Promise<void> {
   try {
@@ -156,30 +192,31 @@ async function loadApiProxyToken(): Promise<void> {
   }
 }
 
+function startEditApiToken(): void {
+  closeAllEditing()
+  apiProxyTokenInput.value = apiProxyTokenSaved.value || ''
+  isEditingApiToken.value = true
+  void nextTick(() => apiTokenInputRef.value?.focus())
+}
+
+function cancelEditApiToken(): void {
+  apiProxyTokenInput.value = apiProxyTokenSaved.value || ''
+  isEditingApiToken.value = false
+}
+
 async function saveApiProxyToken(): Promise<void> {
   const raw = apiProxyTokenInput.value.trim()
   if (!raw) {
-    try {
-      if (isTauri()) {
-        const { invoke } = await import('@tauri-apps/api/core')
-        await invoke('proxy_api_token_set', { token: '' })
-      } else {
-        localStorage.removeItem('pony-dev-api-token')
-      }
-      apiProxyTokenSaved.value = null
-      toast.success('已清空 API 反代令牌')
-    } catch (e: any) {
-      toast.error('清空失败', typeof e === 'string' ? e : e?.message)
-    }
+    await clearApiTokenAction()
     return
   }
 
   if (raw.startsWith('gate_')) {
-    toast.error('令牌类型错误', 'gate_ 开头为方案 A 出海隧道码，API 反代必须使用形如 pony_xxx 的数据面访问令牌')
+    toast.error('令牌类型错误', 'gate_ 开头为出海隧道码，API 反代请使用 pony_xxx 令牌')
     return
   }
   if (!raw.startsWith('pony_')) {
-    toast.error('格式不规范', 'API 反代令牌必须以 pony_ 开头（例如 pony_31abc...）')
+    toast.error('格式不规范', '反代令牌必须以 pony_ 开头（例如 pony_31abc...）')
     return
   }
 
@@ -191,9 +228,29 @@ async function saveApiProxyToken(): Promise<void> {
       localStorage.setItem('pony-dev-api-token', raw)
     }
     apiProxyTokenSaved.value = raw
-    toast.success('API 反代令牌已保存生效！')
+    isEditingApiToken.value = false
+    toast.success('反代令牌已保存生效')
   } catch (e: any) {
     toast.error('保存失败', typeof e === 'string' ? e : e?.message)
+  }
+}
+
+async function clearApiTokenAction(): Promise<void> {
+  try {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('proxy_api_token_set', { token: '' })
+    } else {
+      localStorage.removeItem('pony-dev-api-token')
+    }
+    apiProxyTokenSaved.value = null
+    apiProxyTokenInput.value = ''
+    isEditingApiToken.value = false
+    confirmingClearApiToken.value = false
+    toast.success('已清空反代令牌')
+  } catch (e: any) {
+    confirmingClearApiToken.value = false
+    toast.error('清空失败', typeof e === 'string' ? e : e?.message)
   }
 }
 
@@ -201,12 +258,12 @@ async function generateAccessUrls(): Promise<void> {
   if (accessGenerating.value) return
   const raw = providerBaseUrl.value.trim()
   if (!raw) {
-    toast.error('请先输入模型提供商的 base_url', '例如 https://api.anthropic.com 或 api.b.ai/v1')
+    toast.error('请先输入模型提供商的 base_url', '例如 https://api.anthropic.com 或 api.openai.com/v1')
     return
   }
-  const tokenCandidate = apiProxyTokenInput.value.trim()
+  const tokenCandidate = apiProxyTokenSaved.value || apiProxyTokenInput.value.trim()
   if (tokenCandidate && tokenCandidate.startsWith('gate_')) {
-    toast.error('提示：不可使用 gate_ 出海隧道码', 'API 反代数据面网关需要形如 pony_xxx 的访问令牌')
+    toast.error('提示：不可使用 gate_ 出海隧道码', 'API 反代需要形如 pony_xxx 的令牌')
     return
   }
 
@@ -230,7 +287,7 @@ async function generateAccessUrls(): Promise<void> {
     }
     accessCopied.value = null
     if (!accessResult.value.has_token) {
-      toast.info('已生成，但未配置反代访问令牌', '令牌段为 <token> 占位，请填写 pony_xxx 数据面令牌后重新生成')
+      toast.info('已生成，但未配置反代令牌', '令牌段为 <token> 占位，配置 pony_xxx 令牌后自动填充')
     }
   } catch (e: any) {
     accessResult.value = null
@@ -250,18 +307,20 @@ async function copyAccessUrl(kind: 'local' | 'public'): Promise<void> {
       accessCopyTimer = null
     }
     accessCopied.value = kind
-    toast.success(kind === 'local' ? '本机接入地址已复制' : '公网接入地址已复制')
+    toast.success(kind === 'local' ? '本机地址已复制' : '公网地址已复制')
     accessCopyTimer = setTimeout(() => {
       accessCopied.value = null
       accessCopyTimer = null
     }, 2000)
   } catch {
-    toast.error('复制失败，请手动选择文本复制')
+    toast.error('复制失败，请手动选择复制')
   }
 }
 
-// ---- 隧道中继（方案 A 出网通道：WS 端点 + 令牌）----
+// ---- 隧道通道与令牌 ----
 const tunnelUrlInput = ref('')
+const tunnelUrlEditInput = ref('')
+const isEditingTunnelUrl = ref(false)
 const tunnelHasToken = ref(false)
 const tunnelCredError = ref<string | null>(null)
 const tunnelFingerprint = ref<string | null>(null)
@@ -271,37 +330,74 @@ async function refreshTunnel(): Promise<void> {
   try {
     const c = await loadTunnelConfig()
     tunnelUrlInput.value = c.url
+    tunnelUrlEditInput.value = c.url
     tunnelHasToken.value = c.hasToken
     tunnelCredError.value = c.credError ?? null
     tunnelFingerprint.value = c.fingerprint ?? null
-  } catch { /* 首次启动无配置，保持空表单 */ }
+  } catch { /* 首次启动无配置 */ }
 }
 
-// ---- 连接口令 / 加速授权码（方案 A 唯一入口）----
+function startEditTunnelUrl(): void {
+  closeAllEditing()
+  tunnelUrlEditInput.value = tunnelUrlInput.value
+  isEditingTunnelUrl.value = true
+  void nextTick(() => tunnelUrlInputRef.value?.focus())
+}
+
+function cancelEditTunnelUrl(): void {
+  tunnelUrlEditInput.value = tunnelUrlInput.value
+  isEditingTunnelUrl.value = false
+}
+
+async function saveTunnel(): Promise<void> {
+  if (tunnelSaving.value) return
+  const val = tunnelUrlEditInput.value.trim()
+  if (!isValidTunnelUrl(val)) {
+    toast.error('隧道端点必须以 wss:// 或 ws:// 开头且不含空白')
+    return
+  }
+  tunnelSaving.value = true
+  try {
+    await saveTunnelConfig(val, '')
+    tunnelUrlInput.value = val
+    isEditingTunnelUrl.value = false
+    await refreshTunnel()
+    toast.success('隧道端点已保存，重新开启代理后生效')
+  } catch (e: any) {
+    toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message))
+  } finally {
+    tunnelSaving.value = false
+  }
+}
+
 const gateInput = ref('')
+const isEditingGate = ref(false)
 const gateSaving = ref(false)
 const selfCheck = ref<TunnelSelfCheck | null>(null)
 const selfChecking = ref(false)
 
-const GATE_INPUT_TIP =
-  '加速授权码（隧道令牌）用于开通 Cloudflare / Vercel 双出网通道。' +
-  '请向服务提供方（部署管理员）索取：可直接粘贴 pony-gate:// 连接口令（端点+令牌一步到位），' +
-  '或仅粘贴裸授权码（端点沿用默认双通道）。与 Cloudflare 官网 API Token 无关。'
+function startEditGate(): void {
+  closeAllEditing()
+  gateInput.value = ''
+  isEditingGate.value = true
+  void nextTick(() => gateInputRef.value?.focus())
+}
 
-const REMOTE_PASS_TIP =
-  '远端代理密码用于连接你自己搭建的代理服务器（方案 B），与方案 A 的加速授权码是两套独立凭据。' +
-  '在你的 Linux 服务器上执行 pproxy user add 创建账号，或用 pproxy sync export 导出连接口令。'
+function cancelEditGate(): void {
+  gateInput.value = ''
+  isEditingGate.value = false
+}
 
 async function submitGateInput(): Promise<void> {
   if (gateSaving.value) return
   const raw = gateInput.value.trim()
   if (!raw) {
-    toast.error('请粘贴连接口令或加速授权码')
+    toast.error('请粘贴连接口令或授权码')
     return
   }
   const parsed = parseGateInput(raw)
   if (raw.startsWith('pony-gate://') && parsed?.kind !== 'code') {
-    toast.error('连接口令格式不正确', '口令已损坏，请向提供方重新索取')
+    toast.error('口令格式不正确', '口令已损坏，请向管理员重新索取')
     return
   }
   gateSaving.value = true
@@ -309,15 +405,16 @@ async function submitGateInput(): Promise<void> {
     if (parsed?.kind === 'code') {
       const res = await importConnectCode(raw)
       if (parsed.official === false) {
-        toast.info('已导入，但端点不是官方域名，请确认来源可信', res.url)
+        toast.info('已导入，端点非官方域名，请确认来源可信', res.url)
       } else {
         toast.success('连接口令已导入', '端点与令牌即时生效')
       }
     } else {
       await saveTunnelToken(raw)
-      toast.success('加速授权码已保存', '即时生效，无需重启')
+      toast.success('隧道令牌已保存', '即时生效，无需重启')
     }
     gateInput.value = ''
+    isEditingGate.value = false
     await refreshTunnel()
   } catch (e: any) {
     toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
@@ -328,6 +425,10 @@ async function submitGateInput(): Promise<void> {
 
 async function runSelfCheck(): Promise<void> {
   if (selfChecking.value) return
+  if (!tunnelHasToken.value) {
+    toast.info('尚未配置隧道令牌', '请先配置并保存隧道令牌后再进行自检')
+    return
+  }
   selfChecking.value = true
   try {
     selfCheck.value = await tunnelSelfCheck()
@@ -338,46 +439,154 @@ async function runSelfCheck(): Promise<void> {
   }
 }
 
-async function saveTunnel(): Promise<void> {
-  if (tunnelSaving.value) return
-  if (!isValidTunnelUrl(tunnelUrlInput.value)) {
-    toast.error('隧道端点必须以 wss:// 或 ws:// 开头且不含空白')
-    return
-  }
-  tunnelSaving.value = true
-  try {
-    await saveTunnelConfig(tunnelUrlInput.value.trim(), '')
-    await refreshTunnel()
-    toast.success('隧道配置已保存，重新开启代理后生效')
-  } catch (e: any) {
-    toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message))
-  } finally {
-    tunnelSaving.value = false
-  }
-}
-
 async function clearTunnelTokenAction(): Promise<void> {
   const cleared = await clearTunnelToken()
   if (cleared) {
     gateInput.value = ''
+    isEditingGate.value = false
     tunnelHasToken.value = false
     tunnelFingerprint.value = null
+    confirmingClearTunnel.value = false
     toast.success('已清除隧道令牌')
     return
   }
-  toast.error('清除失败：请在系统凭据管理器中手动删除「pony-desktop / tunnel_token」后重试')
+  confirmingClearTunnel.value = false
+  toast.error('清除失败：请在系统凭据管理器中删除「pony-desktop / tunnel_token」')
 }
 
+// ---- 加速模式与远端代理 ----
 const currentMode = ref<'direct' | 'chained'>('direct')
 const remoteHost = ref('')
 const remoteUser = ref('')
 const remotePass = ref('')
+const editRemoteHost = ref('')
+const editRemoteUser = ref('')
+const editRemotePass = ref('')
+const isEditingRemote = ref(false)
 const isSaving = ref(false)
 
-// 跨端同步
 const importSyncUri = ref('')
+const isImportingSync = ref(false)
 
-// 启动与系统偏好
+function startEditRemote(): void {
+  closeAllEditing()
+  editRemoteHost.value = remoteHost.value
+  editRemoteUser.value = remoteUser.value
+  editRemotePass.value = ''
+  isEditingRemote.value = true
+  void nextTick(() => remoteHostInputRef.value?.focus())
+}
+
+function cancelEditRemote(): void {
+  editRemoteHost.value = remoteHost.value
+  editRemoteUser.value = remoteUser.value
+  editRemotePass.value = ''
+  isEditingRemote.value = false
+}
+
+async function saveRemoteConfig(): Promise<void> {
+  if (isSaving.value) return
+  const host = editRemoteHost.value.trim()
+  if (!host) {
+    toast.error('服务器地址不能为空', '请输入 IP:端口 或 域名:端口')
+    return
+  }
+  isSaving.value = true
+  try {
+    const chainedConfig: Record<string, string> = {
+      remote_host: host,
+      username: editRemoteUser.value.trim(),
+    }
+    // 关键防御：仅当用户明确键入了新密码时才更新密码；留空表示保留当前保存密码
+    if (editRemotePass.value.trim()) {
+      chainedConfig.password = editRemotePass.value.trim()
+      remotePass.value = editRemotePass.value.trim()
+    }
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('proxy_mode_switch', {
+        modeType: 'chained',
+        config: chainedConfig,
+      })
+    }
+    remoteHost.value = host
+    remoteUser.value = editRemoteUser.value.trim()
+    isEditingRemote.value = false
+    toast.success('远端代理配置已保存生效')
+  } catch (e: any) {
+    toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message))
+  } finally {
+    isSaving.value = false
+  }
+}
+
+async function switchMode(mode: 'direct' | 'chained'): Promise<void> {
+  if (currentMode.value === mode) return
+  currentMode.value = mode
+  closeAllEditing()
+  if (isTauri()) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const chainedConfig: Record<string, string> = {
+        remote_host: remoteHost.value.trim(),
+        username: remoteUser.value.trim(),
+      }
+      // 关键防御：仅当 remotePass 有值时才发送 password 字段，绝不把空串送入凭据覆盖
+      if (remotePass.value.trim()) {
+        chainedConfig.password = remotePass.value.trim()
+      }
+      await invoke('proxy_mode_switch', {
+        modeType: mode,
+        config: mode === 'chained' ? chainedConfig : null,
+      })
+      toast.success(mode === 'direct' ? '已切换至专属加速' : '已切换至远端代理')
+    } catch (e: any) {
+      toast.error('模式切换失败: ' + (typeof e === 'string' ? e : e?.message))
+    }
+  }
+}
+
+function startImportSync(): void {
+  closeAllEditing()
+  importSyncUri.value = ''
+  isImportingSync.value = true
+  void nextTick(() => importSyncInputRef.value?.focus())
+}
+
+function cancelImportSync(): void {
+  importSyncUri.value = ''
+  isImportingSync.value = false
+}
+
+async function doImportSync(): Promise<void> {
+  const uri = importSyncUri.value.trim()
+  if (!uri) {
+    toast.error('请先粘贴同步口令')
+    return
+  }
+  try {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const res = (await invoke('proxy_import_sync', { syncUri: uri })) as any
+      toast.success(res.message || '导入成功')
+      importSyncUri.value = ''
+      isImportingSync.value = false
+      currentMode.value = 'chained'
+      const cfg = (await invoke('proxy_get_current_config')) as any
+      remoteHost.value = cfg.remote_host || ''
+      remoteUser.value = cfg.username || ''
+    } else {
+      toast.success('口令导入成功')
+      importSyncUri.value = ''
+      isImportingSync.value = false
+      currentMode.value = 'chained'
+    }
+  } catch (e: any) {
+    toast.error('导入失败: ' + (typeof e === 'string' ? e : e?.message))
+  }
+}
+
+// 启动偏好
 const autoProxyEnabled = ref(true)
 const autoProxySaving = ref(false)
 
@@ -391,15 +600,46 @@ async function refreshAutoProxy(): Promise<void> {
 }
 
 async function handleAutoProxyToggle(val: boolean): Promise<void> {
+  const previous = autoProxyEnabled.value
   autoProxyEnabled.value = val
   autoProxySaving.value = true
   try {
     await saveAutoProxyConfig({ auto_proxy: val })
     toast.success(val ? '已开启启动自动代理' : '已关闭启动自动代理')
   } catch (e: any) {
-    toast.error('保存设置失败', typeof e === 'string' ? e : e?.message)
+    autoProxyEnabled.value = previous
+    toast.error('保存失败', typeof e === 'string' ? e : e?.message)
   } finally {
     autoProxySaving.value = false
+  }
+}
+
+// 网络急救
+async function triggerRescue(): Promise<void> {
+  if (!isTauri()) {
+    toast.success('网络已恢复直连！')
+    return
+  }
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const msg = (await invoke('proxy_rescue')) as string
+    toast.success(msg || '网络急救成功，已恢复系统直连')
+  } catch (e: any) {
+    toast.error('急救失败: ' + (typeof e === 'string' ? e : e?.message))
+  }
+}
+
+// 软件更新
+async function handleCheckUpdate(): Promise<void> {
+  if (!isTauri()) {
+    toast.info('开发模式无需更新', '当前处于开发环境')
+    return
+  }
+  await checkForUpdate()
+  if (updateError.value) {
+    toast.error('检查更新失败', updateError.value)
+  } else if (!updateAvailable.value) {
+    toast.success('已是最新版本', '当前版本已是最新')
   }
 }
 
@@ -425,698 +665,765 @@ onMounted(async () => {
     } catch {}
   }
 })
-
-async function saveModeConfig() {
-  isSaving.value = true
-  try {
-    if (isTauri()) {
-      const { invoke } = await import('@tauri-apps/api/core')
-      if (currentMode.value === 'chained') {
-        await invoke('proxy_mode_switch', {
-          modeType: 'chained',
-          config: {
-            remote_host: remoteHost.value.trim(),
-            username: remoteUser.value.trim(),
-            password: remotePass.value.trim(),
-          },
-        })
-      }
-      // direct 模式：授权码统一走上方「连接口令 / 加速授权码」入口，无需在此保存
-    }
-    toast.success('配置已保存生效！')
-  } catch (e: any) {
-    toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message))
-  } finally {
-    isSaving.value = false
-  }
-}
-
-async function doImportSync() {
-  if (!importSyncUri.value.trim()) {
-    toast.error('请先粘贴同步口令')
-    return
-  }
-  try {
-    if (isTauri()) {
-      const { invoke } = await import('@tauri-apps/api/core')
-      const res = (await invoke('proxy_import_sync', {
-        syncUri: importSyncUri.value.trim(),
-      })) as any
-      toast.success(res.message || '导入成功！')
-      importSyncUri.value = ''
-      // 切换模式至 chained 并刷新配置状态
-      currentMode.value = 'chained'
-      const cfg = (await invoke('proxy_get_current_config')) as any
-      remoteHost.value = cfg.remote_host || ''
-      remoteUser.value = cfg.username || ''
-    } else {
-      toast.success('口令导入成功！')
-      importSyncUri.value = ''
-      currentMode.value = 'chained'
-    }
-  } catch (e: any) {
-    toast.error('导入失败: ' + (typeof e === 'string' ? e : e?.message))
-  }
-}
-
-async function triggerRescue() {
-  if (!isTauri()) {
-    toast.success('网络已恢复直连！')
-    return
-  }
-  try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    const msg = (await invoke('proxy_rescue')) as string
-    toast.success(msg || '网络急救成功，已恢复系统直连！')
-  } catch (e: any) {
-    toast.error('急救失败：' + (typeof e === 'string' ? e : e?.message))
-  }
-}
-
-async function handleCheckUpdate() {
-  if (!isTauri()) {
-    toast.info('开发模式无需更新', '当前处于浏览器/开发环境')
-    return
-  }
-  await checkForUpdate()
-  if (updateError.value) {
-    toast.error('检查更新失败', updateError.value)
-  } else if (!updateAvailable.value) {
-    toast.success('已是最新版本', '当前版本已是最新')
-  }
-}
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto p-6 space-y-6 max-w-4xl mx-auto">
-    <!-- 头部说明 -->
+  <div class="space-y-8 max-w-3xl mx-auto pb-6">
+    <!-- 顶栏标题 -->
     <div class="pb-1">
-      <h1 class="text-2xl font-bold tracking-tight text-foreground">设置中心</h1>
-      <p class="text-sm text-muted-foreground mt-0.5">管理加速出网方案、域名分流规则与系统网络维护</p>
+      <h1 class="text-xl font-bold tracking-tight text-foreground">设置</h1>
+      <p class="text-xs text-muted-foreground mt-0.5">管理网络连接、分流规则与系统维护</p>
     </div>
 
-    <!-- 加速出网方案 -->
-    <Card class="border-border shadow-sm">
-      <CardHeader class="pb-3">
-        <div class="flex items-center justify-between">
-          <CardTitle class="text-base flex items-center gap-2">
-            <Zap class="h-4 w-4 text-primary" />
-            加速出网方案
-          </CardTitle>
-          <span class="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
-            {{ currentMode === 'direct' ? '个人独立加速' : '远端代理连接' }}
-          </span>
-        </div>
-        <CardDescription>选择适合您的加速出口通道，支持随时切换与多端同步</CardDescription>
-      </CardHeader>
-      <CardContent class="space-y-4">
-        <!-- 方案切换卡片（对齐欢迎页） -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+    <!-- 加速模式 -->
+    <section class="space-y-2.5">
+      <div>
+        <h2 class="text-sm font-bold text-foreground">加速模式</h2>
+        <p class="text-xs text-muted-foreground mt-0.5">选择出网连接通道，支持随时切换</p>
+      </div>
+
+      <div class="rounded-xl bg-muted/60 dark:bg-muted/25 border border-border/20 p-4 space-y-4">
+        <!-- 模式切换：极简分段按钮，无边框、无方案A/B编号 -->
+        <div class="inline-flex rounded-lg bg-muted/80 p-1 gap-1" role="group" aria-label="加速模式">
           <button
             type="button"
-            @click="currentMode = 'direct'"
+            @click="switchMode('direct')"
+            :aria-pressed="currentMode === 'direct'"
             :class="[
-              'relative rounded-xl border p-4 text-left transition-all cursor-pointer',
+              'px-4 py-1.5 rounded-md text-xs font-medium transition-all duration-150 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none',
               currentMode === 'direct'
-                ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                : 'border-border bg-card hover:border-muted-foreground/40',
+                ? 'bg-background text-foreground shadow-xs font-semibold'
+                : 'text-muted-foreground hover:text-foreground',
             ]"
           >
-            <Check
-              v-if="currentMode === 'direct'"
-              class="absolute right-3 top-3 h-4 w-4 text-primary"
-            />
-            <div class="flex items-center gap-3">
-              <div
-                :class="[
-                  'rounded-lg p-2',
-                  currentMode === 'direct' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
-                ]"
-              >
-                <Sparkles class="h-4 w-4" />
-              </div>
-              <div>
-                <div class="text-sm font-semibold flex items-center gap-1.5">
-                  方案 A：个人独立加速
-                  <span class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">推荐</span>
-                </div>
-                <div class="text-xs text-muted-foreground mt-0.5">直连 Cloudflare / Vercel 双出口，专属通道极速无干扰</div>
-              </div>
-            </div>
+            专属加速
           </button>
-
           <button
             type="button"
-            @click="currentMode = 'chained'"
+            @click="switchMode('chained')"
+            :aria-pressed="currentMode === 'chained'"
             :class="[
-              'relative rounded-xl border p-4 text-left transition-all cursor-pointer',
+              'px-4 py-1.5 rounded-md text-xs font-medium transition-all duration-150 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none',
               currentMode === 'chained'
-                ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                : 'border-border bg-card hover:border-muted-foreground/40',
+                ? 'bg-background text-foreground shadow-xs font-semibold'
+                : 'text-muted-foreground hover:text-foreground',
             ]"
           >
-            <Check
-              v-if="currentMode === 'chained'"
-              class="absolute right-3 top-3 h-4 w-4 text-primary"
-            />
-            <div class="flex items-center gap-3">
-              <div
-                :class="[
-                  'rounded-lg p-2',
-                  currentMode === 'chained' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
-                ]"
-              >
-                <Server class="h-4 w-4" />
-              </div>
-              <div>
-                <div class="text-sm font-semibold">方案 B：连接远端代理</div>
-                <div class="text-xs text-muted-foreground mt-0.5">连接私有 Linux Server 或局域网其他代理服务</div>
-              </div>
-            </div>
+            远端代理
           </button>
         </div>
 
-        <!-- 方案 A：独立加速详细配置 -->
-        <div v-if="currentMode === 'direct'" class="space-y-3.5 pt-1">
-          <!-- 连接口令 / 加速授权码（方案 A 唯一凭据入口） -->
-          <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-3">
-            <div class="space-y-1.5">
-              <div class="flex items-center justify-between">
-                <Label class="text-xs font-medium flex items-center gap-1">
-                  连接口令 / 加速授权码（隧道令牌）
+        <!-- 专属加速通道配置 -->
+        <div v-if="currentMode === 'direct'" class="space-y-3 pt-1">
+          <!-- 隧道令牌 -->
+          <div class="space-y-2">
+            <!-- 常态展示：非输入态 -->
+            <div v-if="!isEditingGate" class="flex items-center justify-between gap-4 py-1">
+              <div class="space-y-0.5 min-w-0">
+                <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
+                  隧道令牌
                   <InfoTip :text="GATE_INPUT_TIP" />
-                </Label>
-                <span v-if="tunnelHasToken" class="text-[11px] text-emerald-600 font-medium">本机已保存</span>
-                <span v-else class="text-[11px] text-muted-foreground">未配置</span>
+                </div>
+                <div class="text-[11px] text-muted-foreground flex items-center gap-2">
+                  <span v-if="tunnelCredError" class="text-rose-500 font-mono">{{ tunnelCredError }}</span>
+                  <span v-else-if="tunnelFingerprint" class="font-mono">指纹 sha256:{{ tunnelFingerprint }}…</span>
+                  <span v-else-if="tunnelHasToken">已配置</span>
+                  <span v-else class="text-muted-foreground/80">未配置</span>
+                </div>
               </div>
-              <div class="flex gap-2">
+              <div class="flex items-center gap-1 shrink-0">
+                <!-- 自检按钮：未配置时禁用并提示，避免未配置触发报红 -->
+                <button
+                  type="button"
+                  @click="runSelfCheck"
+                  :disabled="selfChecking || !tunnelHasToken"
+                  :title="tunnelHasToken ? '通道自检' : '请先配置隧道令牌'"
+                  aria-label="通道自检"
+                  class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                >
+                  <RefreshCw class="size-3.5" :class="{ 'animate-spin': selfChecking }" />
+                </button>
+
+                <!-- 清除令牌：带二次确认，杜绝误触销毁凭据 -->
+                <div v-if="tunnelHasToken" class="inline-flex items-center">
+                  <div v-if="confirmingClearTunnel" class="flex items-center gap-1.5 bg-background px-2 py-0.5 rounded-md border border-rose-500/30 text-[11px]">
+                    <span class="text-rose-500 font-medium">确定清除？</span>
+                    <button
+                      type="button"
+                      @click="clearTunnelTokenAction"
+                      class="text-rose-600 font-medium hover:underline cursor-pointer focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
+                    >
+                      是
+                    </button>
+                    <button
+                      type="button"
+                      @click="confirmingClearTunnel = false"
+                      class="text-muted-foreground hover:underline cursor-pointer ml-0.5 focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
+                    >
+                      否
+                    </button>
+                  </div>
+                  <button
+                    v-else
+                    type="button"
+                    @click="confirmingClearTunnel = true"
+                    title="清除令牌"
+                    aria-label="清除令牌"
+                    class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-rose-500 hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                  >
+                    <Trash2 class="size-3.5" />
+                  </button>
+                </div>
+
+                <!-- 编辑按钮 -->
+                <button
+                  type="button"
+                  @click="startEditGate"
+                  title="修改隧道令牌"
+                  aria-label="修改隧道令牌"
+                  class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                >
+                  <Pencil class="size-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <!-- 编辑态：带自动聚焦、Enter 保存、Esc 取消 -->
+            <div v-else class="space-y-2 py-1">
+              <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
+                修改隧道令牌
+                <InfoTip :text="GATE_INPUT_TIP" />
+              </div>
+              <div class="flex items-center gap-2">
                 <Input
+                  ref="gateInputRef"
                   v-model="gateInput"
                   type="password"
-                  placeholder="粘贴 pony-gate:// 连接口令，或仅粘贴授权码"
-                  class="font-mono text-xs"
+                  placeholder="粘贴 pony-gate:// 连接口令，或直接粘贴授权码"
+                  class="font-mono text-xs h-8 bg-background"
                   @keyup.enter="submitGateInput"
+                  @keydown.esc="cancelEditGate"
                 />
-                <Button
-                  size="sm"
-                  class="text-xs h-9 shrink-0 cursor-pointer"
-                  :disabled="gateSaving || !gateInput.trim()"
+                <button
+                  type="button"
                   @click="submitGateInput"
+                  :disabled="gateSaving || !gateInput.trim()"
+                  title="保存 (Enter)"
+                  aria-label="保存"
+                  class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
                 >
-                  <RefreshCw v-if="gateSaving" class="h-3 w-3 mr-1 animate-spin" />
-                  {{ gateSaving ? '导入中…' : '保存' }}
-                </Button>
-              </div>
-              <!-- 凭据健康与指纹 -->
-              <div class="flex items-center justify-between text-[11px]">
-                <span v-if="tunnelCredError" class="text-rose-600 dark:text-rose-400">{{ tunnelCredError }}</span>
-                <span v-else-if="tunnelFingerprint" class="text-muted-foreground font-mono">
-                  指纹 sha256:{{ tunnelFingerprint }}…
-                </span>
-                <span v-else class="text-muted-foreground">保存后此处显示令牌指纹</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="text-[11px] h-7 px-2 cursor-pointer"
-                  :disabled="selfChecking"
-                  @click="runSelfCheck"
+                  <RefreshCw v-if="gateSaving" class="size-3.5 animate-spin" />
+                  <Check v-else class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  @click="cancelEditGate"
+                  title="取消 (Esc)"
+                  aria-label="取消"
+                  class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
                 >
-                  <RefreshCw v-if="selfChecking" class="h-3 w-3 mr-1 animate-spin" />
-                  {{ selfChecking ? '自检中…' : '通道自检' }}
-                </Button>
-              </div>
-              <!-- 自检结果 -->
-              <div v-if="selfCheck" class="rounded-lg border border-border/60 bg-background/60 px-2.5 py-2 space-y-1">
-                <div v-if="selfCheck.cred_error" class="text-[11px] text-rose-600 dark:text-rose-400">
-                  {{ selfCheck.cred_error }}
-                </div>
-                <div
-                  v-for="g in selfCheck.gates"
-                  :key="g.url"
-                  class="flex items-center justify-between text-[11px] font-mono"
-                >
-                  <span class="text-muted-foreground">{{ g.name === 'cf' ? 'Cloudflare 出口' : 'Vercel 美区出口' }}</span>
-                  <span v-if="g.ok" class="text-emerald-600">{{ typeof g.ms === 'number' ? `正常 · ${g.ms}ms` : '正常' }}</span>
-                  <span v-else class="text-rose-600 truncate max-w-56" :title="g.error">失败 · {{ g.error }}</span>
-                </div>
+                  <X class="size-3.5" />
+                </button>
               </div>
             </div>
-            <p class="text-xs text-muted-foreground flex items-center gap-1.5">
-              <ShieldCheck class="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-              凭据仅保存在本机系统凭据管理器，安全无泄漏
-            </p>
-          </div>
 
-          <!-- 隧道中继高级配置（WS 端点 + 令牌） -->
-          <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-3">
-            <div class="flex items-center justify-between">
-              <div class="text-xs font-semibold flex items-center gap-1.5">
-                <Zap class="h-3.5 w-3.5 text-blue-600" />
-                隧道中继端点与令牌 (出网通道)
+            <!-- 自检结果展示 -->
+            <div v-if="selfCheck" class="rounded-lg bg-background/50 px-3 py-2 space-y-1 text-[11px] font-mono">
+              <div v-if="selfCheck.cred_error" class="text-rose-500">{{ selfCheck.cred_error }}</div>
+              <div v-for="g in selfCheck.gates" :key="g.url" class="flex items-center justify-between">
+                <span class="text-muted-foreground">{{ g.name === 'cf' ? '出口C' : '出口V' }}</span>
+                <span v-if="g.ok" class="text-foreground">{{ typeof g.ms === 'number' ? `正常 · ${g.ms}ms` : '正常' }}</span>
+                <span v-else class="text-rose-500 truncate max-w-56" :title="g.error">失败 · {{ g.error }}</span>
               </div>
-              <span v-if="tunnelHasToken" class="text-[11px] text-emerald-600 font-medium">
-                本机已保存令牌
-              </span>
-              <span v-else class="text-[11px] text-muted-foreground">
-                未配置令牌
-              </span>
-            </div>
-            <div class="space-y-1">
-              <Label class="text-xs text-muted-foreground">隧道端点 (wss://，高级：一般无需修改)</Label>
-              <Input v-model="tunnelUrlInput" placeholder="wss://gate.ponyjob.top/ws" class="font-mono text-xs" />
-            </div>
-            <div class="flex justify-end gap-2 pt-1">
-              <Button
-                variant="outline"
-                size="sm"
-                class="text-xs h-8 cursor-pointer"
-                :disabled="tunnelSaving"
-                @click="clearTunnelTokenAction"
-              >
-                清除令牌
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                class="text-xs h-8 cursor-pointer"
-                :disabled="tunnelSaving"
-                @click="saveTunnel"
-              >
-                <RefreshCw v-if="tunnelSaving" class="h-3 w-3 mr-1 animate-spin" />
-                {{ tunnelSaving ? '保存中…' : '保存隧道配置' }}
-              </Button>
             </div>
           </div>
 
-          <div class="flex justify-end pt-1">
-            <Button @click="saveModeConfig" :disabled="isSaving" class="text-xs h-9 font-medium px-4 cursor-pointer">
-              <RefreshCw v-if="isSaving" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
-              {{ isSaving ? '保存中…' : '保存出网配置' }}
-            </Button>
+          <!-- 隧道端点 -->
+          <div class="border-t border-border/30 pt-3">
+            <div v-if="!isEditingTunnelUrl" class="flex items-center justify-between gap-4 py-1">
+              <div class="space-y-0.5 min-w-0">
+                <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
+                  隧道端点
+                  <InfoTip :text="TUNNEL_URL_TIP" />
+                </div>
+                <div class="text-[11px] text-muted-foreground font-mono truncate">
+                  {{ tunnelUrlInput || '默认官方端点' }}
+                </div>
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  @click="startEditTunnelUrl"
+                  title="修改隧道端点"
+                  aria-label="修改隧道端点"
+                  class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                >
+                  <Pencil class="size-3.5" />
+                </button>
+              </div>
+            </div>
+
+            <div v-else class="space-y-2 py-1">
+              <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
+                修改隧道端点
+                <InfoTip :text="TUNNEL_URL_TIP" />
+              </div>
+              <div class="flex items-center gap-2">
+                <Input
+                  ref="tunnelUrlInputRef"
+                  v-model="tunnelUrlEditInput"
+                  placeholder="wss://gate.ponyjob.top/ws"
+                  class="font-mono text-xs h-8 bg-background"
+                  @keyup.enter="saveTunnel"
+                  @keydown.esc="cancelEditTunnelUrl"
+                />
+                <button
+                  type="button"
+                  @click="saveTunnel"
+                  :disabled="tunnelSaving || !tunnelUrlEditInput.trim()"
+                  title="保存 (Enter)"
+                  aria-label="保存"
+                  class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                >
+                  <RefreshCw v-if="tunnelSaving" class="size-3.5 animate-spin" />
+                  <Check v-else class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  @click="cancelEditTunnelUrl"
+                  title="取消 (Esc)"
+                  aria-label="取消"
+                  class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                >
+                  <X class="size-3.5" />
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- 方案 B：远端代理详细配置 -->
-        <div v-if="currentMode === 'chained'" class="space-y-3.5 pt-1">
-          <!-- 口令一键导入 -->
-          <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-2">
-            <div class="text-xs font-semibold flex items-center gap-1.5">
-              <Share2 class="h-3.5 w-3.5 text-blue-600" />
-              口令一键导入 (多端同步)
+        <!-- 远端代理通道配置 -->
+        <div v-else class="space-y-3 pt-1">
+          <!-- 同步口令导入 -->
+          <div>
+            <div v-if="!isImportingSync" class="flex items-center justify-between gap-4 py-1">
+              <div class="space-y-0.5 min-w-0">
+                <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
+                  同步口令
+                  <InfoTip :text="SYNC_URI_TIP" />
+                </div>
+                <div class="text-[11px] text-muted-foreground">
+                  支持快速导入远端节点与认证信息
+                </div>
+              </div>
+              <button
+                type="button"
+                @click="startImportSync"
+                title="导入同步口令"
+                aria-label="导入同步口令"
+                class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+              >
+                <Download class="size-3.5" />
+              </button>
             </div>
-            <div class="flex gap-2">
-              <Input
-                v-model="importSyncUri"
-                placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
-                class="text-xs font-mono"
-                @keyup.enter="doImportSync"
-              />
-              <Button @click="doImportSync" class="text-xs h-9 shrink-0 cursor-pointer">一键导入</Button>
+
+            <div v-else class="space-y-2 py-1">
+              <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
+                导入同步口令
+                <InfoTip :text="SYNC_URI_TIP" />
+              </div>
+              <div class="flex items-center gap-2">
+                <Input
+                  ref="importSyncInputRef"
+                  v-model="importSyncUri"
+                  placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
+                  class="font-mono text-xs h-8 bg-background"
+                  @keyup.enter="doImportSync"
+                  @keydown.esc="cancelImportSync"
+                />
+                <button
+                  type="button"
+                  @click="doImportSync"
+                  :disabled="!importSyncUri.trim()"
+                  title="导入 (Enter)"
+                  aria-label="导入"
+                  class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                >
+                  <Check class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  @click="cancelImportSync"
+                  title="取消 (Esc)"
+                  aria-label="取消"
+                  class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                >
+                  <X class="size-3.5" />
+                </button>
+              </div>
             </div>
-            <p class="text-[11px] text-muted-foreground">
-              由 Linux Server 执行 <code>pproxy user add</code> 或 <code>pproxy sync export</code> 导出
-            </p>
           </div>
 
-          <!-- 手动参数配置 -->
-          <div class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-3">
-            <div class="text-xs font-semibold">手动配置服务器参数</div>
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div class="sm:col-span-3 space-y-1">
-                <Label class="text-xs text-muted-foreground">服务器地址 (IP 或域名 : 端口)</Label>
-                <Input v-model="remoteHost" placeholder="例如 192.168.1.100:8899" class="text-xs font-mono" />
+          <!-- 服务器参数配置 -->
+          <div class="border-t border-border/30 pt-3">
+            <div v-if="!isEditingRemote" class="flex items-center justify-between gap-4 py-1">
+              <div class="space-y-1 min-w-0">
+                <div class="text-xs font-medium text-foreground">服务器配置</div>
+                <div class="text-[11px] text-muted-foreground font-mono space-y-0.5">
+                  <div>地址：{{ remoteHost || '未设置' }}</div>
+                  <div>用户：{{ remoteUser || '未设置' }} · 密码：{{ remotePass ? '••••••••' : '未设置' }}</div>
+                </div>
               </div>
-              <div class="space-y-1">
-                <Label class="text-xs text-muted-foreground">用户名</Label>
-                <Input v-model="remoteUser" placeholder="用户名" class="text-xs" />
+              <button
+                type="button"
+                @click="startEditRemote"
+                title="修改服务器配置"
+                aria-label="修改服务器配置"
+                class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+              >
+                <Pencil class="size-3.5" />
+              </button>
+            </div>
+
+            <div v-else class="space-y-2.5 py-1">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-medium text-foreground">修改服务器配置</span>
+                <div class="flex items-center gap-1">
+                  <button
+                    type="button"
+                    @click="saveRemoteConfig"
+                    :disabled="isSaving"
+                    title="保存配置 (Enter)"
+                    aria-label="保存配置"
+                    class="h-7 w-7 rounded-md inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                  >
+                    <RefreshCw v-if="isSaving" class="size-3.5 animate-spin" />
+                    <Check v-else class="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    @click="cancelEditRemote"
+                    title="取消 (Esc)"
+                    aria-label="取消"
+                    class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                  >
+                    <X class="size-3.5" />
+                  </button>
+                </div>
               </div>
-              <div class="sm:col-span-2 space-y-1">
-                <Label class="text-xs text-muted-foreground flex items-center gap-1">
-                  远端代理密码
-                  <InfoTip :text="REMOTE_PASS_TIP" />
-                </Label>
-                <Input v-model="remotePass" type="password" placeholder="你自己服务器的代理密码，与加速授权码无关" class="text-xs" />
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <div class="sm:col-span-3 space-y-1">
+                  <Label for="remote-host-input" class="text-[11px] text-muted-foreground">服务器地址</Label>
+                  <Input
+                    id="remote-host-input"
+                    ref="remoteHostInputRef"
+                    v-model="editRemoteHost"
+                    placeholder="例如 192.168.1.100:8899"
+                    class="text-xs font-mono h-8 bg-background"
+                    @keyup.enter="saveRemoteConfig"
+                    @keydown.esc="cancelEditRemote"
+                  />
+                </div>
+                <div class="space-y-1">
+                  <Label for="remote-user-input" class="text-[11px] text-muted-foreground">用户名</Label>
+                  <Input
+                    id="remote-user-input"
+                    v-model="editRemoteUser"
+                    placeholder="用户名"
+                    class="text-xs h-8 bg-background"
+                    @keyup.enter="saveRemoteConfig"
+                    @keydown.esc="cancelEditRemote"
+                  />
+                </div>
+                <div class="sm:col-span-2 space-y-1">
+                  <Label for="remote-pass-input" class="text-[11px] text-muted-foreground flex items-center gap-1">
+                    代理密码
+                    <InfoTip :text="REMOTE_PASS_TIP" />
+                  </Label>
+                  <Input
+                    id="remote-pass-input"
+                    v-model="editRemotePass"
+                    type="password"
+                    placeholder="留空表示保留当前密码"
+                    class="text-xs h-8 bg-background"
+                    @keyup.enter="saveRemoteConfig"
+                    @keydown.esc="cancelEditRemote"
+                  />
+                </div>
               </div>
             </div>
-          </div>
-
-          <div class="flex justify-end pt-1">
-            <Button @click="saveModeConfig" :disabled="isSaving" class="text-xs h-9 font-medium px-4 cursor-pointer">
-              <RefreshCw v-if="isSaving" class="h-3.5 w-3.5 mr-1.5 animate-spin" />
-              {{ isSaving ? '保存中…' : '保存并连接' }}
-            </Button>
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
 
-    <!-- 自定义加速域名名单（白名单） -->
-    <Card class="border-border shadow-sm">
-      <CardHeader class="pb-3">
-        <div class="flex items-center justify-between">
-          <CardTitle class="text-base flex items-center gap-2">
-            <ShieldCheck class="h-4 w-4 text-emerald-600" />
-            智能分流加速名单
-          </CardTitle>
-          <span class="rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground font-mono">
+    <!-- 域名名单 -->
+    <section class="space-y-2.5">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-sm font-bold text-foreground">域名名单</h2>
+          <p class="text-xs text-muted-foreground mt-0.5">智能分流模式下加速的域名，支持二级域名自动覆盖；常用站点已内置</p>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <span class="text-[11px] text-muted-foreground font-mono">
             {{ whitelistEntries.length }} 个自定义
           </span>
-        </div>
-        <CardDescription>
-          智能分流模式下生效。添加主域名（如 huggingface.co）将自动覆盖全部子域名；常用海外站点已默认内置。
-        </CardDescription>
-      </CardHeader>
-      <CardContent class="space-y-3">
-        <div class="flex gap-2">
-          <Input
-            v-model="newWhitelistEntry"
-            placeholder="输入需要加速的域名或网址，如 huggingface.co"
-            class="text-xs font-mono"
-            @keyup.enter="addWhitelistEntry()"
-          />
-          <Button
-            size="sm"
-            class="text-xs h-9 shrink-0 cursor-pointer"
-            :disabled="!newWhitelistEntry.trim() || isAddingDomain"
-            @click="addWhitelistEntry()"
+          <button
+            type="button"
+            @click="startAddWhitelist"
+            title="添加域名"
+            aria-label="添加域名"
+            class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
           >
-            <Plus class="h-3.5 w-3.5 mr-1" />
-            {{ isAddingDomain ? '添加中…' : '添加域名' }}
-          </Button>
+            <Plus class="size-3.5" />
+          </button>
+        </div>
+      </div>
+
+      <div class="rounded-xl bg-muted/60 dark:bg-muted/25 border border-border/20 p-4 space-y-3">
+        <!-- 添加输入行（非常态） -->
+        <div v-if="isAddingWhitelist" class="flex items-center gap-2 pb-1">
+          <Input
+            ref="whitelistInputRef"
+            v-model="newWhitelistEntry"
+            placeholder="输入域名，如 huggingface.co"
+            class="font-mono text-xs h-8 bg-background"
+            @keyup.enter="addWhitelistEntry()"
+            @keydown.esc="cancelAddWhitelist"
+          />
+          <button
+            type="button"
+            @click="addWhitelistEntry()"
+            :disabled="!newWhitelistEntry.trim() || isAddingDomain"
+            title="确认添加 (Enter)"
+            aria-label="确认添加"
+            class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+          >
+            <RefreshCw v-if="isAddingDomain" class="size-3.5 animate-spin" />
+            <Check v-else class="size-3.5" />
+          </button>
+          <button
+            type="button"
+            @click="cancelAddWhitelist"
+            title="取消 (Esc)"
+            aria-label="取消"
+            class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+          >
+            <X class="size-3.5" />
+          </button>
         </div>
 
-        <div v-if="whitelistEntries.length" class="flex flex-wrap gap-1.5 pt-1">
+        <!-- 域名标签展示 -->
+        <div v-if="whitelistEntries.length" class="flex flex-wrap gap-1.5">
           <span
             v-for="(e, i) in whitelistEntries"
             :key="e"
-            class="inline-flex items-center gap-1.5 rounded-full bg-muted/80 hover:bg-muted px-3 py-1 text-xs text-foreground/90 border border-border/50 shadow-xs font-mono transition-colors"
+            class="inline-flex items-center gap-1.5 rounded-md bg-muted/80 dark:bg-muted px-2.5 py-1 text-xs text-foreground font-mono transition-colors"
           >
             {{ e }}
             <button
               type="button"
-              class="rounded-full text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 leading-none p-0.5 cursor-pointer ml-0.5 transition-colors"
+              class="size-5 inline-flex items-center justify-center -mr-1 rounded hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground cursor-pointer transition-colors focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
               title="移除域名"
               :aria-label="`移除域名 ${e}`"
               @click="removeWhitelistEntry(i)"
             >
-              ×
+              <X class="size-3" />
             </button>
           </span>
         </div>
-        <div v-else class="rounded-lg border border-dashed border-border py-4 text-center text-xs text-muted-foreground">
-          暂无自定义域名，可在上方输入框添加
+        <div v-else class="py-2 text-center text-xs text-muted-foreground">
+          暂无自定义域名，可点击右上角加号添加
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
 
-    <!-- API 反代地址生成 -->
-    <Card class="border-border shadow-sm">
-      <CardHeader class="pb-3">
-        <div class="flex items-center justify-between">
-          <CardTitle class="text-base flex items-center gap-2">
-            <Link2 class="h-4 w-4 text-primary" />
-            API 反代地址生成
-          </CardTitle>
-          <span class="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">一键生成</span>
-        </div>
-        <CardDescription>输入模型提供商的 base_url，自动推导路由并用反代访问令牌生成 SDK 接入地址</CardDescription>
-      </CardHeader>
-      <CardContent class="space-y-3">
-        <!-- Token 凭据栏 -->
-        <div class="flex items-center justify-between rounded-lg bg-muted/40 px-3 py-2 text-xs">
-          <div class="flex items-center gap-2">
-            <ShieldCheck class="h-3.5 w-3.5 text-primary" />
-            <span class="font-medium text-foreground">反代访问令牌</span>
-            <span v-if="apiProxyTokenSaved" class="text-[11px] text-emerald-600 font-mono">
-              {{ apiProxyTokenSaved.slice(0, 10) }}…{{ apiProxyTokenSaved.slice(-6) }}
-            </span>
-            <span v-else class="text-[11px] text-amber-600">未配置（将使用 &lt;token&gt; 占位）</span>
+    <!-- API 反代 -->
+    <section class="space-y-2.5">
+      <div>
+        <h2 class="text-sm font-bold text-foreground flex items-center gap-1.5">
+          API 反代
+          <InfoTip :text="ACCESS_URL_TIP" />
+        </h2>
+        <p class="text-xs text-muted-foreground mt-0.5">转换模型服务 base_url 并注入凭据，生成 SDK 接入地址</p>
+      </div>
+
+      <div class="rounded-xl bg-muted/60 dark:bg-muted/25 border border-border/20 p-4 space-y-3">
+        <!-- 反代令牌配置项 -->
+        <div>
+          <div v-if="!isEditingApiToken" class="flex items-center justify-between gap-4 py-1">
+            <div class="space-y-0.5 min-w-0">
+              <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
+                反代令牌
+                <InfoTip :text="API_TOKEN_TIP" />
+              </div>
+              <div class="text-[11px] text-muted-foreground font-mono truncate">
+                <span v-if="apiProxyTokenSaved">{{ apiProxyTokenSaved.slice(0, 10) }}…{{ apiProxyTokenSaved.slice(-6) }}</span>
+                <span v-else>未配置（将使用 &lt;token&gt; 占位）</span>
+              </div>
+            </div>
+            <div class="flex items-center gap-1 shrink-0">
+              <!-- 清除令牌带二次确认 -->
+              <div v-if="apiProxyTokenSaved" class="inline-flex items-center">
+                <div v-if="confirmingClearApiToken" class="flex items-center gap-1.5 bg-background px-2 py-0.5 rounded-md border border-rose-500/30 text-[11px]">
+                  <span class="text-rose-500 font-medium">确定清空？</span>
+                  <button
+                    type="button"
+                    @click="clearApiTokenAction"
+                    class="text-rose-600 font-medium hover:underline cursor-pointer focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
+                  >
+                    是
+                  </button>
+                  <button
+                    type="button"
+                    @click="confirmingClearApiToken = false"
+                    class="text-muted-foreground hover:underline cursor-pointer ml-0.5 focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
+                  >
+                    否
+                  </button>
+                </div>
+                <button
+                  v-else
+                  type="button"
+                  @click="confirmingClearApiToken = true"
+                  title="清空令牌"
+                  aria-label="清空令牌"
+                  class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-rose-500 hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+                >
+                  <Trash2 class="size-3.5" />
+                </button>
+              </div>
+              <button
+                type="button"
+                @click="startEditApiToken"
+                title="修改反代令牌"
+                aria-label="修改反代令牌"
+                class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+              >
+                <Pencil class="size-3.5" />
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            class="text-[11px] text-primary hover:underline cursor-pointer"
-            @click="showTokenConfig = !showTokenConfig"
-          >
-            {{ showTokenConfig ? '收起配置' : (apiProxyTokenSaved ? '修改令牌' : '配置令牌') }}
-          </button>
+
+          <div v-else class="space-y-2 py-1">
+            <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
+              修改反代令牌
+              <InfoTip :text="API_TOKEN_TIP" />
+            </div>
+            <div class="flex items-center gap-2">
+              <Input
+                ref="apiTokenInputRef"
+                v-model="apiProxyTokenInput"
+                placeholder="请输入形如 pony_31abc... 的访问令牌"
+                class="font-mono text-xs h-8 bg-background"
+                @keyup.enter="saveApiProxyToken"
+                @keydown.esc="cancelEditApiToken"
+              />
+              <button
+                type="button"
+                @click="saveApiProxyToken"
+                title="保存 (Enter)"
+                aria-label="保存"
+                class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+              >
+                <Check class="size-3.5" />
+              </button>
+              <button
+                type="button"
+                @click="cancelEditApiToken"
+                title="取消 (Esc)"
+                aria-label="取消"
+                class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+              >
+                <X class="size-3.5" />
+              </button>
+            </div>
+          </div>
         </div>
 
-        <!-- Token 修改展开区 -->
-        <div v-if="showTokenConfig" class="rounded-lg border border-border/60 bg-muted/20 p-3 space-y-2">
-          <div class="flex gap-2">
+        <!-- 地址生成行 -->
+        <div class="border-t border-border/30 pt-3 space-y-2">
+          <div class="flex items-center gap-2">
             <Input
-              v-model="apiProxyTokenInput"
-              placeholder="请输入形如 pony_31abc... 的数据面访问令牌"
-              class="font-mono text-xs"
-              @keyup.enter="saveApiProxyToken"
+              v-model="providerBaseUrl"
+              placeholder="例如 https://api.anthropic.com 或 api.openai.com/v1"
+              class="font-mono text-xs h-8 bg-background"
+              @keyup.enter="generateAccessUrls"
             />
             <Button
               size="sm"
               variant="secondary"
-              class="text-xs h-9 shrink-0 cursor-pointer"
-              @click="saveApiProxyToken"
+              class="text-xs h-8 shrink-0 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+              :disabled="accessGenerating || !providerBaseUrl.trim()"
+              @click="generateAccessUrls"
             >
-              保存令牌
-            </Button>
-          </div>
-          <p class="text-[11px] text-muted-foreground leading-relaxed">
-            反代网关鉴权需使用形如 <code class="font-mono text-primary">pony_xxx</code> 的令牌。输入后持久化保存在系统凭据库，后续一键生成均自动填充。
-          </p>
-        </div>
-
-        <div class="flex gap-2">
-          <Input
-            v-model="providerBaseUrl"
-            placeholder="https://api.anthropic.com、api.openai.com/v1 或 api.b.ai/v1"
-            class="font-mono text-xs"
-            @keyup.enter="generateAccessUrls"
-          />
-          <Button
-            size="sm"
-            class="text-xs h-9 shrink-0 cursor-pointer"
-            :disabled="accessGenerating || !providerBaseUrl.trim()"
-            @click="generateAccessUrls"
-          >
-            <Wand2 v-if="!accessGenerating" class="h-3.5 w-3.5 mr-1" />
-            <RefreshCw v-else class="h-3.5 w-3.5 mr-1 animate-spin" />
-            {{ accessGenerating ? '生成中…' : '一键生成' }}
-          </Button>
-        </div>
-        <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <InfoTip :text="ACCESS_URL_TIP" />
-          <span>带不带 https:// 均可；保留 /v1 等路径；路由自动识别（如 anthropic / openai / bai）</span>
-        </div>
-
-        <!-- 生成结果 -->
-        <div v-if="accessResult" class="rounded-xl border border-border/80 bg-muted/20 p-3.5 space-y-2.5">
-          <div class="flex items-center justify-between">
-            <span class="inline-flex items-center gap-1.5 text-xs font-medium">
-              路由
-              <code class="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary">{{ accessResult.route }}</code>
-            </span>
-            <span
-              v-if="accessResult.has_token"
-              class="text-[11px] text-emerald-600 font-medium"
-            >
-              已填入反代访问令牌
-            </span>
-            <span v-else class="text-[11px] text-amber-600 font-medium">
-              <code class="font-mono">&lt;token&gt;</code> 占位：请配置 <code class="font-mono">pony_xxx</code> 令牌
-            </span>
-          </div>
-
-          <!-- 本机接入地址 -->
-          <div class="flex items-center gap-2">
-            <span class="w-16 shrink-0 text-[11px] text-muted-foreground">本机</span>
-            <code
-              class="min-w-0 flex-1 truncate rounded-md bg-background/70 px-2 py-1.5 font-mono text-xs"
-              :title="accessResult.local_url"
-            >{{ accessResult.local_url }}</code>
-            <Button
-              variant="outline"
-              size="sm"
-              class="text-[11px] h-7 px-2 shrink-0 cursor-pointer"
-              @click="copyAccessUrl('local')"
-            >
-              <Check v-if="accessCopied === 'local'" class="h-3 w-3 mr-1 text-emerald-600" />
-              <Share2 v-else class="h-3 w-3 mr-1" />
-              {{ accessCopied === 'local' ? '已复制' : '复制' }}
+              <RefreshCw v-if="accessGenerating" class="size-3.5 mr-1 animate-spin" />
+              {{ accessGenerating ? '生成中…' : '生成' }}
             </Button>
           </div>
 
-          <!-- 公网接入地址 -->
-          <div class="flex items-center gap-2">
-            <span class="w-16 shrink-0 text-[11px] text-muted-foreground">公网</span>
-            <code
-              class="min-w-0 flex-1 truncate rounded-md bg-background/70 px-2 py-1.5 font-mono text-xs"
-              :title="accessResult.public_url"
-            >{{ accessResult.public_url }}</code>
-            <Button
-              variant="outline"
-              size="sm"
-              class="text-[11px] h-7 px-2 shrink-0 cursor-pointer"
-              @click="copyAccessUrl('public')"
-            >
-              <Check v-if="accessCopied === 'public'" class="h-3 w-3 mr-1 text-emerald-600" />
-              <Share2 v-else class="h-3 w-3 mr-1" />
-              {{ accessCopied === 'public' ? '已复制' : '复制' }}
-            </Button>
-          </div>
+          <!-- 生成结果展示 -->
+          <div v-if="accessResult" class="rounded-lg bg-background/60 p-3 space-y-2 text-xs">
+            <div class="flex items-center justify-between text-[11px]">
+              <span class="text-muted-foreground">路由：<code class="font-mono font-medium text-foreground">{{ accessResult.route }}</code></span>
+              <span v-if="accessResult.has_token" class="text-muted-foreground font-medium">已注入令牌</span>
+              <span v-else class="text-muted-foreground">未配置令牌，需手动替换 &lt;token&gt;</span>
+            </div>
 
-          <p class="text-[11px] leading-relaxed text-muted-foreground">
-            粘贴到 SDK / 客户端的 base_url 即可（如
-            <code class="font-mono">ANTHROPIC_BASE_URL=…</code>）；公网地址供手机或外网设备接入。
-          </p>
-        </div>
-      </CardContent>
-    </Card>
+            <div class="flex items-center justify-between gap-2">
+              <span class="w-10 text-[11px] text-muted-foreground shrink-0">本机</span>
+              <code class="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground bg-muted/70 px-2 py-1 rounded" :title="accessResult.local_url">
+                {{ accessResult.local_url }}
+              </code>
+              <button
+                type="button"
+                @click="copyAccessUrl('local')"
+                title="复制本机地址"
+                aria-label="复制本机地址"
+                class="h-7 w-7 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+              >
+                <Check v-if="accessCopied === 'local'" class="size-3.5" />
+                <Copy v-else class="size-3.5" />
+              </button>
+            </div>
 
-    <!-- 启动与系统偏好 -->
-    <Card class="border-border shadow-sm">
-      <CardHeader class="pb-3">
-        <div class="flex items-center justify-between">
-          <CardTitle class="text-base flex items-center gap-2">
-            <Sparkles class="h-4 w-4 text-primary" />
-            启动与系统偏好
-          </CardTitle>
-        </div>
-        <CardDescription>
-          管理软件启动时的默认行为
-        </CardDescription>
-      </CardHeader>
-      <CardContent class="space-y-4">
-        <div class="flex items-center justify-between rounded-xl border border-border/80 bg-muted/20 p-3.5">
-          <div class="space-y-0.5 pr-4">
-            <div class="text-xs font-semibold text-foreground">启动即默认开启代理</div>
-            <div class="text-xs text-muted-foreground">软件启动时自动接管系统代理（默认开启智能分流模式）</div>
+            <div class="flex items-center justify-between gap-2">
+              <span class="w-10 text-[11px] text-muted-foreground shrink-0">公网</span>
+              <code class="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground bg-muted/70 px-2 py-1 rounded" :title="accessResult.public_url">
+                {{ accessResult.public_url }}
+              </code>
+              <button
+                type="button"
+                @click="copyAccessUrl('public')"
+                title="复制公网地址"
+                aria-label="复制公网地址"
+                class="h-7 w-7 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+              >
+                <Check v-if="accessCopied === 'public'" class="size-3.5" />
+                <Copy v-else class="size-3.5" />
+              </button>
+            </div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 启动偏好 -->
+    <section class="space-y-2.5">
+      <div>
+        <h2 class="text-sm font-bold text-foreground">启动偏好</h2>
+        <p class="text-xs text-muted-foreground mt-0.5">管理应用启动时的默认网络行为</p>
+      </div>
+
+      <div class="rounded-xl bg-muted/60 dark:bg-muted/25 border border-border/20 p-4">
+        <div class="flex items-center justify-between gap-4">
+          <label for="auto-proxy-switch" class="space-y-0.5 cursor-pointer">
+            <div class="text-xs font-medium text-foreground">开机自动开启代理</div>
+            <div class="text-[11px] text-muted-foreground">软件启动时自动接管系统代理</div>
+          </label>
           <Switch
+            id="auto-proxy-switch"
+            aria-label="开机自动开启代理"
             :model-value="autoProxyEnabled"
             @update:model-value="handleAutoProxyToggle"
             :disabled="autoProxySaving"
           />
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </section>
 
-    <!-- 系统与维护：网络急救箱与软件更新并排 -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-      <!-- 网络急救箱 -->
-      <Card class="border-amber-500/30 bg-amber-500/[0.03] shadow-sm flex flex-col justify-between">
-        <CardHeader class="pb-2">
-          <CardTitle class="text-sm flex items-center gap-2 text-amber-700 dark:text-amber-400">
-            <LifeBuoy class="h-4 w-4 shrink-0" />
-            网络急救箱 (Windows)
-          </CardTitle>
-          <CardDescription class="text-xs min-h-[2rem] flex items-center">
-            如果软件异常退出导致电脑无法上网，一键清除所有系统代理残留并恢复直连。
-          </CardDescription>
-        </CardHeader>
-        <CardContent class="pt-2">
+    <!-- 系统维护 -->
+    <section class="space-y-2.5">
+      <div>
+        <h2 class="text-sm font-bold text-foreground">系统维护</h2>
+        <p class="text-xs text-muted-foreground mt-0.5">网络状态急救与客户端版本管理</p>
+      </div>
+
+      <div class="rounded-xl bg-muted/60 dark:bg-muted/25 border border-border/20 p-4 space-y-4">
+        <!-- 网络急救 -->
+        <div class="flex items-center justify-between gap-4">
+          <div class="space-y-0.5">
+            <div class="text-xs font-medium text-foreground">网络急救</div>
+            <div class="text-[11px] text-muted-foreground">异常退出导致无法联网时，一键清除代理残留并恢复直连</div>
+          </div>
           <Button
-            variant="outline"
+            variant="secondary"
             size="sm"
             @click="triggerRescue"
-            class="w-full border-amber-500/40 text-amber-700 dark:text-amber-400 hover:bg-amber-500/10 text-xs h-8.5 cursor-pointer"
+            class="text-xs h-8 cursor-pointer shrink-0 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
           >
-            <LifeBuoy class="h-3.5 w-3.5 mr-1.5" />
-            一键恢复系统网络直连
+            <LifeBuoy class="size-3.5 mr-1 text-muted-foreground" />
+            恢复直连
           </Button>
-        </CardContent>
-      </Card>
-
-      <!-- 软件更新 -->
-      <Card class="border-border shadow-sm flex flex-col justify-between relative overflow-hidden">
-        <!-- 顶部无侵入式进度指示条：绝对定位，零垂直流高度占位，杜绝布局抖动 -->
-        <div
-          v-if="checking || downloading || downloaded"
-          class="absolute top-0 inset-x-0 h-1 z-10 overflow-hidden bg-emerald-500/20"
-        >
-          <Progress
-            v-if="checking"
-            indeterminate
-            class="h-1 rounded-none bg-transparent"
-            indicator-class="bg-emerald-600"
-          />
-          <div
-            v-else
-            class="h-full bg-emerald-600 transition-all duration-300 ease-out"
-            :style="{ width: `${downloadProgress}%` }"
-          />
         </div>
 
-        <CardHeader class="pb-2">
-          <div class="flex items-center justify-between">
-            <CardTitle class="text-sm flex items-center gap-2">
-              <Download class="h-4 w-4 text-emerald-600 shrink-0" />
-              软件更新
-            </CardTitle>
-            <span class="text-xs font-mono font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-md">
-              当前版本 v{{ currentVersion }}
-            </span>
-          </div>
-          <CardDescription class="text-xs min-h-[2rem] flex items-center">
-            <span v-if="downloading" class="text-emerald-600 font-medium">
-              新版本安装包下载中 ({{ downloadProgress }}%)…
-            </span>
-            <span v-else-if="downloaded" class="text-emerald-600 font-medium">
-              下载完成，即将启动安装程序…
-            </span>
-            <span v-else-if="checking" class="text-primary font-medium flex items-center gap-1.5">
-              <RefreshCw class="h-3 w-3 animate-spin" />
-              正在检查新版本…
-            </span>
-            <span v-else-if="updateError" class="text-rose-600 dark:text-rose-400 line-clamp-2" :title="updateError">
-              检查失败：{{ updateError }}
-            </span>
-            <span v-else-if="updateAvailable" class="text-emerald-600 font-medium">
-              发现新版本 v{{ updateVersion }}（当前 v{{ currentVersion }}），可立即升级
-            </span>
-            <span v-else class="text-muted-foreground">
-              当前已是最新版本 (v{{ currentVersion }})，保持最新以获得最佳体验
-            </span>
-          </CardDescription>
-        </CardHeader>
-        <CardContent class="pt-2">
-          <Button
-            v-if="downloading || downloaded"
-            disabled
-            size="sm"
-            class="w-full text-xs h-8.5 relative overflow-hidden bg-emerald-600 text-white opacity-95 cursor-not-allowed border-0"
+        <!-- 软件更新 -->
+        <div class="border-t border-border/30 pt-3 flex items-center justify-between gap-4 relative overflow-hidden">
+          <div
+            v-if="checking || downloading || downloaded"
+            class="absolute top-0 inset-x-0 h-0.5 overflow-hidden bg-muted"
           >
+            <Progress
+              v-if="checking"
+              indeterminate
+              class="h-0.5 rounded-none bg-transparent"
+            />
             <div
-              class="absolute inset-y-0 left-0 bg-emerald-700/60 transition-all duration-200"
+              v-else
+              class="h-full bg-foreground transition-all duration-300 ease-out"
               :style="{ width: `${downloadProgress}%` }"
             />
-            <span class="relative z-10 flex items-center justify-center">
-              <Check v-if="downloaded" class="h-3.5 w-3.5 mr-1.5" />
-              <Download v-else class="h-3.5 w-3.5 mr-1.5 animate-bounce" />
-              {{ downloaded ? '即将启动安装器…' : `正在下载 (${downloadProgress}%)` }}
-            </span>
-          </Button>
-          <Button
-            v-else-if="updateAvailable"
-            @click="downloadAndInstall"
-            size="sm"
-            class="w-full text-xs h-8.5 cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white"
-          >
-            <Download class="h-3.5 w-3.5 mr-1.5" />
-            立即升级至 {{ updateVersion }}
-          </Button>
-          <Button
-            v-else
-            variant="outline"
-            size="sm"
-            @click="handleCheckUpdate"
-            :disabled="checking"
-            class="w-full text-xs h-8.5 cursor-pointer"
-          >
-            <RefreshCw v-if="checking" class="h-3 w-3 mr-1.5 animate-spin" />
-            {{ checking ? '正在检查…' : '检查新版本' }}
-          </Button>
-        </CardContent>
-      </Card>
-    </div>
+          </div>
+
+          <div class="space-y-0.5">
+            <div class="text-xs font-medium text-foreground flex items-center gap-2">
+              软件更新
+              <span class="text-[11px] font-mono text-muted-foreground">v{{ currentVersion }}</span>
+            </div>
+            <div class="text-[11px] text-muted-foreground">
+              <span v-if="downloading">下载更新包中 ({{ downloadProgress }}%)…</span>
+              <span v-else-if="downloaded">下载完成，即将启动安装…</span>
+              <span v-else-if="checking">正在检查新版本…</span>
+              <span v-else-if="updateError" class="text-rose-500">检查失败：{{ updateError }}</span>
+              <span v-else-if="updateAvailable">发现新版本 v{{ updateVersion }}</span>
+              <span v-else>已是最新版本</span>
+            </div>
+          </div>
+
+          <div class="shrink-0">
+            <Button
+              v-if="downloading || downloaded"
+              disabled
+              size="sm"
+              variant="secondary"
+              class="text-xs h-8 cursor-not-allowed"
+            >
+              <Download class="size-3.5 mr-1 animate-bounce" />
+              {{ downloaded ? '启动中…' : `${downloadProgress}%` }}
+            </Button>
+            <Button
+              v-else-if="updateAvailable"
+              size="sm"
+              @click="downloadAndInstall"
+              class="text-xs h-8 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+            >
+              <Download class="size-3.5 mr-1" />
+              升级至 v{{ updateVersion }}
+            </Button>
+            <Button
+              v-else
+              variant="secondary"
+              size="sm"
+              @click="handleCheckUpdate"
+              :disabled="checking"
+              class="text-xs h-8 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+            >
+              <RefreshCw v-if="checking" class="size-3.5 mr-1 animate-spin" />
+              {{ checking ? '检查中…' : '检查更新' }}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
-

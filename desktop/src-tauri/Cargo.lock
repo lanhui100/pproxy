@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "pony-desktop"
-version = "0.3.33"
+version = "0.3.34"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",

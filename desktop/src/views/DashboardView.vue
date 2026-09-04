@@ -36,6 +36,7 @@ const toast = useToast()
 
 // 运行状态
 const isRunning = ref(false)
+const isToggling = ref(false)
 const proxyMode = ref<'whitelist' | 'global'>('whitelist')
 const isConfigured = ref(false)
 const configInfo = ref<{
@@ -53,10 +54,7 @@ const configInfo = ref<{
 // 新手向导状态
 const setupTab = ref<'direct' | 'chained'>('direct')
 const cfToken = ref('')
-const GATE_INPUT_TIP =
-  '加速授权码（隧道令牌）用于开通 Cloudflare / Vercel 双出网通道。' +
-  '请向服务提供方（部署管理员）索取：可直接粘贴 pony-gate:// 连接口令（端点+令牌一步到位），' +
-  '或仅粘贴裸授权码（端点沿用默认双通道）。与 Cloudflare 官网 API Token 无关。'
+const GATE_INPUT_TIP = '用于开通出口通道。支持粘贴 pony-gate:// 口令或授权码。由服务管理员提供。'
 const syncUriInput = ref('')
 const remoteHost = ref('')
 const remoteUser = ref('')
@@ -88,7 +86,7 @@ interface TrafficStats {
   hourly?: HourUsage[]
 }
 const traffic = ref<TrafficStats | null>(null)
-const usageDimension = ref<'7d' | '24h'>('7d')
+const usageDimension = ref<'7d' | '24h'>('24h')
 
 function bucketBytes(b?: TrafficBucket): number {
   if (!b) return 0
@@ -306,8 +304,8 @@ interface SiteRow {
 }
 
 const ifaceRows = ref<IfaceRow[]>([
-  { id: 'cf', name: 'C出口', endpoint: '', history: [], testing: false },
-  { id: 'vercel', name: 'V出口', endpoint: '', history: [], testing: false },
+  { id: 'cf', name: '出口C', endpoint: '', history: [], testing: false },
+  { id: 'vercel', name: '出口V', endpoint: '', history: [], testing: false },
 ])
 
 const siteRows = ref<SiteRow[]>([
@@ -504,11 +502,13 @@ async function refreshStatus() {
 }
 
 async function toggleProxy() {
-  if (!isTauri()) {
-    isRunning.value = !isRunning.value
-    return
-  }
+  if (isToggling.value) return
+  isToggling.value = true
   try {
+    if (!isTauri()) {
+      isRunning.value = !isRunning.value
+      return
+    }
     const { invoke } = await import('@tauri-apps/api/core')
     if (isRunning.value) {
       await invoke('proxy_disable')
@@ -522,13 +522,15 @@ async function toggleProxy() {
       isRunning.value = st.engine_running
       if (st.mode) proxyMode.value = st.mode
       if (!st.engine_running) {
-        toast.error('开启失败', '出网拨测未通过，系统代理未启用。请检查方案 A 授权码 / 方案 B 远端地址后重试')
+        toast.error('开启失败', '出网拨测未通过，系统代理未启用。请检查隧道令牌或远端服务器配置后重试')
         return
       }
       toast.success('智能加速已开启！')
     }
   } catch (e: any) {
     toast.error(typeof e === 'string' ? e : e?.message || '操作失败')
+  } finally {
+    isToggling.value = false
   }
 }
 
@@ -551,7 +553,7 @@ async function setProxyMode(mode: 'whitelist' | 'global') {
 async function submitDirectSetup() {
   const raw = cfToken.value.trim()
   if (!raw) {
-    toast.error('请粘贴连接口令或加速授权码')
+    toast.error('请粘贴隧道令牌或连接口令')
     return
   }
   isSubmitting.value = true
@@ -735,7 +737,7 @@ async function submitImportOrChained() {
             <div class="space-y-1.5">
               <div class="flex items-center justify-between">
                 <Label class="text-xs font-medium flex items-center gap-1">
-                  连接口令 / 加速授权码（隧道令牌）
+                  隧道令牌
                   <InfoTip :text="GATE_INPUT_TIP" />
                 </Label>
               </div>
@@ -744,6 +746,7 @@ async function submitImportOrChained() {
                 type="password"
                 placeholder="粘贴 pony-gate:// 连接口令，或仅粘贴授权码"
                 class="font-mono text-sm"
+                @keyup.enter="submitDirectSetup"
               />
             </div>
             <p class="text-xs text-muted-foreground flex items-center gap-1.5">
@@ -775,6 +778,7 @@ async function submitImportOrChained() {
                 v-model="syncUriInput"
                 placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
                 class="font-mono text-xs"
+                @keyup.enter="submitImportOrChained"
               />
               <p class="text-xs text-muted-foreground">
                 由 Linux Server 的 <code>pproxy user add</code> 或 <code>pproxy sync export</code> 导出
@@ -790,15 +794,15 @@ async function submitImportOrChained() {
             <div class="grid grid-cols-2 gap-3">
               <div class="col-span-2 space-y-1.5">
                 <Label class="text-xs">服务器地址</Label>
-                <Input v-model="remoteHost" placeholder="IP 或域名 : 端口，如 192.168.1.100:8899" class="text-sm" />
+                <Input v-model="remoteHost" placeholder="IP 或域名 : 端口，如 192.168.1.100:8899" class="text-sm" @keyup.enter="submitImportOrChained" />
               </div>
               <div class="space-y-1.5">
                 <Label class="text-xs">用户名</Label>
-                <Input v-model="remoteUser" placeholder="用户名" class="text-sm" />
+                <Input v-model="remoteUser" placeholder="用户名" class="text-sm" @keyup.enter="submitImportOrChained" />
               </div>
               <div class="space-y-1.5">
                 <Label class="text-xs">密码</Label>
-                <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" />
+                <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" @keyup.enter="submitImportOrChained" />
               </div>
             </div>
 
@@ -824,10 +828,12 @@ async function submitImportOrChained() {
         <section class="flex-1 flex flex-col items-center justify-center">
           <button
             @click="toggleProxy"
-            :title="isRunning ? '点击关闭加速' : '点击开启加速'"
-            :aria-label="isRunning ? '加速运行中，点击关闭' : '加速已停止，点击开启'"
+            :disabled="isToggling"
+            :title="isToggling ? '切换中…' : isRunning ? '点击关闭加速' : '点击开启加速'"
+            :aria-label="isToggling ? '正在切换加速状态' : isRunning ? '加速运行中，点击关闭' : '加速已停止，点击开启'"
             :class="[
               'h-20 w-20 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer',
+              isToggling ? 'opacity-60 cursor-not-allowed' : '',
               isRunning
                 ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25 hover:bg-emerald-600'
                 : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',

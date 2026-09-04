@@ -1,0 +1,67 @@
+import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+describe('UI/UX Specification Checks', () => {
+  const dashboardPath = resolve(__dirname, '../views/DashboardView.vue')
+  const settingsPath = resolve(__dirname, '../views/SettingsView.vue')
+
+  it('DashboardView defaults usage dimension to 24h', () => {
+    const content = readFileSync(dashboardPath, 'utf-8')
+    expect(content).toContain("const usageDimension = ref<'7d' | '24h'>('24h')")
+  })
+
+  it('DashboardView standardizes egress names to 出口C and 出口V', () => {
+    const content = readFileSync(dashboardPath, 'utf-8')
+    expect(content).toContain("name: '出口C'")
+    expect(content).toContain("name: '出口V'")
+    expect(content).not.toContain("name: 'C出口'")
+    expect(content).not.toContain("name: 'V出口'")
+  })
+
+  it('SettingsView aligns title, section headers and field naming', () => {
+    const content = readFileSync(settingsPath, 'utf-8')
+    // 标题必须是“设置”
+    expect(content).toContain('text-xl font-bold tracking-tight text-foreground">设置</h1>')
+    expect(content).not.toContain('设置中心')
+
+    // 加速模式 & 去除方案A/B
+    expect(content).toContain('加速模式')
+    expect(content).not.toContain('加速出网方案')
+    expect(content).not.toContain('方案 A')
+    expect(content).not.toContain('方案 B')
+
+    // 字段精简化
+    expect(content).toContain('隧道令牌')
+    expect(content).not.toContain('连接口令 / 加速授权码')
+    expect(content).toContain('隧道端点')
+    expect(content).not.toContain('隧道中继端点与令牌')
+    expect(content).toContain('同步口令')
+    expect(content).not.toContain('口令一键导入 (多端同步)')
+    expect(content).toContain('服务器配置')
+    expect(content).not.toContain('手动配置服务器参数')
+    expect(content).toContain('域名名单')
+    expect(content).not.toContain('智能分流加速名单')
+    expect(content).toContain('反代令牌')
+    expect(content).not.toContain('反代访问令牌')
+
+    // 去卡片化
+    expect(content).not.toContain('<Card')
+    expect(content).not.toContain('CardTitle')
+    expect(content).not.toContain('CardHeader')
+
+    // 文本可选（无全局 select-none）
+    expect(content).not.toContain('class="space-y-6 select-none"')
+
+    // 安全性：空密码不发送
+    expect(content).toContain('if (editRemotePass.value.trim())')
+    expect(content).toContain('chainedConfig.password = editRemotePass.value.trim()')
+    expect(content).toContain('if (remotePass.value.trim())')
+  })
+
+  it('DashboardView implements debounce lock on proxy toggle', () => {
+    const content = readFileSync(dashboardPath, 'utf-8')
+    expect(content).toContain('const isToggling = ref(false)')
+    expect(content).toContain(':disabled="isToggling"')
+  })
+})
