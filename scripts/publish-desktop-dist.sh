@@ -20,7 +20,12 @@ set -euo pipefail
 
 BUNDLE_DIR="${1:?usage: $0 <bundle-dir> <latest.json>}"
 LATEST_JSON="${2:?usage: $0 <bundle-dir> <latest.json>}"
-: "${VERCEL_TOKEN:?VERCEL_TOKEN 未设置（GitHub Secrets: VERCEL_TOKEN 或 ~/pproxy/.pproxy.env: PPROXY_VERCEL_TOKEN）}"
+
+# 凭据检查：支持 Cloudflare R2 / S3 兼容对象存储，或 Vercel 静态托管
+if [[ -z "${R2_BUCKET:-${S3_BUCKET:-}}" && -z "${VERCEL_TOKEN:-}" ]]; then
+  echo "错误：未配置分发凭据。请提供 R2_BUCKET (S3_BUCKET) 或 VERCEL_TOKEN"
+  exit 1
+fi
 
 [[ -f "$LATEST_JSON" ]] || { echo "latest.json 不存在: $LATEST_JSON"; exit 1; }
 
@@ -98,11 +103,51 @@ cat > "$STAGE/vercel.json" << 'EOF'
 }
 EOF
 
-cd "$STAGE"
-# 优先带 --scope pony7 link，若无团队权限则回退默认 scope
-npx --yes vercel@latest link --yes --project pony-dsk --scope pony7 --token "$VERCEL_TOKEN" 2>/dev/null || \
-  npx --yes vercel@latest link --yes --project pony-dsk --token "$VERCEL_TOKEN" >/dev/null
+# ---- 途径 A: Cloudflare R2 / S3 兼容对象存储直传（推荐，零出网流量费，版本永久保留） ----
+if [[ -n "${R2_BUCKET:-${S3_BUCKET:-}}" ]]; then
+  BUCKET="${R2_BUCKET:-$S3_BUCKET}"
+  ENDPOINT="${R2_ENDPOINT:-${S3_ENDPOINT:-}}"
+  ENDPOINT_FLAG=""
+  if [[ -n "$ENDPOINT" ]]; then
+    ENDPOINT_FLAG="--endpoint-url $ENDPOINT"
+  fi
 
-npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
+  echo "[R2/S3] 同步分发资产到存储桶: $BUCKET"
+  if command -v aws >/dev/null 2>&1; then
+    # 1. 上传可执行文件与签名（immutable 永久缓存）
+    aws s3 sync "$STAGE" "s3://$BUCKET/" $ENDPOINT_FLAG \
+      --exclude "latest.json" --exclude "vercel.json" \
+      --cache-control "public, max-age=31536000, immutable"
+    # 2. 上传最新清单 latest.json（即时校验）
+    aws s3 cp "$STAGE/latest.json" "s3://$BUCKET/latest.json" $ENDPOINT_FLAG \
+      --cache-control "public, max-age=0, must-revalidate"
+    echo "[R2/S3] 发布完成：https://dl.ponyjob.top/latest.json（$NAME）"
+    exit 0
+  else
+    echo "WARN: 未找到 aws cli，回退尝试通过 Vercel 静态分发..."
+  fi
+fi
 
-echo "发布完成：https://dl.ponyjob.top/latest.json（$NAME）"
+# ---- 途径 B: Vercel 静态分发（聚合最近历史版本，防止历史版本瞬间 404） ----
+if [[ -n "${VERCEL_TOKEN:-}" ]]; then
+  if command -v gh >/dev/null 2>&1; then
+    echo "[Vercel] 补充最近历史版本安装包以防历史 404..."
+    HIST_TAGS=$(gh release list --limit 6 --json tagName --jq '.[].tagName' 2>/dev/null | grep '^desktop-v' | grep -v "${TAG:-none}" | head -n 2 || true)
+    for htag in $HIST_TAGS; do
+      echo "[Vercel] 聚合历史资产: $htag"
+      gh release download "$htag" --dir "$STAGE" --pattern "*_x64-setup.exe*" 2>/dev/null || true
+    done
+  fi
+
+  cd "$STAGE"
+  # 优先带 --scope pony7 link，若无团队权限则回退默认 scope
+  npx --yes vercel@latest link --yes --project pony-dsk --scope pony7 --token "$VERCEL_TOKEN" 2>/dev/null || \
+    npx --yes vercel@latest link --yes --project pony-dsk --token "$VERCEL_TOKEN" >/dev/null
+
+  npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
+  echo "发布完成：https://dl.ponyjob.top/latest.json（$NAME）"
+  exit 0
+fi
+
+echo "错误：未完成任何有效分发发布"
+exit 1

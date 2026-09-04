@@ -37,11 +37,11 @@ ssh dev 'cd ~/pproxy && scripts/sync-desktop-release.sh desktop-vX.Y.Z'
 # 5) 验证：curl -s https://dl.ponyjob.top/latest.json | grep version
 ```
 
-> **分发拓扑（2026-08-30 起）**：updater 双端点容灾——主 `dl.ponyjob.top`（Vercel 静态，
-> 项目 `pony-dsk`，与 dev 在线状态无关）+ 备 `access.ponyjob.top/dsk/`（dev 主机
-> pproxy-server 数据面，pony-tunnel 隧道；客户端 <0.3.18 只认备端点）。dev 上的
-> pproxy-server 不再承担"检查更新"的可用性，仅作过渡回退与 CLI 管理面。
-> DNS：dl → cname.vercel.com（DNS only）；命名约定：分发文件名统一点号
+> **分发拓扑（2026-08-30 起，2026-09 存储治理与防爆升级）**：
+> 1. **主分发**：支持 **Cloudflare R2 / S3 对象存储**（零出网费，永久保留历史版本且无空间爆炸上限）与 **Vercel 静态托管**（双轨自适应）。走 Vercel 时发布脚本自动聚合最近 3 个历史版本，彻底解决“快照覆盖导致老版本 404”；
+> 2. **备端点**：`access.ponyjob.top/dsk/`（dev 主机数据面），`sync-desktop-release.sh` 内置轮转淘汰策略（默认只保留最近 3 个版本安装包与签名，旧版本自动淘汰，杜绝磁盘撑爆 `No space left on device`）；
+> 3. **对象存储直传配置**：设置 `R2_BUCKET`（或 `S3_BUCKET`）及 `R2_ENDPOINT`，发布脚本优先直传桶内；未配置时无缝回退 Vercel。
+> DNS：dl → cname.vercel.com（或 R2 custom domain）；命名约定：分发文件名统一点号
 > （Pony.Proxy_X.Y.Z_x64-setup.exe），tauri 产物空格由发布脚本归一。
 
 ### 更新 CF Worker

@@ -39,4 +39,52 @@ if [[ ! -f "$DEST/$REQUIRED" ]]; then
   echo "WARN: 缺少 $REQUIRED（updater 无法发现更新）——确认 release 构建时 TAURI_SIGNING_PRIVATE_KEY secrets 已配置"
   exit 1
 fi
+
+# ---- 历史旧版本轮转淘汰策略（防磁盘撑爆） ----
+# 默认保留最近 KEEP_VERSIONS 个版本（默认 3 个）
+KEEP_VERSIONS="${KEEP_VERSIONS:-3}"
+python3 - "$DEST" "$KEEP_VERSIONS" <<'PY'
+import sys, os, glob, re
+
+dest = sys.argv[1]
+keep = int(sys.argv[2])
+
+def parse_semver(filename):
+    m = re.search(r'(\d+)\.(\d+)\.(\d+)', filename)
+    if not m:
+        return (0, 0, 0)
+    return tuple(map(int, m.groups()))
+
+pattern = os.path.join(dest, "*_x64-setup.exe")
+exes = glob.glob(pattern)
+exes.sort(key=lambda f: parse_semver(os.path.basename(f)), reverse=True)
+
+for old_exe in exes[keep:]:
+    try:
+        os.remove(old_exe)
+        print(f"[clean] 淘汰旧版安装包: {os.path.basename(old_exe)}")
+    except OSError as e:
+        print(f"WARN: 无法删除 {old_exe}: {e}")
+    sig = old_exe + ".sig"
+    if os.path.isfile(sig):
+        try:
+            os.remove(sig)
+            print(f"[clean] 淘汰旧版签名: {os.path.basename(sig)}")
+        except OSError:
+            pass
+
+all_files = os.listdir(dest)
+current_exes = set(os.path.basename(f) for f in exes[:keep])
+for f in all_files:
+    if f.endswith("_x64-setup.exe.sig"):
+        base_exe = f[:-4]
+        if base_exe not in current_exes:
+            try:
+                os.remove(os.path.join(dest, f))
+                print(f"[clean] 移除孤立签名: {f}")
+            except OSError:
+                pass
+PY
+
 echo "[sync] 完成 ✓"
+
