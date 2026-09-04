@@ -334,6 +334,8 @@ function loadAllHistories(): void {
         saveLatencySeries(siteSeriesKey(row.host), hist)
       }
     }
+    // 清洗掉因启动早期代理尚未就绪（ENGINE_ON 未置位）导致的假失败历史点
+    hist = hist.filter((p) => !p.err?.includes('代理未启用'))
     row.history = hist
   }
 }
@@ -379,15 +381,22 @@ async function testIfaceRow(row: IfaceRow): Promise<void> {
   }
 }
 
-async function testSiteRow(row: SiteRow): Promise<void> {
+async function testSiteRow(row: SiteRow, isManual = false): Promise<void> {
   if (row.testing) return
+  if (!isRunning.value) {
+    if (isManual) toast.info('请先开启加速，再测试站点延迟')
+    return
+  }
   row.testing = true
   try {
     const point = await probeSite(row.host)
+    if (point.err?.includes('代理未启用')) return
     row.history = appendLatencyPoint(row.history, point)
     saveLatencySeries(siteSeriesKey(row.host), row.history)
   } catch (e) {
-    row.history = appendLatencyPoint(row.history, { ts: Date.now(), ok: false, err: String(e) })
+    const errStr = String(e)
+    if (errStr.includes('代理未启用')) return
+    row.history = appendLatencyPoint(row.history, { ts: Date.now(), ok: false, err: errStr })
     saveLatencySeries(siteSeriesKey(row.host), row.history)
   } finally {
     row.testing = false
@@ -400,10 +409,11 @@ async function runAllTests(): Promise<void> {
   if (isTestingAll.value || !isConfigured.value) return
   isTestingAll.value = true
   try {
-    await Promise.all([
-      ...ifaceRows.value.map((r) => testIfaceRow(r)),
-      ...siteRows.value.map((r) => testSiteRow(r)),
-    ])
+    const tasks: Promise<void>[] = ifaceRows.value.map((r) => testIfaceRow(r))
+    if (isRunning.value) {
+      tasks.push(...siteRows.value.map((r) => testSiteRow(r)))
+    }
+    await Promise.all(tasks)
   } finally {
     isTestingAll.value = false
   }
@@ -451,7 +461,12 @@ onMounted(async () => {
   loadAllHistories()
   await refreshStatus()
   void refreshTraffic()
-  void runAllTests()
+  if (isRunning.value) {
+    void runAllTests()
+  } else if (isConfigured.value) {
+    // 代理尚未就绪时仅测出口网关，等待代理就绪事件触发站点真实拨测
+    void Promise.all(ifaceRows.value.map((r) => testIfaceRow(r)))
+  }
   testTimer = setInterval(() => void runAllTests(), POLL_TEST_MS)
   trafficTimer = setInterval(() => void refreshTraffic(), POLL_TRAFFIC_MS)
 
@@ -459,15 +474,23 @@ onMounted(async () => {
     try {
       const { listen } = await import('@tauri-apps/api/event')
       unlistenStatus = await listen<{ on: boolean; mode?: 'whitelist' | 'global' }>('proxy-status-changed', (event) => {
+        const wasRunning = isRunning.value
         isRunning.value = event.payload.on
         if (event.payload.mode) proxyMode.value = event.payload.mode
+        if (!wasRunning && event.payload.on) {
+          void runAllTests()
+        }
       })
       unlistenMode = await listen<{ mode: 'whitelist' | 'global' }>('proxy-mode-changed', (event) => {
         proxyMode.value = event.payload.mode
       })
       unlistenReady = await listen<{ ready?: boolean; on?: boolean; mode?: 'whitelist' | 'global' }>('proxy-ready', (event) => {
+        const wasRunning = isRunning.value
         if (typeof event.payload.on === 'boolean') isRunning.value = event.payload.on
         if (event.payload.mode) proxyMode.value = event.payload.mode
+        if (!wasRunning && isRunning.value) {
+          void runAllTests()
+        }
       })
     } catch {}
   }
@@ -526,6 +549,7 @@ async function toggleProxy() {
         return
       }
       toast.success('智能加速已开启！')
+      void runAllTests()
     }
   } catch (e: any) {
     toast.error(typeof e === 'string' ? e : e?.message || '操作失败')
@@ -1069,7 +1093,7 @@ async function submitImportOrChained() {
               {{ latestText(row.history) }}
             </span>
             <button
-              @click="testSiteRow(row)"
+              @click="testSiteRow(row, true)"
               :disabled="row.testing"
               title="立即测速"
               :aria-label="`立即测速 ${row.name}`"

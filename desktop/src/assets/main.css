@@ -168,29 +168,5 @@
   50% { opacity: 0.45; }
  }
 
-/* toast 底部居中：从下方轻轻浮入 */
-@keyframes toast-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+/* toast 窗口中央极简浮层：由 ToastHost 内置 Tailwind transition 管理轻微缩放与透明度 */
 
-@keyframes toast-out {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(6px); }
-}
-
-/* ToastHost 的 TransitionGroup（name="toast"）进出场；
-   容器负责水平居中，leave 期条目回到容器流内绝对定位，
-   配合 move 过渡让剩余条目平滑上移。 */
-.toast-enter-active {
-  animation: toast-in 180ms ease-out;
-}
-.toast-leave-active {
-  position: absolute;
-  left: 0;
-  right: 0;
-  animation: toast-out 150ms ease-in forwards;
-}
-.toast-move {
-  transition: transform 150ms ease;
-}

@@ -40,10 +40,14 @@ describe('UI/UX Specification Checks', () => {
     expect(content).not.toContain('口令一键导入 (多端同步)')
     expect(content).toContain('服务器配置')
     expect(content).not.toContain('手动配置服务器参数')
-    expect(content).toContain('域名名单')
+    expect(content).toContain('加速名单')
+    expect(content).not.toContain('域名名单')
     expect(content).not.toContain('智能分流加速名单')
     expect(content).toContain('反代令牌')
     expect(content).not.toContain('反代访问令牌')
+
+    // 加速名单徽标直接罗列，去长方形卡片背景
+    expect(content).toMatch(/<h2 class="text-sm font-bold text-foreground">加速名单<\/h2>[\s\S]*?class="flex flex-wrap gap-2/)
 
     // 去卡片化
     expect(content).not.toContain('<Card')
@@ -64,4 +68,13 @@ describe('UI/UX Specification Checks', () => {
     expect(content).toContain('const isToggling = ref(false)')
     expect(content).toContain(':disabled="isToggling"')
   })
+
+  it('DashboardView guards site probing until proxy engine is running', () => {
+    const content = readFileSync(dashboardPath, 'utf-8')
+    // 站点拨测必须检查 isRunning 状态，未开启代理时不盲测
+    expect(content).toContain('if (!isRunning.value)')
+    // 代理就绪后联动触发测速
+    expect(content).toMatch(/!wasRunning && event\.payload\.on[\s\S]*?runAllTests/)
+  })
 })
+

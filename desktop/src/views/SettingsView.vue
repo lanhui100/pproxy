@@ -65,7 +65,7 @@ const remoteHostInputRef = ref<HTMLInputElement | null>(null)
 const whitelistInputRef = ref<HTMLInputElement | null>(null)
 const apiTokenInputRef = ref<HTMLInputElement | null>(null)
 
-// ---- 自定义加速域名名单（白名单）----
+// ---- 自定义加速名单（白名单）----
 const whitelistEntries = ref<string[]>([])
 const newWhitelistEntry = ref('')
 const isAddingWhitelist = ref(false)
@@ -1057,11 +1057,11 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- 域名名单 -->
-    <section class="space-y-2.5">
+    <!-- 加速名单 -->
+    <section class="space-y-3">
       <div class="flex items-center justify-between">
         <div>
-          <h2 class="text-sm font-bold text-foreground">域名名单</h2>
+          <h2 class="text-sm font-bold text-foreground">加速名单</h2>
           <p class="text-xs text-muted-foreground mt-0.5">智能分流模式下加速的域名，支持二级域名自动覆盖；常用站点已内置</p>
         </div>
         <div class="flex items-center gap-2 shrink-0">
@@ -1080,61 +1080,59 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div class="rounded-xl bg-muted/60 dark:bg-muted/25 border border-border/20 p-4 space-y-3">
-        <!-- 添加输入行（非常态） -->
-        <div v-if="isAddingWhitelist" class="flex items-center gap-2 pb-1">
-          <Input
-            ref="whitelistInputRef"
-            v-model="newWhitelistEntry"
-            placeholder="输入域名，如 huggingface.co"
-            class="font-mono text-xs h-8 bg-background"
-            @keyup.enter="addWhitelistEntry()"
-            @keydown.esc="cancelAddWhitelist"
-          />
-          <button
-            type="button"
-            @click="addWhitelistEntry()"
-            :disabled="!newWhitelistEntry.trim() || isAddingDomain"
-            title="确认添加 (Enter)"
-            aria-label="确认添加"
-            class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-          >
-            <RefreshCw v-if="isAddingDomain" class="size-3.5 animate-spin" />
-            <Check v-else class="size-3.5" />
-          </button>
-          <button
-            type="button"
-            @click="cancelAddWhitelist"
-            title="取消 (Esc)"
-            aria-label="取消"
-            class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-          >
-            <X class="size-3.5" />
-          </button>
-        </div>
+      <!-- 添加输入行（非常态） -->
+      <div v-if="isAddingWhitelist" class="flex items-center gap-2 max-w-sm">
+        <Input
+          ref="whitelistInputRef"
+          v-model="newWhitelistEntry"
+          placeholder="输入域名，如 huggingface.co"
+          class="font-mono text-xs h-8 bg-background"
+          @keyup.enter="addWhitelistEntry()"
+          @keydown.esc="cancelAddWhitelist"
+        />
+        <button
+          type="button"
+          @click="addWhitelistEntry()"
+          :disabled="!newWhitelistEntry.trim() || isAddingDomain"
+          title="确认添加 (Enter)"
+          aria-label="确认添加"
+          class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+        >
+          <RefreshCw v-if="isAddingDomain" class="size-3.5 animate-spin" />
+          <Check v-else class="size-3.5" />
+        </button>
+        <button
+          type="button"
+          @click="cancelAddWhitelist"
+          title="取消 (Esc)"
+          aria-label="取消"
+          class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+        >
+          <X class="size-3.5" />
+        </button>
+      </div>
 
-        <!-- 域名标签展示 -->
-        <div v-if="whitelistEntries.length" class="flex flex-wrap gap-1.5">
-          <span
-            v-for="(e, i) in whitelistEntries"
-            :key="e"
-            class="inline-flex items-center gap-1.5 rounded-md bg-muted/80 dark:bg-muted px-2.5 py-1 text-xs text-foreground font-mono transition-colors"
+      <!-- 域名徽标罗列（直接铺展，无长方形背景卡片） -->
+      <div v-if="whitelistEntries.length" class="flex flex-wrap gap-2 pt-0.5">
+        <span
+          v-for="(e, i) in whitelistEntries"
+          :key="e"
+          class="inline-flex items-center gap-1.5 rounded-lg bg-muted/80 hover:bg-muted dark:bg-muted/60 dark:hover:bg-muted px-2.5 py-1 text-xs text-foreground font-mono transition-colors"
+        >
+          {{ e }}
+          <button
+            type="button"
+            class="size-4 inline-flex items-center justify-center -mr-0.5 rounded hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground cursor-pointer transition-colors focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
+            title="移除域名"
+            :aria-label="`移除域名 ${e}`"
+            @click="removeWhitelistEntry(i)"
           >
-            {{ e }}
-            <button
-              type="button"
-              class="size-5 inline-flex items-center justify-center -mr-1 rounded hover:bg-muted-foreground/20 text-muted-foreground hover:text-foreground cursor-pointer transition-colors focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
-              title="移除域名"
-              :aria-label="`移除域名 ${e}`"
-              @click="removeWhitelistEntry(i)"
-            >
-              <X class="size-3" />
-            </button>
-          </span>
-        </div>
-        <div v-else class="py-2 text-center text-xs text-muted-foreground">
-          暂无自定义域名，可点击右上角加号添加
-        </div>
+            <X class="size-3" />
+          </button>
+        </span>
+      </div>
+      <div v-else class="py-1 text-xs text-muted-foreground">
+        暂无自定义域名，可点击右上角加号添加
       </div>
     </section>
 

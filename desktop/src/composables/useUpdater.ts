@@ -11,7 +11,7 @@ import { isTauri } from '@/lib/config'
 
 const ENGINE_PROXY = 'http://127.0.0.1:18900'
 
-export const currentVersion = ref('0.3.34')
+export const currentVersion = ref('0.3.35')
 export const checking = ref(false)
 export const updateAvailable = ref(false)
 export const updateVersion = ref('')
