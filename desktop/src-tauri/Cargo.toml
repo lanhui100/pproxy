@@ -46,3 +46,10 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Networking_WinInet", "Win32_System_Threading"] }
 winreg = "0.55"
+
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1
+

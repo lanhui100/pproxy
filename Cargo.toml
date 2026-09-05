@@ -28,6 +28,12 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 pproxy-transport = { path = "crates/transport" }
 
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1
+
 [profile.release]
 opt-level = 3
 lto = true
