@@ -471,6 +471,54 @@ pub fn print_connectivity_card(data_plane: &str) {
     eprintln!("└────────────────────────────────────────────────────");
 }
 
+/// 写入代理开启持久化脚本到 ~/.pony/proxy.env
+fn write_enable_file(data_plane: &str, no_proxy: &str) -> Result<PathBuf, String> {
+    let path = proxy_env_path()?;
+    let path_display = path.display().to_string();
+    let content = format!(
+        r#"# Pony Proxy — 环境代理配置
+# 由 `pproxy on` 生成，`pproxy off` 清除
+# 加载方式: source {}
+export http_proxy="{data_plane}"
+export https_proxy="{data_plane}"
+export no_proxy="{no_proxy}"
+export HTTP_PROXY="{data_plane}"
+export HTTPS_PROXY="{data_plane}"
+export NO_PROXY="{no_proxy}"
+"#,
+        path_display
+    );
+
+    config::secure_write_file(&path, content.as_bytes())
+        .map_err(|e| format!("写入代理配置文件失败: {e}"))?;
+
+    Ok(path)
+}
+
+/// 写入代理关闭持久化脚本到 ~/.pony/proxy.env
+fn write_disable_file() -> Result<PathBuf, String> {
+    let path = proxy_env_path()?;
+    let path_display = path.display().to_string();
+    let content = format!(
+        r#"# Pony Proxy — 代理关闭配置
+# 由 `pproxy off` 生成
+# 加载方式: source {}
+unset http_proxy
+unset https_proxy
+unset no_proxy
+unset HTTP_PROXY
+unset HTTPS_PROXY
+unset NO_PROXY
+"#,
+        path_display
+    );
+
+    config::secure_write_file(&path, content.as_bytes())
+        .map_err(|e| format!("写入代理配置文件失败: {e}"))?;
+
+    Ok(path)
+}
+
 /// 开启环境代理（支持 --eval 直接输出 export/set 语句）。
 pub fn on(eval: bool) -> Result<i32, String> {
     let data_plane = match config::load() {
@@ -479,15 +527,18 @@ pub fn on(eval: bool) -> Result<i32, String> {
         Err(_) => "http://127.0.0.1:8899".to_string(),
     };
 
-    if eval {
-        let k8s_entries = detect_k8s_cluster_entries();
-        let extra_no_proxy = if k8s_entries.is_empty() {
-            String::new()
-        } else {
-            format!(",{}", k8s_entries.join(","))
-        };
-        let no_proxy = format!("{}{}", DEFAULT_NO_PROXY, extra_no_proxy);
+    let k8s_entries = detect_k8s_cluster_entries();
+    let extra_no_proxy = if k8s_entries.is_empty() {
+        String::new()
+    } else {
+        format!(",{}", k8s_entries.join(","))
+    };
+    let no_proxy = format!("{}{}", DEFAULT_NO_PROXY, extra_no_proxy);
 
+    // 关键修复：无论是否 eval 模式，均同步将代理配置落盘至 ~/.pony/proxy.env，保证新启动 Shell 能继承
+    let path = write_enable_file(&data_plane, &no_proxy)?;
+
+    if eval {
         let shell = ShellKind::detect();
         println!("{}", shell.render_export("http_proxy", &data_plane));
         println!("{}", shell.render_export("https_proxy", &data_plane));
@@ -501,12 +552,34 @@ pub fn on(eval: bool) -> Result<i32, String> {
 
         Ok(EXIT_OK)
     } else {
-        enable_proxy()
+        let path_display = path.display().to_string();
+        println!("✓ 环境代理已启用");
+        println!();
+        println!("代理地址:  {data_plane}");
+        println!("直连列表:  {no_proxy}");
+        if !k8s_entries.is_empty() {
+            println!("  (自动探测 K8s API: {})", k8s_entries.join(", "));
+        }
+        println!();
+        println!("请在当前 shell 中执行以下命令加载代理配置：");
+        if cfg!(windows) {
+            println!("  eval \"$(pproxy on --eval)\"  # PowerShell");
+        } else {
+            println!("  source {}", path_display);
+        }
+        println!();
+        println!("或将其添加到 ~/.bashrc / ~/.zshrc 以永久生效：");
+        println!("  echo 'source {}' >> ~/.bashrc", path_display);
+
+        Ok(EXIT_OK)
     }
 }
 
 /// 关闭环境代理（支持 --eval / --hard）。
 pub fn off(eval: bool, hard: bool) -> Result<i32, String> {
+    // 关键修复：无论是否 eval 模式，均同步更新 ~/.pony/proxy.env 为 unset，防止新 Shell 误读代理
+    let _ = write_disable_file()?;
+
     if eval {
         let shell = ShellKind::detect();
         let keys = ["http_proxy", "https_proxy", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"];
@@ -541,55 +614,7 @@ pub fn toggle_hard(enable: bool) -> Result<i32, String> {
 
 /// 开启：计算代理地址 + 探测 K8s 集群地址，写入 ~/.pony/proxy.env。
 fn enable_proxy() -> Result<i32, String> {
-    let data_plane = match config::load() {
-        Ok(cfg) => config::derive_data_plane(&cfg)
-            .unwrap_or_else(|_| "http://127.0.0.1:8899".to_string()),
-        Err(_) => "http://127.0.0.1:8899".to_string(),
-    };
-
-    let k8s_entries = detect_k8s_cluster_entries();
-    let extra_no_proxy = if k8s_entries.is_empty() {
-        String::new()
-    } else {
-        format!(",{}", k8s_entries.join(","))
-    };
-    let no_proxy = format!("{}{}", DEFAULT_NO_PROXY, extra_no_proxy);
-
-    let path = proxy_env_path()?;
-    let path_display = path.display().to_string();
-    let content = format!(
-        r#"# Pony Proxy — 环境代理配置
-# 由 `pproxy on` 生成，`pproxy off` 清除
-# 加载方式: source {}
-export http_proxy="{data_plane}"
-export https_proxy="{data_plane}"
-export no_proxy="{no_proxy}"
-"#,
-        path_display
-    );
-
-    config::secure_write_file(&path, content.as_bytes())
-        .map_err(|e| format!("写入代理配置文件失败: {e}"))?;
-
-    println!("✓ 环境代理已启用");
-    println!();
-    println!("代理地址:  {data_plane}");
-    println!("直连列表:  {no_proxy}");
-    if !k8s_entries.is_empty() {
-        println!("  (自动探测 K8s API: {})", k8s_entries.join(", "));
-    }
-    println!();
-    println!("请在当前 shell 中执行以下命令加载代理配置：");
-    if cfg!(windows) {
-        println!("  eval \"$(pproxy on --eval)\"  # PowerShell");
-    } else {
-        println!("  source {}", path_display);
-    }
-    println!();
-    println!("或将其添加到 ~/.bashrc / ~/.zshrc 以永久生效：");
-    println!("  echo 'source {}' >> ~/.bashrc", path_display);
-
-    Ok(EXIT_OK)
+    on(false)
 }
 
 // ─── 关闭（持久化）：写入 unset 脚本 ──────────────────────────
@@ -597,24 +622,8 @@ export no_proxy="{no_proxy}"
 /// 关闭：写入 unset 脚本到 ~/.pony/proxy.env（而非删除文件），
 /// 这样用户可以 source 来清除环境变量。
 fn disable_proxy() -> Result<i32, String> {
-    let path = proxy_env_path()?;
+    let path = write_disable_file()?;
     let path_display = path.display().to_string();
-    let content = format!(
-        r#"# Pony Proxy — 代理关闭配置
-# 由 `pproxy off` 生成
-# 加载方式: source {}
-unset http_proxy
-unset https_proxy
-unset no_proxy
-unset HTTP_PROXY
-unset HTTPS_PROXY
-unset NO_PROXY
-"#,
-        path_display
-    );
-
-    config::secure_write_file(&path, content.as_bytes())
-        .map_err(|e| format!("写入代理配置文件失败: {e}"))?;
 
     println!("✓ 代理关闭配置已写入");
     println!();
@@ -859,6 +868,42 @@ export no_proxy="{no_proxy}"
         with_home(tmp.path(), || {
             let result = disable_proxy();
             assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_on_eval_writes_proxy_env() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        with_home(tmp.path(), || {
+            let result = on(true);
+            assert!(result.is_ok());
+            let path = tmp.path().join(".pony").join("proxy.env");
+            assert!(path.exists(), "on(true) 应同步将代理配置写入 proxy.env");
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(content.contains("export http_proxy="));
+            assert!(content.contains("export https_proxy="));
+            assert!(content.contains("export HTTP_PROXY="));
+            assert!(content.contains("export HTTPS_PROXY="));
+        });
+    }
+
+    #[test]
+    fn test_off_eval_writes_unset_proxy_env() {
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let enable_path = tmp.path().join(".pony").join("proxy.env");
+        fs::create_dir_all(enable_path.parent().unwrap()).unwrap();
+        fs::write(&enable_path, "export http_proxy=\"http://x\"").unwrap();
+
+        with_home(tmp.path(), || {
+            let result = off(true, false);
+            assert!(result.is_ok());
+            assert!(enable_path.exists(), "proxy.env 应继续存在");
+            let content = fs::read_to_string(&enable_path).unwrap();
+            assert!(content.contains("unset http_proxy"));
+            assert!(content.contains("unset https_proxy"));
+            assert!(content.contains("unset HTTP_PROXY"));
         });
     }
 

@@ -105,6 +105,11 @@ fi
 
 # 4. PATH 环境变量与 Shell Wrapper 极速函数注入
 WRAPPER_BLOCK='# Pony Proxy Shell Integration
+# 启动时自动加载环境代理配置（若处于开启状态）
+if [ -f "$HOME/.pony/proxy.env" ]; then
+    . "$HOME/.pony/proxy.env"
+fi
+
 if command -v pproxy >/dev/null 2>&1; then
     pproxy() {
         case "$1" in
@@ -123,19 +128,32 @@ if command -v pproxy >/dev/null 2>&1; then
     }
 fi'
 
+# 清理老版本历史遗留文件（避免旧环境 unset 脚本毒化新环境）
+rm -f "$HOME/.pproxy_env" 2>/dev/null || true
+
 for RC in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     if [ -f "$RC" ]; then
+        # 清理旧版本遗留的 /etc/profile.d/pproxy.sh 毒化引用
+        sed -i '/\/etc\/profile\.d\/pproxy\.sh/d' "$RC" 2>/dev/null || true
+
         if [ "$IS_ROOT" -eq 0 ] && [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
             if ! grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$RC"; then
                 echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$RC"
             fi
         fi
-        if ! grep -q '# Pony Proxy Shell Integration' "$RC"; then
+
+        if ! grep -q '\.pony/proxy\.env' "$RC"; then
+            if grep -q '# Pony Proxy Shell Integration' "$RC"; then
+                sed -i '/# Pony Proxy Shell Integration/a if [ -f "$HOME/.pony/proxy.env" ]; then . "$HOME/.pony/proxy.env"; fi' "$RC" 2>/dev/null || true
+            else
+                echo -e "\n$WRAPPER_BLOCK" >> "$RC"
+            fi
+        elif ! grep -q '# Pony Proxy Shell Integration' "$RC"; then
             echo -e "\n$WRAPPER_BLOCK" >> "$RC"
         fi
     fi
 done
-echo -e "✓ 已为当前用户注入极速 Shell 包装函数 (支持直接输入 pproxy on 自动拉起并注入环境)"
+echo -e "✓ 已为当前用户注入极速 Shell 包装函数与代理环境自加载逻辑"
 
 # 5. Systemd 守护进程单元注册（按需手动唤醒，默认不设置开机自启）
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
