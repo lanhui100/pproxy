@@ -102,18 +102,30 @@ pub fn resolve_github_token() -> Option<String> {
         })
 }
 
-/// 获取远端最新 Release 信息（带多通道自动容灾探测）
-pub fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHubRelease, String> {
-    // 1. 优先从分发网关 /dsk/latest.json 获取最新版本清单（免 GitHub 登录与私有权限限制，速度快且稳定）
-    // 包含本地网关端口，若当前运行在服务端机器可秒级直达
-    let dist_bases = [
-        std::env::var("PONY_DIST_URL").ok(),
-        Some("http://127.0.0.1:8899/dsk".to_string()),
-        Some("http://127.0.0.1:8900/dsk".to_string()),
-        Some(DEFAULT_GATEWAY_DIST.to_string()),
-        Some(DEFAULT_FALLBACK_DIST.to_string()),
-    ];
+/// 为指定版本生成候选 Tag（CLI 资产优先归属于 cli-v，其次 desktop-v，最后 v）
+pub fn candidate_tags_for_version(clean: &str) -> Vec<String> {
+    vec![
+        format!("cli-v{clean}"),
+        format!("desktop-v{clean}"),
+        format!("v{clean}"),
+    ]
+}
 
+/// 为 GitHub 主链生成加速镜像候选（含主链本身，参考 ponyllm 的多镜像容灾）
+pub fn github_mirror_urls(primary: &str) -> Vec<String> {
+    vec![
+        primary.to_string(),
+        format!("https://ghfast.top/{primary}"),
+        format!("https://ghproxy.net/{primary}"),
+    ]
+}
+
+/// 获取远端最新 Release 信息（带多通道自动容灾探测）
+///
+/// 参考 ponyllm 的直连 GitHub 韧性：不再首个成功即返回，而是收集全部
+/// 分发网关清单取最新版本，避免陈旧本地缓存遮挡更新鲜远端；同时查询
+/// GitHub cli-v 系列取最新 CLI 版本，两者比对取更新者，私仓需 token。
+pub fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHubRelease, String> {
     #[derive(Deserialize)]
     struct LatestManifest {
         version: String,
@@ -123,51 +135,121 @@ pub fn fetch_latest_release(client: &reqwest::blocking::Client) -> Result<GitHub
         pub_date: Option<String>,
     }
 
+    // 1. 收集全部的分发网关 /dsk/latest.json 清单，取最新版本
+    // 免 GitHub 登录与私有权限限制，速度快且稳定；含本地网关端口，服务端机器可秒级直达
+    let dist_bases = [
+        std::env::var("PONY_DIST_URL").ok(),
+        Some("http://127.0.0.1:8899/dsk".to_string()),
+        Some("http://127.0.0.1:8900/dsk".to_string()),
+        Some(DEFAULT_GATEWAY_DIST.to_string()),
+        Some(DEFAULT_FALLBACK_DIST.to_string()),
+    ];
+
+    let mut best_dist: Option<GitHubRelease> = None;
+    let mut dist_errs: Vec<String> = Vec::new();
     for dist_opt in dist_bases.into_iter().flatten() {
         let manifest_url = format!("{}/latest.json", dist_opt.trim_end_matches('/'));
-        if let Ok(resp) = client
+        match client
             .get(&manifest_url)
             .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
             .timeout(Duration::from_secs(8))
             .send()
         {
-            if resp.status().is_success() {
-                if let Ok(manifest) = resp.json::<LatestManifest>() {
+            Ok(resp) if resp.status().is_success() => match resp.json::<LatestManifest>() {
+                Ok(manifest) => {
                     let tag = format!("desktop-v{}", manifest.version);
-                    return Ok(GitHubRelease {
+                    let candidate = GitHubRelease {
                         tag_name: tag,
                         name: Some(format!("Pony Proxy v{}", manifest.version)),
                         body: manifest.notes,
                         published_at: manifest.pub_date,
                         assets: vec![],
-                    });
+                    };
+                    let is_newer = match &best_dist {
+                        None => true,
+                        Some(best) => is_newer_version(
+                            clean_version_str(&best.tag_name),
+                            clean_version_str(&candidate.tag_name),
+                        ),
+                    };
+                    if is_newer {
+                        best_dist = Some(candidate);
+                    }
+                }
+                Err(e) => dist_errs.push(format!("{manifest_url} 解析失败: {e}")),
+            },
+            Ok(resp) => dist_errs.push(format!("{manifest_url} HTTP {}", resp.status())),
+            Err(e) => dist_errs.push(format!("{manifest_url} 连接失败: {e}")),
+        }
+    }
+
+    // 2. 查询 GitHub cli-v 系列最新版本（私仓需 token，支持 gh CLI 登录凭据；参考 ponyllm 的精细状态处理）
+    let auth_token = resolve_github_token();
+    let mut best_github: Option<GitHubRelease> = None;
+    let mut github_err = String::new();
+    {
+        let api_url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30");
+        let mut req = client
+            .get(&api_url)
+            .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
+            .header("Accept", "application/vnd.github.v3+json")
+            .timeout(Duration::from_secs(12));
+        if let Some(ref token) = auth_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        match req.send() {
+            Ok(r) if r.status().is_success() => {
+                match r.json::<Vec<GitHubRelease>>() {
+                    Ok(list) => {
+                        let mut cli_releases: Vec<GitHubRelease> = list
+                            .into_iter()
+                            .filter(|rel| {
+                                rel.tag_name.starts_with("cli-v")
+                                    || rel.tag_name.starts_with('v')
+                            })
+                            .collect();
+                        cli_releases.sort_by(|a, b| {
+                            match (parse_semver(&a.tag_name), parse_semver(&b.tag_name)) {
+                                (Some(av), Some(bv)) => av.cmp(&bv),
+                                _ => a.tag_name.cmp(&b.tag_name),
+                            }
+                        });
+                        best_github = cli_releases.into_iter().next_back();
+                        if best_github.is_none() {
+                            github_err = "GitHub Release 列表中无 cli-v/v 系列版本".to_string();
+                        }
+                    }
+                    Err(e) => github_err = format!("解析 GitHub Release 列表失败: {e}"),
                 }
             }
+            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND && auth_token.is_none() => {
+                github_err =
+                    "无法访问私有仓库 Release（HTTP 404），请运行 'gh auth login' 或设置 GITHUB_TOKEN".to_string();
+            }
+            Ok(r) if r.status() == reqwest::StatusCode::FORBIDDEN => {
+                github_err =
+                    "GitHub API 限流或无权限（HTTP 403），请稍后重试或设置 GITHUB_TOKEN".to_string();
+            }
+            Ok(r) => github_err = format!("GitHub API 返回 HTTP {}", r.status()),
+            Err(e) => github_err = format!("连接 GitHub API 失败: {e}"),
         }
     }
 
-    // 2. 备用通道：尝试 GitHub Releases 列表 API（支持读取环境变量或 gh CLI 登录凭据）
-    let api_url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=1");
-    let mut req = client
-        .get(&api_url)
-        .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
-        .header("Accept", "application/vnd.github.v3+json")
-        .timeout(Duration::from_secs(12));
-
-    let auth_token = resolve_github_token();
-    if let Some(ref token) = auth_token {
-        req = req.header("Authorization", format!("Bearer {token}"));
-    }
-
-    match req.send() {
-        Ok(r) if r.status().is_success() => {
-            let list: Vec<GitHubRelease> = r.json().map_err(|e| format!("解析 GitHub Release 列表失败: {e}"))?;
-            list.into_iter().next().ok_or_else(|| "GitHub Release 列表为空".to_string())
+    // 3. 两路比对取更新者（修复首个陈旧缓存即返回遮挡更新鲜远端的问题）
+    match (best_dist, best_github) {
+        (Some(dist), Some(gh)) => {
+            if is_newer_version(clean_version_str(&dist.tag_name), clean_version_str(&gh.tag_name)) {
+                Ok(gh)
+            } else {
+                Ok(dist)
+            }
         }
-        Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND && auth_token.is_none() => {
-            Err("检测更新失败: 无法访问私有仓库 Release，请运行 'gh auth login' 或设置 GITHUB_TOKEN".to_string())
-        }
-        _ => Err("检测更新失败: 无法连接分发网关及 GitHub 备用源，若无外网权限请设置 GITHUB_TOKEN 或 PONY_DIST_URL".to_string()),
+        (Some(dist), None) => Ok(dist),
+        (None, Some(gh)) => Ok(gh),
+        (None, None) => Err(format!(
+            "检测更新失败: 分发网关全失败 [{}]；GitHub 备用源失败 [{github_err}]，若无外网权限请设置 GITHUB_TOKEN 或 PONY_DIST_URL",
+            dist_errs.join("；")
+        )),
     }
 }
 
@@ -227,7 +309,7 @@ pub fn replace_current_executable(new_bytes: &[u8]) -> Result<PathBuf, String> {
     Ok(current_exe)
 }
 
-/// 执行下载并返回二进制内容
+/// 执行下载并返回二进制内容（参考 ponyllm 的主源+加速镜像多候选重试）
 fn download_binary(
     client: &reqwest::blocking::Client,
     binary_name: &str,
@@ -244,21 +326,23 @@ fn download_binary(
             let base = dist.trim_end_matches('/');
             candidate_urls.push(format!("{base}/{binary_name}"));
         }
-        // 1. 本地网关源（dev 宿主机本地优先）
+        // 1. 非版本化分发网关优先（国内可达免登录、速度快；dev 本地秒级直达）
         candidate_urls.push(format!("http://127.0.0.1:8899/dsk/{binary_name}"));
         candidate_urls.push(format!("http://127.0.0.1:8900/dsk/{binary_name}"));
-        // 2. 官方网关分发源
         candidate_urls.push(format!("{DEFAULT_GATEWAY_DIST}/{binary_name}"));
-        // 3. Vercel 静态分发源
         candidate_urls.push(format!("{DEFAULT_FALLBACK_DIST}/{binary_name}"));
-        // 4. GitHub Release 链接
-        candidate_urls.push(format!(
-            "https://github.com/{GITHUB_REPO}/releases/download/{target_tag}/{binary_name}"
-        ));
-        // 5. GitHub latest 链接
-        candidate_urls.push(format!(
-            "https://github.com/{GITHUB_REPO}/releases/latest/download/{binary_name}"
-        ));
+        // 2. GitHub 版本化链接（保证版本精确，参考 ponyllm 主源+镜像容灾；私仓需 token，国内直连可能慢，镜像加速兜底）
+        let clean = clean_version_str(target_tag).to_string();
+        for tag in candidate_tags_for_version(&clean) {
+            let primary = format!(
+                "https://github.com/{GITHUB_REPO}/releases/download/{tag}/{binary_name}"
+            );
+            candidate_urls.extend(github_mirror_urls(&primary));
+        }
+        // 3. GitHub latest 链接（含镜像，最终兜底）
+        let latest_primary =
+            format!("https://github.com/{GITHUB_REPO}/releases/latest/download/{binary_name}");
+        candidate_urls.extend(github_mirror_urls(&latest_primary));
     }
 
     let auth_token = resolve_github_token();
@@ -274,7 +358,7 @@ fn download_binary(
             .header("User-Agent", format!("pproxy-cli/{CURRENT_VERSION}"))
             .timeout(Duration::from_secs(60));
 
-        if url.contains("github.com") {
+        if url.contains("github.com") || url.contains("ghfast.top") || url.contains("ghproxy.net") {
             if let Some(token) = &auth_token {
                 req = req.header("Authorization", format!("Bearer {token}"));
             }
@@ -335,7 +419,7 @@ pub fn run(
 ) -> Result<i32, String> {
     let binary_name = detect_target_binary()?;
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("初始化 HTTP 客户端失败: {e}"))?;
 
@@ -500,6 +584,22 @@ mod tests {
 
         let updated_data = std::fs::read(&old_exe).unwrap();
         assert_eq!(updated_data, new_bytes);
+    }
+
+    #[test]
+    fn test_candidate_tags_for_version() {
+        let tags = candidate_tags_for_version("0.3.30");
+        assert_eq!(tags, vec!["cli-v0.3.30", "desktop-v0.3.30", "v0.3.30"]);
+    }
+
+    #[test]
+    fn test_github_mirror_urls() {
+        let primary = "https://github.com/lanhui100/pproxy/releases/download/cli-v0.3.30/pproxy-linux-amd64";
+        let urls = github_mirror_urls(primary);
+        assert_eq!(urls.len(), 3);
+        assert_eq!(urls[0], primary);
+        assert!(urls[1].starts_with("https://ghfast.top/"));
+        assert!(urls[2].starts_with("https://ghproxy.net/"));
     }
 
     #[test]
