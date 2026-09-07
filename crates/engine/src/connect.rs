@@ -25,9 +25,8 @@ use crate::auth::parse_basic_auth;
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws。
 const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
 
-/// 网络类失败重试：总尝试 2 次。
-const MAX_ATTEMPTS: u32 = 2;
-const RETRY_DELAY: Duration = Duration::from_millis(400);
+/// 网络类失败重试：总尝试 5 次。
+const MAX_ATTEMPTS: u32 = 5;
 
 /// 默认开箱即用的白名单（覆盖主流海外常用服务、社交通讯、AI 模型与代码平台）。
 pub const DEFAULT_ALLOWLIST: &[&str] = &[
@@ -349,9 +348,12 @@ pub async fn handle_connect_raw(
                 if !retryable || attempt + 1 >= MAX_ATTEMPTS {
                     break;
                 }
-                // 若本次失败来自待命池死会话，立即降级全新建连，无需等待 400ms 退避
+                // 若本次失败来自待命池死会话，立即降级全新建连，无需等待退避
                 if !used_pool {
-                    tokio::time::sleep(RETRY_DELAY).await;
+                    let backoff = Duration::from_millis(
+                        50 * (1 << attempt.min(6)) + (rand::random::<u64>() % 50),
+                    );
+                    tokio::time::sleep(backoff).await;
                 }
             }
         }

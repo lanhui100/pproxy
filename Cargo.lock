@@ -1170,6 +1170,7 @@ dependencies = [
  "hyper-util",
  "pproxy-core",
  "pproxy-transport",
+ "rand 0.8.7",
  "reqwest",
  "rustls",
  "serde",

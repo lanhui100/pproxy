@@ -31,9 +31,8 @@ use crate::gateway::GatewayState;
 /// 与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
 const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
 
-/// 网络类失败重试：总尝试 2 次（首次 + 1 重试）；denied 不重试（spec §3.3）。
-const MAX_ATTEMPTS: u32 = 2;
-const RETRY_DELAY: Duration = Duration::from_millis(400);
+/// 网络类失败重试：总尝试 5 次（首次 + 4 重试）；denied 不重试（spec §3.3）。
+const MAX_ATTEMPTS: u32 = 5;
 
 /// 默认开箱即用的白名单（覆盖主流海外常用服务、社交通讯、AI 模型与代码平台）。
 pub const DEFAULT_ALLOWLIST: &[&str] = &[
@@ -430,7 +429,10 @@ pub async fn handle_connect_raw(
                 if !retryable || attempt + 1 >= MAX_ATTEMPTS {
                     break;
                 }
-                tokio::time::sleep(RETRY_DELAY).await;
+                let backoff = Duration::from_millis(
+                    50 * (1 << attempt.min(6)) + (rand::random::<u64>() % 50),
+                );
+                tokio::time::sleep(backoff).await;
             }
         }
     }

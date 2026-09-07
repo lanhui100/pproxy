@@ -30,7 +30,7 @@ const SELF_HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3
 const SELF_HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(0);
 static LAST_SELF_HEAL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
-const RETRY: u32 = 2; // 总尝试次数（首次 + 1 次重试）
+const RETRY: u32 = 5; // 总尝试次数（首次 + 4 次重试）
 
 /// 建连阶段：支持多中继端点自动切换（CF 节点不可达/被拒时无缝回退备用 Vercel/Node 节点）。
 /// 返回成功使用的端点 URL，供流量统计按出口（CF/Vercel）归账。
@@ -162,7 +162,10 @@ pub async fn connect_and_relay(
             Err(e) => {
                 last_err = Some(e);
                 if attempt + 1 < RETRY {
-                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let backoff = std::time::Duration::from_millis(
+                        50 * (1 << attempt.min(6)) + (rand::random::<u64>() % 50),
+                    );
+                    tokio::time::sleep(backoff).await;
                 }
             }
         }

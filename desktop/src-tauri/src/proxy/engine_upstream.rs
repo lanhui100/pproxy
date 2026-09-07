@@ -15,7 +15,7 @@ fn io(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("upstream: {e}"))
 }
 
-const RETRY: u32 = 2; // 总尝试次数（首次 + 1 次重试），与 WS gate 建连语义一致
+const RETRY: u32 = 5; // 总尝试次数（首次 + 4 次重试），与 WS gate 建连语义一致
 
 // 超时常量：测试下缩短，避免单测真等满 10 秒（生产值不变）。
 #[cfg(not(test))]
@@ -187,7 +187,10 @@ pub async fn connect_and_relay(
                 if !retriable || attempt + 1 >= RETRY {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let backoff = std::time::Duration::from_millis(
+                    50 * (1 << attempt.min(6)) + (rand::random::<u64>() % 50),
+                );
+                tokio::time::sleep(backoff).await;
             }
         }
     }

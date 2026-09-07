@@ -82,8 +82,13 @@ impl EdgeClient {
             req.method,
             Method::GET | Method::HEAD | Method::OPTIONS
         );
+        let has_idempotency_key = req.headers.contains_key("idempotency-key")
+            || req.headers.contains_key("x-idempotency-key")
+            || req.headers.contains_key("idempotency_key")
+            || req.headers.contains_key("x-idempotency_key");
+        let retryable_method = is_idempotent || has_idempotency_key;
 
-        let max_attempts = if is_idempotent { 3 } else { 2 };
+        let max_attempts = 5;
         let mut attempt = 0;
 
         loop {
@@ -110,8 +115,8 @@ impl EdgeClient {
             match send_res {
                 Ok(Ok(resp)) => {
                     let status = resp.status();
-                    // 仅对幂等请求且处于 502/503/504 错误时在未超限时重试
-                    if is_idempotent
+                    // 幂等请求或携带幂等键的请求遇到 502/503/504 时重试，上游可凭键去重
+                    if retryable_method
                         && (status == reqwest::StatusCode::BAD_GATEWAY
                             || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
                             || status == reqwest::StatusCode::GATEWAY_TIMEOUT)
@@ -130,9 +135,9 @@ impl EdgeClient {
                     return Ok(resp);
                 }
                 Ok(Err(e)) => {
-                    // 仅在建联失败（未向网络发出数据）或幂等请求时允许重试，防非幂等 POST 幽灵扣费
+                    // 建联失败（未发出数据）或幂等/带幂等键请求允许重试，无键 POST 不重试防幽灵扣费
                     let is_connect_err = e.is_connect();
-                    if (is_connect_err || is_idempotent) && attempt < max_attempts {
+                    if (is_connect_err || retryable_method) && attempt < max_attempts {
                         tracing::warn!(
                             upstream = %self.worker_url,
                             error = %e,

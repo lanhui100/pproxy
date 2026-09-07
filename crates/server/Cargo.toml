@@ -31,3 +31,4 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["charset", "rustls-tls"] }
 tower = { version = "0.5" }
+rand.workspace = true
