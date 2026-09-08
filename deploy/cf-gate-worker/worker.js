@@ -24,11 +24,7 @@ let egressCache = null
 function getEgressCache(env) {
   if (!egressCache) {
     egressCache = makeEgressGeoCache({
-      probe: () =>
-        probeEgressGeo({
-          url: env.EGRESS_GEO_URL || DEFAULT_EGRESS_GEO_URL,
-          timeoutMs: Number(env.EGRESS_GEO_PROBE_TIMEOUT_MS) || DEFAULT_EGRESS_PROBE_TIMEOUT_MS,
-        }),
+      probe: () => probeEgressGeo(egressProbeConfig(env)),
       ttlMs: Number(env.EGRESS_GEO_TTL_MS) || undefined,
       staleMs: Number(env.EGRESS_GEO_STALE_MS) || undefined,
       log: (...args) => console.log(...args),
@@ -51,6 +47,21 @@ function validHost(h) {
   return true
 }
 
+function jsonResp(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+/// 出站地理探测的生效配置（/debug/egress 与门禁共用，避免两处漂移）。
+function egressProbeConfig(env) {
+  return {
+    url: env.EGRESS_GEO_URL || DEFAULT_EGRESS_GEO_URL,
+    timeoutMs: Number(env.EGRESS_GEO_PROBE_TIMEOUT_MS) || DEFAULT_EGRESS_PROBE_TIMEOUT_MS,
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url)
@@ -59,6 +70,30 @@ export default {
         JSON.stringify({ set: typeof env.TUNNEL_TOKEN_HASH === 'string' }),
         { headers: { 'content-type': 'application/json' } },
       )
+    }
+    // 出站地理探测诊断端点（与 /ws 同一 Bearer token 保护）：
+    // 直接返回探测结果或真实报错，便于排查 unsupported_egress:UNKNOWN 的成因。
+    if (url.pathname === '/debug/egress') {
+      const auth = request.headers.get('Authorization') ?? ''
+      const presented = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+      if (!presented || (await sha256Hex(presented)) !== env.TUNNEL_TOKEN_HASH) {
+        return new Response('unauthorized', { status: 401 })
+      }
+      const cfg = egressProbeConfig(env)
+      const allowed = parseAllowedEgressCountries(env.EGRESS_ALLOWED_COUNTRIES)
+      try {
+        const geo = await probeEgressGeo(cfg)
+        return jsonResp({
+          ok: true,
+          ip: geo.ip,
+          country: geo.country,
+          compliant: allowed.includes(geo.country),
+          allowedCountries: allowed,
+          config: cfg,
+        })
+      } catch (e) {
+        return jsonResp({ ok: false, error: String((e && e.message) || e), config: cfg })
+      }
     }
     if (url.pathname !== '/ws') return new Response('not found', { status: 404 })
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {

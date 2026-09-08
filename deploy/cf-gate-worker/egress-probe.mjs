@@ -50,7 +50,7 @@ export async function probeEgressGeo({
   const { hostname, port, path } = parseEgressProbeUrl(url)
   const deadline = Date.now() + timeoutMs
 
-  const socket = connect({ hostname, port })
+  const socket = connect({ hostname, port }, { secureTransport: 'starttls' })
   if (typeof socket.startTls !== 'function') {
     throw new Error('egress probe: startTls unavailable in this runtime')
   }
