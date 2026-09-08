@@ -108,6 +108,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pool_size_zero_disables_preconnect() {
+        // PPROXY_TUNNEL_POOL=0 的语义：不预建任何待命会话（此前被 size.max(1) 吞掉）。
+        let conns = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock_gate(true, Arc::clone(&conns)).await;
+        let url = format!("ws://{addr}");
+        let (_tx, rx) = watch::channel((Some(url.clone()), Some("token".into())));
+
+        let pool = TunnelPool::with_size(rx, 0);
+        pool.start_maintain();
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(pool.idle_total(), 0, "size=0 不得预建待命会话");
+        assert_eq!(conns.load(Ordering::SeqCst), 0, "size=0 不得发起任何 WS 连接");
+        assert!(pool.checkout(&[&url]).is_none(), "size=0 时 checkout 必须为空");
+    }
+
+    #[tokio::test]
     async fn test_pool_refills_expired_automatically() {
         let conns = Arc::new(AtomicUsize::new(0));
         let addr = spawn_mock_gate(true, Arc::clone(&conns)).await;

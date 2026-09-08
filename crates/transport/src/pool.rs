@@ -81,7 +81,9 @@ impl TunnelPool {
     ) -> Arc<Self> {
         Arc::new(Self {
             idle: Mutex::new(HashMap::new()),
-            size: size.max(1),
+            // size=0 即"禁池化"（server main.rs 的 PPROXY_TUNNEL_POOL=0 回滚开关）：
+            // 此前是 size.max(1)，该开关名不副实——仍会为每个端点预建 1 条待命会话。
+            size,
             tunnel_watch: tokio::sync::Mutex::new(tunnel_watch),
             notify: tokio::sync::Notify::new(),
             started: AtomicBool::new(false),
