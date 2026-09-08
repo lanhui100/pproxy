@@ -221,6 +221,38 @@ fn detect_k8s_cluster_entries() -> Vec<String> {
 
 // ─── 快照结构 ────────────────────────────────────────────────
 
+fn data_plane_host(base: &str) -> Option<String> {
+    let rest = base
+        .strip_prefix("http://")
+        .or_else(|| base.strip_prefix("https://"))?;
+    let host_port = rest.split('/').next()?;
+    if host_port.is_empty() {
+        return None;
+    }
+    if host_port.starts_with('[') {
+        if let Some(end) = host_port.find(']') {
+            return Some(host_port[1..end].to_string());
+        }
+        return None;
+    }
+    let host = match host_port.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host_port,
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+fn is_loopback_data_plane(base: &str) -> bool {
+    match data_plane_host(base) {
+        Some(h) => matches!(h.as_str(), "127.0.0.1" | "localhost" | "::1"),
+        None => false,
+    }
+}
+
 /// 代理环境变量快照，JSON 序列化保存。
 #[derive(Debug, Serialize, Deserialize)]
 struct SavedProxyEnv {
@@ -526,6 +558,11 @@ pub fn on(eval: bool) -> Result<i32, String> {
             .unwrap_or_else(|_| "http://127.0.0.1:8899".to_string()),
         Err(_) => "http://127.0.0.1:8899".to_string(),
     };
+    if !is_loopback_data_plane(&data_plane) {
+        eprintln!(
+            "⚠ data_plane 非回环地址 ({data_plane})，本机环境代理通常应为 http://127.0.0.1:8899；若误配请检查 ~/.pony/config.toml 的 data_plane"
+        );
+    }
 
     let k8s_entries = detect_k8s_cluster_entries();
     let extra_no_proxy = if k8s_entries.is_empty() {
@@ -993,5 +1030,15 @@ contexts:
         let fish = ShellKind::Fish;
         let unset_fish = fish.render_unset(&["http_proxy"]);
         assert_eq!(unset_fish, "set -e http_proxy");
+    }
+
+    #[test]
+    fn loopback_data_plane_detection() {
+        assert!(is_loopback_data_plane("http://127.0.0.1:8899"));
+        assert!(is_loopback_data_plane("http://localhost:8899"));
+        assert!(is_loopback_data_plane("http://[::1]:8899"));
+        assert!(!is_loopback_data_plane("https://edge.ponyjob.top"));
+        assert!(!is_loopback_data_plane("http://192.168.1.2:8899"));
+        assert!(!is_loopback_data_plane("ftp://x"));
     }
 }

@@ -7,8 +7,18 @@ use crate::cmd::proxy_env;
 use crate::render::Table;
 use crate::{EXIT_FAILURE, EXIT_OK, EXIT_UNREACHABLE};
 
+pub fn is_admin_port_mismatch(base: &str) -> bool {
+    base.contains(":8899")
+}
+
 /// status：管理面 health 渲染 + 本机 systemd 状态行 + 环境代理状态。
 pub fn status(http: &AdminClient) -> Result<i32, String> {
+    if is_admin_port_mismatch(http.base_url()) {
+        eprintln!(
+            "⚠ 管理面地址为 {}，疑似误配数据面端口 8899；管理面通常为 http://127.0.0.1:8900，请检查 ~/.pony/config.toml 的 server",
+            http.base_url()
+        );
+    }
     // 服务端状态
     let runtime = tokio_block(async {
         match http.health().await {
@@ -406,5 +416,18 @@ pub(crate) fn tokio_block_impl<T>(fut: impl std::future::Future<Output = T>) -> 
                 .expect("tokio runtime");
             rt.block_on(fut)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_port_mismatch_detection() {
+        assert!(is_admin_port_mismatch("http://127.0.0.1:8899"));
+        assert!(is_admin_port_mismatch("http://192.168.1.2:8899"));
+        assert!(!is_admin_port_mismatch("http://127.0.0.1:8900"));
+        assert!(!is_admin_port_mismatch("http://<TAILNET_IP>:8900"));
     }
 }
