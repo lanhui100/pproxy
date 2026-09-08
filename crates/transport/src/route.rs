@@ -72,15 +72,35 @@ pub fn is_google_host(host: &str) -> bool {
     is_google_or_ai_host(host)
 }
 
+/// 判定目标是否属于被 Cloudflare 平台硬性拉黑的受限 AI 站点（如 OpenAI/ChatGPT/Anthropic）。
+pub fn is_strict_ai_host(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    AI_TARGET_SUFFIXES.iter().any(|s| {
+        if !h.ends_with(s) { return false; }
+        let rest = &h[..h.len() - s.len()];
+        rest.is_empty() || rest.ends_with('.')
+    })
+}
+
 /// 端点优先级重排：Google/AI host → Vercel 合规出口优先；其他 host → CF 低延迟优先。
+///
+/// 额度保护机制（2026-09 专项）：当设置环境变量 `PPROXY_CONSERVE_VERCEL=1` 时，
+/// 仅针对被 CF 平台严格拉黑的 AI 目标（`is_strict_ai_host`）优先分配 Vercel 出口；
+/// 泛 Google 与常规大流量默认走 CF gate（CF 免费版无出站带宽上限且具备智能 Colo 守卫），
+/// 避免普通网页/日常大流量刷爆 Vercel 10GB 出口流量与 CPU 配额。
 pub fn order_endpoints<'a>(urls: Vec<&'a str>, host: &str) -> Vec<&'a str> {
-    let vercel_preferred = is_google_or_ai_host(host);
+    let conserve_vercel = std::env::var("PPROXY_CONSERVE_VERCEL").ok().as_deref() == Some("1");
+    let vercel_preferred = if conserve_vercel {
+        is_strict_ai_host(host)
+    } else {
+        is_google_or_ai_host(host)
+    };
     let mut list = urls;
     list.sort_by_key(|u| {
         let is_vercel = u.contains("vercel") || u.contains("vgate") || u.contains("/api/ws");
         match (vercel_preferred, is_vercel) {
-            (true, true) => 0,   // Google/AI + Vercel 最优先
-            (true, false) => 1,  // Google/AI + CF 兜底
+            (true, true) => 0,   // 首选目标 + Vercel 最优先
+            (true, false) => 1,  // 首选目标 + CF 兜底
             (false, true) => 1,  // 其他 + Vercel 兜底
             (false, false) => 0, // 其他 + CF 最优先
         }
@@ -131,5 +151,39 @@ mod tests {
 
         let ordered = order_endpoints(urls.clone(), "github.com");
         assert_eq!(ordered[0], "wss://gate.ponyjob.top/ws");
+    }
+
+    #[test]
+    fn test_is_strict_ai_host() {
+        assert!(is_strict_ai_host("openai.com"));
+        assert!(is_strict_ai_host("api.openai.com"));
+        assert!(is_strict_ai_host("chatgpt.com"));
+        assert!(is_strict_ai_host("claude.ai"));
+        assert!(is_strict_ai_host("anthropic.com"));
+
+        // Google 域名属于宽泛 Google/AI，但不属于严格 CF 平台拉黑目标
+        assert!(!is_strict_ai_host("google.com"));
+        assert!(!is_strict_ai_host("google.com.hk"));
+        assert!(!is_strict_ai_host("generativelanguage.googleapis.com"));
+        assert!(!is_strict_ai_host("github.com"));
+    }
+
+    #[test]
+    fn test_order_endpoints_conserve_vercel() {
+        std::env::set_var("PPROXY_CONSERVE_VERCEL", "1");
+        let urls = vec![
+            "wss://gate.ponyjob.top/ws",
+            "wss://vgate.ponyjob.top/api/ws",
+        ];
+
+        // 节能模式下：Google 优先走 CF gate
+        let ordered = order_endpoints(urls.clone(), "google.com.hk");
+        assert_eq!(ordered[0], "wss://gate.ponyjob.top/ws");
+
+        // 节能模式下：严格受限 AI 站点依然优先走 Vercel
+        let ordered = order_endpoints(urls.clone(), "api.openai.com");
+        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws");
+
+        std::env::remove_var("PPROXY_CONSERVE_VERCEL");
     }
 }

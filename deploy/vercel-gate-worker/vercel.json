@@ -3,7 +3,8 @@
   "regions": ["iad1"],
   "functions": {
     "api/ws.js": {
-      "maxDuration": 300
+      "memory": 128,
+      "maxDuration": 120
     }
   }
 }

@@ -3,7 +3,7 @@
 //! 4. Store::open + migrate_config_if_needed → 5. TokenService/RouteTable/UsageTracker →
 //! 6. usage 落库 interval task → 7. 数据面 + 管理面双端口 serve → 8. admin 非回环 warn。
 
-use pproxy_server::{api, connect, gateway, is_loopback_host, monitor, tunnel};
+use pproxy_server::{api, connect, gateway, is_loopback_host, monitor, should_keepalive_edge, tunnel};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -148,21 +148,24 @@ async fn main() -> anyhow::Result<()> {
     // 数据面在当前线程驱动（主任务）；admin 已移交后台任务
     // 边缘连接池保活（性能专项，env 开关 PPROXY_EDGE_KEEPALIVE=1）：
     // 间隔 45s < reqwest pool_idle_timeout 90s，保持到 edge 的 TLS 连接常驻，
-    // 消除冷握手（跨洲 ~2-3 RTT）。默认关闭：Vercel 侧每次 ping 计一次函数
-    // 调用（约 1920 次/日），CF worker 侧无副作用，按部署形态开启。
+    // 消除冷握手（跨洲 ~2-3 RTT）。默认关闭：仅对 CF Worker 保活，Vercel 上游
+    // 每次 ping 计一次函数调用（约 1920 次/日）已自动排除（should_keepalive_edge）。
     if std::env::var("PPROXY_EDGE_KEEPALIVE").ok().as_deref() == Some("1") {
         let edges = Arc::clone(&edges);
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(45)).await;
                 for (name, edge) in edges.iter() {
+                    if !should_keepalive_edge(name) {
+                        continue;
+                    }
                     if let Err(e) = edge.keepalive_ping().await {
                         tracing::debug!(upstream = %name, error = %e, "edge keepalive ping failed");
                     }
                 }
             }
         });
-        info!("edge keepalive enabled (PPROXY_EDGE_KEEPALIVE=1, interval 45s; note: Vercel 上游每次 ping 计一次函数调用, ~1920 次/日)");
+        info!("edge keepalive enabled (PPROXY_EDGE_KEEPALIVE=1, interval 45s; Vercel 上游已安全排除以避免额度超限)");
     }
 
     let gw_state = gateway::GatewayState {
