@@ -14,4 +14,5 @@ pub mod usage;
 pub mod user;
 pub mod upgrade;
 pub mod clash;
+pub mod migrate;
 

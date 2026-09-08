@@ -282,11 +282,28 @@ fn deploy_vercel(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
     let proxy_secret = resolve_proxy_secret(cfg)?;
 
     // 检查是否已 link
-    let has_project = work_dir.join(".vercel").join("project.json").exists();
+    let mut has_project = work_dir.join(".vercel").join("project.json").exists();
     if !has_project {
-        println!("  Vercel 项目尚未关联。正在尝试 link...");
-        println!("  (需要先创建 Vercel 项目 vedge.ponyjob.top)");
+        println!("  Vercel 项目尚未关联，正在尝试通过 API 自动探测并创建关联...");
+        let client = crate::cloud::VercelClient::new(&token, None);
+        if let Ok(acc) = client.get_account_info() {
+            let (team_id, org_id) = if let Some(t) = acc.teams.into_iter().next() {
+                (Some(t.id.clone()), t.id)
+            } else {
+                (None, acc.user.id)
+            };
+            let scoped = crate::cloud::VercelClient::new(&token, team_id);
+            if let Ok(p) = scoped.ensure_project("pproxy-edge-v2") {
+                if crate::cloud::write_local_project_json(&work_dir, &p.id, &org_id, "pproxy-edge-v2").is_ok() {
+                    println!("  ✓ 已自动创建并关联项目: pproxy-edge-v2");
+                    has_project = true;
+                }
+            }
+        }
+    }
 
+    if !has_project {
+        println!("  正在尝试通过 CLI 进行 vercel link...");
         let link_status = Command::new(npx_cmd())
             .args(["vercel", "link", "--confirm"])
             .current_dir(&work_dir)

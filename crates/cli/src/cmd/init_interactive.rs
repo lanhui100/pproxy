@@ -177,7 +177,15 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
     println!("│");
     let has_deploy_tokens = !cf_token.is_empty() || !vercel_token.is_empty();
     if has_deploy_tokens {
-        println!("│ 运行以下命令部署上游服务：");
+        println!("│ 一键初始化 / 迁移云端服务（推荐）：");
+        if !vercel_token.is_empty() {
+            println!("│   pproxy migrate vercel      # 一键创建项目、配置环境变量与域名并部署");
+        }
+        if !cf_token.is_empty() {
+            println!("│   pproxy migrate cf          # 一键同步并部署 Cloudflare 服务");
+        }
+        println!("│");
+        println!("│ 单独部署上游服务：");
         if !cf_token.is_empty() {
             println!("│   pproxy deploy cf-worker    # 部署 CF Worker");
         }

@@ -3,6 +3,7 @@
 //! 本文件禁止业务逻辑：命令实现在 cmd/*，HTTP 在 client.rs，本地配置在 config.rs。
 
 mod client;
+pub mod cloud;
 mod cmd;
 mod config;
 mod export;
@@ -174,6 +175,54 @@ enum Command {
         /// 仅打印订阅 URL 链接
         #[arg(long)]
         url_only: bool,
+    },
+    /// 云服务一键初始化与账户迁移（支持 Vercel 和 Cloudflare）
+    Migrate {
+        #[command(subcommand)]
+        cmd: MigrateCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCmd {
+    /// 一键迁移或初始化 Vercel 账户与关联项目
+    Vercel {
+        /// Vercel Personal Access Token（以 vcp_ 开头）
+        #[arg(long)]
+        token: Option<String>,
+        /// 指定团队 Scope（团队 slug 或团队 ID）
+        #[arg(long)]
+        team: Option<String>,
+        /// Edge 代理项目名（默认 pproxy-edge-v2）
+        #[arg(long, default_value = "pproxy-edge-v2")]
+        project_edge: String,
+        /// Gate Worker 项目名（默认 vercel-gate-worker）
+        #[arg(long, default_value = "vercel-gate-worker")]
+        project_gate: String,
+        /// 桌面分发项目名（默认 pony-dsk）
+        #[arg(long, default_value = "pony-dsk")]
+        project_dsk: String,
+        /// 跳过自动部署
+        #[arg(long)]
+        skip_deploy: bool,
+        /// 预演模式（不向云端或本地写入变更）
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 一键迁移或初始化 Cloudflare 账户
+    Cf {
+        /// Cloudflare API Token
+        #[arg(long)]
+        token: Option<String>,
+        /// Cloudflare Account ID（默认自动探测）
+        #[arg(long)]
+        account_id: Option<String>,
+        /// 跳过自动部署
+        #[arg(long)]
+        skip_deploy: bool,
+        /// 预演模式（不向云端或本地写入变更）
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -427,6 +476,35 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         return init(&server, token.as_deref(), *force);
     }
 
+    // 4.1 migrate 一键云服务初始化/迁移
+    if let Command::Migrate { cmd } = &cli.command {
+        let cfg = config::load().unwrap_or_default();
+        return match cmd {
+            MigrateCmd::Vercel { token, team, project_edge, project_gate, project_dsk, skip_deploy, dry_run } => {
+                let opts = cmd::migrate::VercelMigrateOpts {
+                    token: token.clone(),
+                    team: team.clone(),
+                    project_edge: project_edge.clone(),
+                    project_gate: project_gate.clone(),
+                    project_dsk: project_dsk.clone(),
+                    skip_deploy: *skip_deploy,
+                    dry_run: *dry_run,
+                    ..Default::default()
+                };
+                cmd::migrate::run_vercel_migration(&opts, &cfg).map_err(RunError::Msg)
+            }
+            MigrateCmd::Cf { token, account_id, skip_deploy, dry_run } => {
+                let opts = cmd::migrate::CfMigrateOpts {
+                    token: token.clone(),
+                    account_id: account_id.clone(),
+                    skip_deploy: *skip_deploy,
+                    dry_run: *dry_run,
+                };
+                cmd::migrate::run_cf_migration(&opts, &cfg).map_err(RunError::Msg)
+            }
+        };
+    }
+
     // 5. deploy 也需要配置
     if let Command::Deploy { target } = &cli.command {
         let cfg = config::load()?;
@@ -578,7 +656,8 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         | Command::On { .. }
         | Command::Off { .. }
         | Command::Env { .. }
-        | Command::Upgrade { .. } => {
+        | Command::Upgrade { .. }
+        | Command::Migrate { .. } => {
             unreachable!("handled above")
         }
     };

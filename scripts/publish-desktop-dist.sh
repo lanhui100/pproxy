@@ -140,8 +140,12 @@ if [[ -n "${VERCEL_TOKEN:-}" ]]; then
   fi
 
   cd "$STAGE"
-  # 优先带 --scope pony7 link，若无团队权限则回退默认 scope
-  npx --yes vercel@latest link --yes --project pony-dsk --scope pony7 --token "$VERCEL_TOKEN" 2>/dev/null || \
+  # 优先从环境变量 VERCEL_SCOPE / VERCEL_ORG_ID 读取，未指定时自适应，彻底解耦硬编码团队名
+  SCOPE_ARGS=()
+  if [[ -n "${VERCEL_SCOPE:-${VERCEL_ORG_ID:-}}" ]]; then
+    SCOPE_ARGS=("--scope" "${VERCEL_SCOPE:-$VERCEL_ORG_ID}")
+  fi
+  npx --yes vercel@latest link --yes --project pony-dsk "${SCOPE_ARGS[@]}" --token "$VERCEL_TOKEN" 2>/dev/null || \
     npx --yes vercel@latest link --yes --project pony-dsk --token "$VERCEL_TOKEN" >/dev/null
 
   npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
