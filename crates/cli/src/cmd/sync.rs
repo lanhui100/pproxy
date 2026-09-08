@@ -248,6 +248,10 @@ pub fn export(passphrase: Option<&str>) -> Result<i32, String> {
 
 /// 导入加密配置字符串。
 pub fn import(input: &str, passphrase: Option<&str>) -> Result<i32, String> {
+    import_internal(input, passphrase, None)
+}
+
+pub fn import_internal(input: &str, passphrase: Option<&str>, nonces_path: Option<&Path>) -> Result<i32, String> {
     let pass = match passphrase {
         Some(p) if !p.is_empty() => p,
         _ => return Err("请提供解密口令: pproxy sync import \"<uri>\" --passphrase \"<password>\"".into()),
@@ -295,7 +299,11 @@ pub fn import(input: &str, passphrase: Option<&str>) -> Result<i32, String> {
     }
 
     // 2. Nonce 防重放检查（跨进程文件持久化防重放）
-    check_and_record_nonce(&payload.nonce, payload.exp, now)?;
+    if let Some(p) = nonces_path {
+        check_and_record_nonce_at(p, &payload.nonce, payload.exp, now)?;
+    } else {
+        check_and_record_nonce(&payload.nonce, payload.exp, now)?;
+    }
 
     // 3. 写入本地配置
     let mut cfg = load().unwrap_or_else(|_| PonyConfig {
@@ -409,12 +417,15 @@ mod tests {
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&final_buf);
         let sync_uri = format!("{SYNC_SCHEME}{encoded}");
 
+        let tmp = tempfile::tempdir().unwrap();
+        let nonces_path = tmp.path().join("test_nonces.json");
+
         // 第一次导入应该成功
-        let res1 = import(&sync_uri, Some(pass));
+        let res1 = import_internal(&sync_uri, Some(pass), Some(&nonces_path));
         assert!(res1.is_ok());
 
         // 第二次导入相同口令（重放攻击）应该被拒绝！
-        let res2 = import(&sync_uri, Some(pass));
+        let res2 = import_internal(&sync_uri, Some(pass), Some(&nonces_path));
         assert!(res2.is_err());
         assert!(res2.unwrap_err().contains("安全拦截"));
     }
