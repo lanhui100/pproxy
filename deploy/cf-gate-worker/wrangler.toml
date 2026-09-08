@@ -10,6 +10,20 @@ compatibility_date = "2024-09-01"
 # 显式声明便于部署核对；可设 "false" 临时关闭（P1-2 修复）。
 STRICT_GOOGLE_WHITELIST = "true"
 
+# 出站 IP 地理门禁（A 方案，2026-09-08）：入站 colo 合规 ≠ 出站 egress IP 合规
+# （connect() 的出口 IP 由 CF 另行分配，与握手 colo 不保证同地区）。
+# 仅对 COMPLIANT_EGRESS_SUFFIXES（Google Cloud Code / Code Assist 三个 host）生效：
+# 探测本 Worker 出站 IP 的国家码，不在白名单或探测失败（fail-closed）→
+# 返回 unsupported_egress:* 并关闭 WS，客户端自动 failover 到真实机房出口。
+EGRESS_GEO_URL = "https://ipinfo.io/json"
+EGRESS_GEO_PROBE_TIMEOUT_MS = "1500"
+# 新鲜期：TTL 内复用探测结果，避免每次 bind 都出站探测
+EGRESS_GEO_TTL_MS = "300000"
+# 陈旧期：探测失败时沿用最近成功结果的上限，超过即 fail-closed
+EGRESS_GEO_STALE_MS = "1800000"
+# 留空 = 使用 gate-policy.mjs 的 DEFAULT_ALLOWED_EGRESS_COUNTRIES（美/欧/亚太合规区/拉美）
+# EGRESS_ALLOWED_COUNTRIES = ""
+
 [observability]
 enabled = true
 

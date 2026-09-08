@@ -2,10 +2,40 @@
 // relay 模式采用 CF 官方文档规范：sock.readable.pipeTo(WritableStream) +
 // ws message → writer.write（此前手搓 for-await/双闭包模式触发本地 workerd 崩溃）。
 import { connect } from 'cloudflare:sockets'
-import { shouldBlockColo, parseBlockedColos, parseAllowedColos, strictGoogleEnabled } from './gate-policy.mjs'
+import {
+  shouldBlockColo,
+  parseBlockedColos,
+  parseAllowedColos,
+  strictGoogleEnabled,
+  requiresCompliantEgress,
+  shouldBlockEgress,
+  parseAllowedEgressCountries,
+} from './gate-policy.mjs'
+import { makeEgressGeoCache } from './egress-geo.mjs'
+import { probeEgressGeo, DEFAULT_EGRESS_GEO_URL, DEFAULT_EGRESS_PROBE_TIMEOUT_MS } from './egress-probe.mjs'
 
 const ALLOWED_PORTS = new Set([443]) // 80 明文透传默认禁用（M6 spec R8/F12）
 const MAX_NAME_LEN = 253
+
+// 出站地理门禁缓存：isolate 级复用，避免每个 bind 都做出站探测。
+// env 只在 fetch 内可见，故惰性创建。
+let egressCache = null
+
+function getEgressCache(env) {
+  if (!egressCache) {
+    egressCache = makeEgressGeoCache({
+      probe: () =>
+        probeEgressGeo({
+          url: env.EGRESS_GEO_URL || DEFAULT_EGRESS_GEO_URL,
+          timeoutMs: Number(env.EGRESS_GEO_PROBE_TIMEOUT_MS) || DEFAULT_EGRESS_PROBE_TIMEOUT_MS,
+        }),
+      ttlMs: Number(env.EGRESS_GEO_TTL_MS) || undefined,
+      staleMs: Number(env.EGRESS_GEO_STALE_MS) || undefined,
+      log: (...args) => console.log(...args),
+    })
+  }
+  return egressCache
+}
 
 async function sha256Hex(s) {
   const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
@@ -85,6 +115,28 @@ export default {
         server.close(1008, coloReason)
         return
       }
+
+      // 出站地理门禁（A 方案）：入站 colo 合规 ≠ 出站 egress IP 合规
+      // （connect() 的出站 IP 由 CF 另行分配）。仅对 Cloud Code 系 host 生效，
+      // fail-closed；非合规 host 一律放行，避免把泛 Google 流量倾泻到兜底出口。
+      if (requiresCompliantEgress(req.host)) {
+        const egress = await getEgressCache(env).resolve()
+        const egressReason = shouldBlockEgress(egress, req.host, {
+          allowedCountries: parseAllowedEgressCountries(env.EGRESS_ALLOWED_COUNTRIES),
+        })
+        if (egressReason) {
+          console.log(
+            '[gate] egress blocked',
+            egressReason,
+            req.host,
+            egress.status,
+            egress.ip || '',
+          )
+          server.send(JSON.stringify({ ok: false, reason: egressReason }))
+          server.close(1008, egressReason)
+          return
+        }
+      }
       try {
         console.log('[gate] connecting', req.host, port)
         const sock = connect({ hostname: req.host, port })
@@ -93,6 +145,11 @@ export default {
         established = true
         server.send(JSON.stringify({ ok: true }))
         // TCP→WS：官方规范 pipe 模式
+        // 上游正常 EOF（pipeTo resolve）与异常（reject）都必须关闭 WS——
+        // 此前只挂了 .catch，正常关闭时 WS 悬挂成"半死隧道"，客户端侧表现为 EOF。
+        const closeUpstream = () => {
+          try { server.close(1000, 'upstream closed') } catch {}
+        }
         sock.readable
           .pipeTo(
             new WritableStream({
@@ -103,9 +160,7 @@ export default {
               },
             }),
           )
-          .catch(() => {
-            try { server.close(1000, 'upstream closed') } catch {}
-          })
+          .then(closeUpstream, closeUpstream)
         writer = up
       } catch (e) {
         console.log('[gate] connect error', String(e))

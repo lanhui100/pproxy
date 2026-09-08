@@ -337,9 +337,21 @@ impl TunnelPool {
         &self.cfg
     }
 
+    /// 按配置顺序取待命会话（无目标信息时的兼容入口）。
     pub fn checkout(&self) -> Option<(WsTx, WsRx)> {
-        let endpoints: Vec<&str> = self.cfg.gate_url.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-        self.inner.checkout(&endpoints).map(|(tx, rx, _)| (tx, rx))
+        let endpoints: Vec<&str> = self
+            .cfg
+            .gate_url
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        self.checkout_ordered(&endpoints)
+    }
+
+    /// 按调用方给定的端点优先级取待命会话（合规出口专项：按目标 host 重排后传入）。
+    pub fn checkout_ordered(&self, ordered: &[&str]) -> Option<(WsTx, WsRx)> {
+        self.inner.checkout(ordered).map(|(tx, rx, _)| (tx, rx))
     }
 }
 
@@ -391,23 +403,33 @@ pub async fn handle_connect_raw(
         return;
     }
 
+    // 端点顺序按目标 host 决定（Cloud Code 系必须优先合规物理出口，见 route.rs）。
+    // 之前此处固定按配置顺序建连，导致 agy 的模型调用固定先落 CF 出口，
+    // 命中不受支持地区时被 Google 以 400 FAILED_PRECONDITION 拒绝。
+    let ordered_urls = pproxy_transport::ordered_gate_urls(&pool.config().gate_url, &host);
+    let ordered_refs: Vec<&str> = ordered_urls.iter().map(String::as_str).collect();
+
     // 先 establish（R4）：写 200 前可重试；denied 不重试；绝不静默回落直连
     // 池化（性能专项）：第一次尝试优先取待命会话（省 TCP+TLS+Upgrade ~4 RTT），
     // 待命会话 bind 失败（静默死亡）按 Network 重试，第二次尝试全新建连兜底。
     let establish_started = tokio::time::Instant::now();
     for attempt in 0..MAX_ATTEMPTS {
-        let pooled_session = if attempt == 0 { pool.checkout() } else { None };
+        let pooled_session = if attempt == 0 {
+            pool.checkout_ordered(&ordered_refs)
+        } else {
+            None
+        };
         let used_pool = pooled_session.is_some();
         let result = match pooled_session {
             Some((tx, rx)) => {
                 let bind_res = bind_target(tx, rx, &host, port).await;
                 if bind_res.is_err() {
-                    establish(pool.config(), &host, port).await
+                    establish_with_endpoints(pool.config(), &ordered_refs, &host, port).await
                 } else {
                     bind_res
                 }
             }
-            None => establish(pool.config(), &host, port).await,
+            None => establish_with_endpoints(pool.config(), &ordered_refs, &host, port).await,
         };
         match result {
             Ok((ws_tx, ws_rx)) => {
@@ -462,17 +484,14 @@ fn split_host_port(authority: &str) -> Option<(String, u16)> {
     Some((h.to_string(), p.parse().ok()?))
 }
 
-/// 建连（写 200 之前，可重试窗口）：WS Upgrade（Bearer token）→ Text 首帧
-/// `{host,port}` → 等 `{"ok":true}`。行为沿桌面端：10s 首帧超时、应答 Ping/Pong。
-/// 支持逗号分隔多个 Gate 端点（如 wss://gate1,wss://gate2），按顺序故障转移。
-async fn establish(cfg: &TunnelConfig, host: &str, port: u16) -> Result<(WsTx, WsRx), EstablishError> {
-    let endpoints: Vec<&str> = cfg
-        .gate_url
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-
+/// 建连（端点顺序由调用方给定）：合规出口专项按目标 host 重排后传入，
+/// 任一端点 bind 被拒/失败即按序故障转移到下一端点。
+async fn establish_with_endpoints(
+    cfg: &TunnelConfig,
+    endpoints: &[&str],
+    host: &str,
+    port: u16,
+) -> Result<(WsTx, WsRx), EstablishError> {
     let mut last_err = None;
     for endpoint in endpoints {
         match pproxy_transport::connect_ws(endpoint, &cfg.token).await {
@@ -738,8 +757,16 @@ mod tests {
 
     /// 复刻 worker.js 协议：Text 首帧 `{"host","port"}` → `{"ok":true}` / deny → Binary echo。
     /// `deny_hosts` 非空时对这些 host 回 `{"ok":false}`（模拟 worker ACL）。
-    #[allow(clippy::result_large_err, clippy::collapsible_match)]
     async fn spawn_stub_worker(deny_hosts: &'static [&'static str]) -> StubWorker {
+        spawn_stub_worker_at(deny_hosts, "/ws").await
+    }
+
+    /// 同 `spawn_stub_worker`，但可指定 WS 路径——用于构造 Vercel 侧端点
+    /// （`route.rs` 的出口分类按 URL 串判定：含 `/api/ws` 或 `vgate`/`vercel` 记为 Vercel）。
+    async fn spawn_stub_worker_at(
+        deny_hosts: &'static [&'static str],
+        path: &'static str,
+    ) -> StubWorker {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let auth_captured = Arc::new(StdMutex::new(None));
@@ -790,7 +817,7 @@ mod tests {
                 });
             }
         });
-        StubWorker { url: format!("ws://{addr}/ws"), auth_captured, conns }
+        StubWorker { url: format!("ws://{addr}{path}"), auth_captured, conns }
     }
 
     /// 组装 GatewayState（模式同 gateway.rs 测试：临时库 + 内存路由表）。
@@ -1073,5 +1100,60 @@ mod tests {
             matches!(err, Err(EstablishError::Network(_))),
             "死会话 bind 必须归类 Network 以触发重试兜底, got {err:?}"
         );
+    }
+
+    /// 合规出口专项（A/B）：Cloud Code 系 host 必须先打非 CF 端点，
+    /// 即便配置里 CF 排在前面、且 `PPROXY_CONSERVE_VERCEL=1` 生效。
+    #[tokio::test]
+    async fn connect_compliant_host_prefers_non_cf_endpoint() {
+        let cf = spawn_stub_worker(&[]).await;
+        let vgate = spawn_stub_worker_at(&[], "/api/ws").await;
+        let cfg = TunnelConfig {
+            gate_url: format!("{},{}", cf.url, vgate.url),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let addr = start_gateway(gw_state(Some(cfg), "compliant-order")).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT daily-cloudcode-pa.googleapis.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, _head, _) = read_response(&mut c).await;
+        assert_eq!(status, 200, "合规 host 应建连成功");
+        assert_eq!(
+            vgate.conns.load(Ordering::SeqCst),
+            1,
+            "合规 host 必须先打非 CF 端点"
+        );
+        assert_eq!(
+            cf.conns.load(Ordering::SeqCst),
+            0,
+            "合规 host 不得先打 CF 端点"
+        );
+    }
+
+    /// 对照组：认证类 host 不受合规出口例外影响，仍按配置顺序 CF 优先。
+    #[tokio::test]
+    async fn connect_auth_host_keeps_configured_order() {
+        let cf = spawn_stub_worker(&[]).await;
+        let vgate = spawn_stub_worker(&[]).await;
+        let cfg = TunnelConfig {
+            gate_url: format!("{},{}", cf.url, vgate.url),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let addr = start_gateway(gw_state(Some(cfg), "auth-order")).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT oauth2.googleapis.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, _head, _) = read_response(&mut c).await;
+        assert_eq!(status, 200, "认证类 host 应建连成功");
+        assert_eq!(
+            cf.conns.load(Ordering::SeqCst),
+            1,
+            "认证类 host 应保持 CF 优先"
+        );
+        assert_eq!(vgate.conns.load(Ordering::SeqCst), 0);
     }
 }

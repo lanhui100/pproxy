@@ -2,10 +2,15 @@
 import {
   DEFAULT_BLOCKED_COLOS,
   DEFAULT_ALLOWED_COLOS,
+  DEFAULT_ALLOWED_EGRESS_COUNTRIES,
+  COMPLIANT_EGRESS_SUFFIXES,
   isGoogleHost,
   parseBlockedColos,
   parseAllowedColos,
+  parseAllowedEgressCountries,
+  requiresCompliantEgress,
   shouldBlockColo,
+  shouldBlockEgress,
   strictGoogleEnabled,
 } from './gate-policy.mjs'
 
@@ -96,6 +101,34 @@ check('env=true → 严格开启', strictGoogleEnabled('true') === true)
 check('env=1 → 严格开启', strictGoogleEnabled('1') === true)
 check('env=false → 显式关闭', strictGoogleEnabled('false') === false)
 check('env=0 → 显式关闭', strictGoogleEnabled('0') === false)
+
+console.log('[9] 合规出口 host 判定（A/B 专项）')
+check('daily-cloudcode-pa.googleapis.com 要求合规出口', requiresCompliantEgress('daily-cloudcode-pa.googleapis.com'))
+check('cloudcode-pa.googleapis.com 要求合规出口', requiresCompliantEgress('cloudcode-pa.googleapis.com'))
+check('cloudaicompanion.googleapis.com 要求合规出口', requiresCompliantEgress('cloudaicompanion.googleapis.com'))
+check('大写与末尾点归一化', requiresCompliantEgress('DAILY-CLOUDCODE-PA.GOOGLEAPIS.COM.'))
+check('认证类不要求合规出口', !requiresCompliantEgress('oauth2.googleapis.com'))
+check('泛 Google 不要求合规出口', !requiresCompliantEgress('generativelanguage.googleapis.com'))
+check('仿冒域名不命中', !requiresCompliantEgress('cloudcode-pa.googleapis.com.evil.cn'))
+check('空 host 不命中', !requiresCompliantEgress(''))
+check('Rust 侧清单口径一致（3 项）', COMPLIANT_EGRESS_SUFFIXES.length === 3)
+
+console.log('[10] 出站地理门禁（fail-closed）')
+check('合规地区放行', shouldBlockEgress({ country: 'US', status: 'fresh' }, 'daily-cloudcode-pa.googleapis.com') === null)
+check('合规地区放行（JP）', shouldBlockEgress({ country: 'jp', status: 'fresh' }, 'daily-cloudcode-pa.googleapis.com') === null)
+check('非合规地区拒绝并带国家码', shouldBlockEgress({ country: 'HK', status: 'fresh' }, 'daily-cloudcode-pa.googleapis.com') === 'unsupported_egress:HK')
+check('中国大陆拒绝', shouldBlockEgress({ country: 'CN', status: 'fresh' }, 'daily-cloudcode-pa.googleapis.com') === 'unsupported_egress:CN')
+check('stale 结果同样参与判定', shouldBlockEgress({ country: 'HK', status: 'stale' }, 'daily-cloudcode-pa.googleapis.com') === 'unsupported_egress:HK')
+check('探测未知 → fail-closed', shouldBlockEgress({ country: '', status: 'unknown' }, 'daily-cloudcode-pa.googleapis.com') === 'unsupported_egress:UNKNOWN')
+check('缺 country → fail-closed', shouldBlockEgress({ status: 'fresh' }, 'daily-cloudcode-pa.googleapis.com') === 'unsupported_egress:UNKNOWN')
+check('入参缺失 → fail-closed', shouldBlockEgress(undefined, 'daily-cloudcode-pa.googleapis.com') === 'unsupported_egress:UNKNOWN')
+check('非合规 host 不参与地理门禁', shouldBlockEgress({ country: 'CN', status: 'fresh' }, 'generativelanguage.googleapis.com') === null)
+check('非合规 host 探测失败也不拦', shouldBlockEgress({ status: 'unknown' }, 'oauth2.googleapis.com') === null)
+check('自定义国家白名单生效', shouldBlockEgress({ country: 'HK', status: 'fresh' }, 'daily-cloudcode-pa.googleapis.com', { allowedCountries: ['HK'] }) === null)
+check('默认国家白名单含 US/JP/SG', ['US', 'JP', 'SG'].every((c) => DEFAULT_ALLOWED_EGRESS_COUNTRIES.includes(c)))
+check('默认国家白名单不含 HK/CN', !DEFAULT_ALLOWED_EGRESS_COUNTRIES.includes('HK') && !DEFAULT_ALLOWED_EGRESS_COUNTRIES.includes('CN'))
+check('env 国家白名单解析', parseAllowedEgressCountries('us, jp ,sg').join(',') === 'US,JP,SG')
+check('env 空串回落默认', parseAllowedEgressCountries('').length === DEFAULT_ALLOWED_EGRESS_COUNTRIES.length)
 
 console.log(`\n结果: ${passed} pass, ${failed} fail`)
 process.exit(failed ? 1 : 0)

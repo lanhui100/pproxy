@@ -786,6 +786,52 @@ Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution
 - **安装体验 · 安装/升级成功自动打开（默认勾选）+ 桌面图标**（`desktop/src-tauri/windows/installer-hooks.nsh`）：`NSIS_HOOK_POSTINSTALL` 无条件调用 `CreateOrUpdateDesktopShortcut`（GUI 未勾选/升级残留图标场景下桌面图标始终存在并指向当前版本）；自动打开走模板自带机制、hook 内不得直接拉起——GUI 安装由完成页「运行」复选框触发（`MUI_FINISHPAGE_RUN` 默认勾选、用户可取消，点完成后经 `RunMainBinary` 以 `RunAsUser` 拉起，单实例锁防重复），被动/静默升级（updater 下发 `/P /UPDATE /R`）完成页被跳过、由 `.onInstSuccess` 凭 `/R` 携带 `/ARGS` 拉起。
 - 回归：gate-policy 51/51、desktop cargo 55/55、Vitest 78/78、vue-tsc 0 错、oxlint 0 警告、NSIS installer 编译通过。
 
+### 复发定位与根治：出站地理门禁 + 合规出口端点优选 · 2026-09-08
+
+**现象**：
+`agy` 仍频繁 `⚠ Agent execution terminated due to error` + `Error ID: <trajectory_id>-<步号>`
+（该 ID 是 CLI 本地关联 ID，不是 Google 错误码）。日志累计 99 次 agent-executor 级失败、
+12 个对话受影响，跨 09-05 ~ 09-08。
+
+**为什么 09-01/09-02 的修复没根治**（逐条实测）：
+
+1. **入站 colo ≠ 出站 egress IP**：`shouldBlockColo` 判的是 WS 握手的 `request.cf.colo`，
+   而 `connect()` 的出站 IP 由 CF 另行分配。实测 CF gate 出口在 `104.28.152.x / 104.28.158.x / 104.28.165.x`
+   间轮换（8 次探测 1 次超时），colo 合规不等于 Google 看到的地区合规。
+2. **端点优选没接到数据面**：`order_endpoints` 只被 `desktop/src-tauri/.../engine_tunnel.rs` 调用；
+   `crates/server`（线上 8899）与 `crates/engine`（`pproxy serve`）都按配置顺序建连，CF 永远在前。
+3. **省额度策略反向加压**：运行中 pproxy-server 带 `PPROXY_CONSERVE_VERCEL=1`，泛 Google 优先 CF。
+4. **400 不触发 failover**：failover 只在建连失败时发生；Google 的 400 在隧道建立之后返回，
+   代理是端到端密文转发，看不到也改不了。
+
+**落地修复**（详见 ADR-008）：
+
+- **A · CF gate 出站地理门禁**：`egress-probe.mjs`（`connect()`+`startTls()` 探测自身出站 IP 国家码）
+  + `egress-geo.mjs`（TTL 5min 复用 / stale 30min 回退 / 并发去重）
+  + `gate-policy.mjs::shouldBlockEgress`（**仅**对 Cloud Code 系 3 个 host 生效，fail-closed）。
+  非合规 host 一律放行，避免探测异常时把泛 Google 流量倾泻到兜底出口。
+- **B · 合规出口端点优选**：`transport::route` 新增 `COMPLIANT_EGRESS_SUFFIXES` /
+  `requires_compliant_egress` / `ordered_gate_urls`；两份数据面 CONNECT 实现统一按目标 host 重排，
+  池化 `checkout_ordered` 同步；该例外**高于** `PPROXY_CONSERVE_VERCEL`。CF 端点保留为兜底。
+- **C · 修 gate worker 半死隧道**：上游正常 EOF 时 `pipeTo` 是 resolve 而非 reject，
+  原 `.catch` 不触发、WS 悬挂（实测 CF 侧 >210s 仍存活）。改为 `.then(closeUpstream, closeUpstream)`。
+
+**验证**：
+
+```bash
+cargo test --workspace                             # 全绿
+node deploy/cf-gate-worker/gate-policy.test.mjs    # 75 pass
+node deploy/cf-gate-worker/egress-geo.test.mjs     # 19 pass
+bash scripts/check-egress-parity.sh                # Rust/JS 两侧 host 清单一致
+```
+
+**部署（两处，代码已完成、尚未上线）**：
+
+1. Rust 数据面：`cargo build --release -p pproxy-server` → 替换 `/home/USER/.local/bin/pproxy-server`
+   → `systemctl --user restart pproxy-server`（会打断在途隧道，建议 agy 空闲时做）。
+2. CF worker：`cd deploy/cf-gate-worker && npx wrangler deploy`（需先 `wrangler login`，
+   当前机器 wrangler 未登录、`.pproxy.env` 里的 CF API token 已失效）。
+
 
 ---
 

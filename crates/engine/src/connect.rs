@@ -197,9 +197,21 @@ impl TunnelPool {
         &self.cfg
     }
 
+    /// 按配置顺序取待命会话（无目标信息时的兼容入口）。
     pub fn checkout(&self) -> Option<(WsTx, WsRx)> {
-        let endpoints: Vec<&str> = self.cfg.gate_url.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-        self.inner.checkout(&endpoints).map(|(tx, rx, _)| (tx, rx))
+        let endpoints: Vec<&str> = self
+            .cfg
+            .gate_url
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        self.checkout_ordered(&endpoints)
+    }
+
+    /// 按调用方给定的端点优先级取待命会话（合规出口专项：按目标 host 重排后传入）。
+    pub fn checkout_ordered(&self, ordered: &[&str]) -> Option<(WsTx, WsRx)> {
+        self.inner.checkout(ordered).map(|(tx, rx, _)| (tx, rx))
     }
 }
 
@@ -320,20 +332,28 @@ pub async fn handle_connect_raw(
         return;
     }
 
+    // 端点顺序按目标 host 决定（Cloud Code 系必须优先合规物理出口，见 transport::route）。
+    let ordered_urls = pproxy_transport::ordered_gate_urls(&pool.config().gate_url, &host);
+    let ordered_refs: Vec<&str> = ordered_urls.iter().map(String::as_str).collect();
+
     // 4. Establish WebSocket Tunnel (优先池化 checkout，失败或重试走全新建连)
     for attempt in 0..MAX_ATTEMPTS {
-        let pooled_session = if attempt == 0 { pool.checkout() } else { None };
+        let pooled_session = if attempt == 0 {
+            pool.checkout_ordered(&ordered_refs)
+        } else {
+            None
+        };
         let used_pool = pooled_session.is_some();
         let result = match pooled_session {
             Some((tx, rx)) => {
                 let bind_res = bind_target(tx, rx, &host, port).await;
                 if bind_res.is_err() {
-                    establish(pool.config(), &host, port).await
+                    establish_with_endpoints(pool.config(), &ordered_refs, &host, port).await
                 } else {
                     bind_res
                 }
             }
-            None => establish(pool.config(), &host, port).await,
+            None => establish_with_endpoints(pool.config(), &ordered_refs, &host, port).await,
         };
         match result {
             Ok((ws_tx, ws_rx)) => {
@@ -484,6 +504,7 @@ pub async fn bind_target(
 }
 
 /// 全新建连：支持逗号分隔多个 Gate 端点（如 wss://gate1,wss://gate2），按顺序故障转移。
+/// 端点顺序取配置顺序；host 感知的排序请用 `establish_with_endpoints`。
 pub async fn establish(
     cfg: &TunnelConfig,
     host: &str,
@@ -495,7 +516,17 @@ pub async fn establish(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
+    establish_with_endpoints(cfg, &endpoints, host, port).await
+}
 
+/// 全新建连（端点顺序由调用方给定）：合规出口专项按目标 host 重排后传入，
+/// 任一端点 bind 被拒/失败即按序故障转移到下一端点。
+pub async fn establish_with_endpoints(
+    cfg: &TunnelConfig,
+    endpoints: &[&str],
+    host: &str,
+    port: u16,
+) -> Result<(WsTx, WsRx), EstablishError> {
     let mut last_err = None;
     for endpoint in endpoints {
         match pproxy_transport::connect_ws(endpoint, &cfg.token).await {

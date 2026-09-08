@@ -80,6 +80,80 @@ export function isGoogleHost(host) {
   return GOOGLE_SUFFIXES.some((s) => suffixMatch(h, s))
 }
 
+/**
+ * 必须走"合规物理出口"的目标（Google Cloud Code / Code Assist 系）。
+ *
+ * 这些接口按**请求来源 IP** 做地区限制：来源落在不受支持地区时返回
+ * `HTTP 400 FAILED_PRECONDITION: User location is not supported for the API use.`
+ * 入站 colo 门禁管不住它们——`connect()` 的出站 egress IP 由 Cloudflare 另行分配，
+ * 与握手 colo 不保证同地区（实测出口在 104.28.158/165.x 间轮换）。因此对这些 host
+ * 追加「出站 IP 地理」门禁（见 shouldBlockEgress）。
+ *
+ * 与 crates/transport/src/route.rs 的 COMPLIANT_EGRESS_SUFFIXES 保持一致。
+ */
+export const COMPLIANT_EGRESS_SUFFIXES = [
+  'daily-cloudcode-pa.googleapis.com',
+  'cloudcode-pa.googleapis.com',
+  'cloudaicompanion.googleapis.com',
+]
+
+export function requiresCompliantEgress(host) {
+  const h = normalizeHost(host)
+  if (!h) return false
+  return COMPLIANT_EGRESS_SUFFIXES.some((s) => suffixMatch(h, s))
+}
+
+/**
+ * Google 官方支持地区的国家码白名单（出站 IP 地理判定用）。
+ * 保守取"北美 + 欧洲 + 亚太合规区 + 拉美合规区"，与 DEFAULT_ALLOWED_COLOS 同口径。
+ */
+export const DEFAULT_ALLOWED_EGRESS_COUNTRIES = [
+  // 北美
+  'US', 'CA',
+  // 欧洲
+  'GB', 'IE', 'FR', 'DE', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'FI', 'DK',
+  'ES', 'IT', 'PL', 'PT', 'CZ',
+  // 亚太与大洋洲
+  'JP', 'KR', 'SG', 'TW', 'AU', 'NZ',
+  // 拉美
+  'BR', 'MX', 'CL',
+]
+
+export function parseAllowedEgressCountries(envValue) {
+  if (typeof envValue !== 'string' || !envValue.trim()) {
+    return [...DEFAULT_ALLOWED_EGRESS_COUNTRIES]
+  }
+  return envValue.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+}
+
+/**
+ * 出站地理门禁（A 方案）：仅对 COMPLIANT_EGRESS_SUFFIXES 生效，fail-closed。
+ *
+ * 探测失败/尚未得出结果（status='unknown'）时同样拒绝——宁可让客户端
+ * failover 到真实机房出口，也不让请求从不确定地区打到 Google。
+ * 非合规出口 host 一律放行，避免探测异常时把泛 Google 流量倾泻到 Vercel。
+ *
+ * @param {{country?: string, ip?: string, status?: 'fresh'|'stale'|'unknown'}} egress
+ * @param {string} host 目标主机名
+ * @param {{allowedCountries?: string[]}} [options]
+ * @returns {null|string} null 放行；string 为拒绝原因（如 "unsupported_egress:HK"）
+ */
+export function shouldBlockEgress(egress, host, options = {}) {
+  if (!requiresCompliantEgress(host)) return null
+
+  const allowed =
+    Array.isArray(options.allowedCountries) && options.allowedCountries.length
+      ? options.allowedCountries
+      : DEFAULT_ALLOWED_EGRESS_COUNTRIES
+
+  const status = egress && typeof egress.status === 'string' ? egress.status : 'unknown'
+  const country = String((egress && egress.country) || '').trim().toUpperCase()
+
+  if (status === 'unknown' || !country) return 'unsupported_egress:UNKNOWN'
+  if (!allowed.includes(country)) return `unsupported_egress:${country}`
+  return null
+}
+
 export function parseBlockedColos(envValue) {
   if (typeof envValue !== 'string' || !envValue.trim()) return [...DEFAULT_BLOCKED_COLOS]
   return envValue.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
