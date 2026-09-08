@@ -66,8 +66,9 @@ Error ID: ab8b023b-7b45-4039-b861-450368d935ad-4
 - ✅ Vercel 出口只承接 3 个 Cloud Code host，泛 Google（YouTube/Play 等）仍走 CF，额度开销可控
 - ✅ CF gate 的自检能兜住"入站 colo 合规但出站 IP 不合规"这一此前无解的盲区
 - ✅ 半死隧道消除，`EOF` 类报错的一个来源被移除
-- ⚠️ CF worker 侧依赖 `connect().startTls()`；若运行时不可用，探测恒为 unknown →
-  该 host 恒 failover 到兜底出口（安全侧降级，不是静默放行）
+- ⚠️ CF worker 侧依赖 `connect(..., { secureTransport: 'starttls' })` + `socket.startTls()`；
+  缺少该选项时 `startTls()` 会抛 `secureTransport must be set to 'starttls'`（首次部署即踩到）。
+  若运行时不可用，探测恒为 unknown → 该 host 恒 failover 到兜底出口（安全侧降级，不是静默放行）
 - ⚠️ 首次 bind 需多等一次探测（~200ms，TTL 内复用）；探测超时上限 1.5s，
   低于数据面 `FIRST_FRAME_TIMEOUT`(3.5s)，不会把 bind 拖成假失败
 - ⚠️ 两份 Rust 清单与一份 JS 清单需人工保持一致——已用
@@ -101,9 +102,25 @@ cargo test --workspace                                    # 含新增 8 条 rout
 node deploy/cf-gate-worker/gate-policy.test.mjs           # 75 pass
 node deploy/cf-gate-worker/egress-geo.test.mjs            # 19 pass
 bash scripts/check-egress-parity.sh                       # 两侧 host 清单一致性
+# 出站地理探测自检（需 tunnel token）：返回本 Worker 出站 IP/国家码与是否合规
+curl -s https://gate.ponyjob.top/debug/egress \
+  -H "Authorization: Bearer <tunnel_token>"
 # 线上出口实测（只读，需 tunnel token）
 node deploy/vercel-gate-worker/smoke-test.mjs wss://vgate.ponyjob.top/api/ws \
   daily-cloudcode-pa.googleapis.com --token <tunnel_token>
 ```
 
+**上线记录（2026-09-08）**：CF worker 已部署（`pony-gate`，此前线上版本停留在 2026-08-31，
+即 A/C 从未上线——这解释了 09-05/06/08 的继续报错）。部署后实测：
+
+- `/debug/egress` → `{"ip":"104.28.165.52","country":"US","compliant":true}`
+- bind `daily-cloudcode-pa.googleapis.com` → `{"ok":true}`
+- 负向验证（临时 `EGRESS_ALLOWED_COUNTRIES=CN` 部署）→ `/debug/egress` 显示
+  `compliant:false`，bind 返回 `{"ok":false,"reason":"unsupported_egress:US"}`，随后已恢复正式配置
+- 数据面实测（`ss -tinp` 字节计数器差分）：合规 host 走 vgate `66.33.60.x`，
+  对照 `oauth2.googleapis.com` 仍走 CF gate，省额度策略未退化
+
 部署顺序：先发 Rust（数据面立即生效）→ 再部署 CF worker（`cd deploy/cf-gate-worker && npx wrangler deploy`）。
+CF 部署凭据：`CLOUDFLARE_API_TOKEN`（需 Account → Workers Scripts → Edit）+ `CLOUDFLARE_ACCOUNT_ID`；
+本机可用的 token 在 `~/.wrangler/config/default.toml`（`.pproxy.env` 里的 `cfat_` 账户级 token
+缺 Workers 权限，仅够读账户信息，不能部署）。

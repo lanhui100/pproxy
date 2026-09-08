@@ -825,12 +825,31 @@ node deploy/cf-gate-worker/egress-geo.test.mjs     # 19 pass
 bash scripts/check-egress-parity.sh                # Rust/JS 两侧 host 清单一致
 ```
 
-**部署（两处，代码已完成、尚未上线）**：
+**部署（2026-09-08 已完成）**：
 
 1. Rust 数据面：`cargo build --release -p pproxy-server` → 替换 `/home/USER/.local/bin/pproxy-server`
-   → `systemctl --user restart pproxy-server`（会打断在途隧道，建议 agy 空闲时做）。
-2. CF worker：`cd deploy/cf-gate-worker && npx wrangler deploy`（需先 `wrangler login`，
-   当前机器 wrangler 未登录、`.pproxy.env` 里的 CF API token 已失效）。
+   → `systemctl --user restart pproxy-server`（会打断在途隧道，建议 agy 空闲时做）。已完成。
+2. CF worker：`cd deploy/cf-gate-worker && npx wrangler deploy`。已完成
+   （线上版本此前停留在 2026-08-31，A/C 从未上线）。
+   凭据：`CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID`；本机可用 token 在
+   `~/.wrangler/config/default.toml`（wrangler 4 默认不读该路径，需显式导出环境变量）。
+
+**上线后自检**：
+
+```bash
+# 出站地理探测（返回本 Worker 出站 IP/国家码）
+curl -s https://gate.ponyjob.top/debug/egress -H "Authorization: Bearer <tunnel_token>"
+# 数据面出口归位（合规 host 应落 vgate 66.33.60.x，认证类仍落 CF）
+pproxy status
+```
+
+**同批修掉的两个缺陷**：
+
+- `PPROXY_TUNNEL_POOL=0` 回滚开关此前无效（`crates/transport/src/pool.rs` 的 `size.max(1)`
+  把 0 抬成 1，仍预建 1 条待命会话）；现 `size=0` 真正禁池化，实测 `pooled=false`。
+- `pproxy status` 把**上游** 403 误报成"未配置 Gate 隧道出口"：`api.github.com/zen` 会对
+  共享出口 IP 的未认证请求限流（实测 5 次 1 次 403）。现按 `x-pproxy-reason` 头区分
+  代理层拒绝与上游状态码，并把 GitHub 探测目标换成 `github.com/robots.txt`。
 
 
 ---
