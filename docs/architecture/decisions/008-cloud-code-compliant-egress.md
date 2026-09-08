@@ -124,3 +124,6 @@ node deploy/vercel-gate-worker/smoke-test.mjs wss://vgate.ponyjob.top/api/ws \
 CF 部署凭据：`CLOUDFLARE_API_TOKEN`（需 Account → Workers Scripts → Edit）+ `CLOUDFLARE_ACCOUNT_ID`；
 本机可用的 token 在 `~/.wrangler/config/default.toml`（`.pproxy.env` 里的 `cfat_` 账户级 token
 缺 Workers 权限，仅够读账户信息，不能部署）。
+
+后续排查同类问题请走手册：[`docs/ops/ANTIGRAVITY-CLI-ERRORS.md`](../ANTIGRAVITY-CLI-ERRORS.md)
+（错误图谱 + 分层判定决策树 + `scripts/antigravity/diag/` 工具）。

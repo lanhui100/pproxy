@@ -788,6 +788,9 @@ Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution
 
 ### 复发定位与根治：出站地理门禁 + 合规出口端点优选 · 2026-09-08
 
+> 错误分类与分层判定方法已沉淀为独立手册：
+> [`docs/ops/ANTIGRAVITY-CLI-ERRORS.md`](ANTIGRAVITY-CLI-ERRORS.md)（含配套脚本 `scripts/antigravity/diag/`）。
+
 **现象**：
 `agy` 仍频繁 `⚠ Agent execution terminated due to error` + `Error ID: <trajectory_id>-<步号>`
 （该 ID 是 CLI 本地关联 ID，不是 Google 错误码）。日志累计 99 次 agent-executor 级失败、
