@@ -373,12 +373,33 @@ pub fn status() -> Result<i32, String> {
     Ok(EXIT_OK)
 }
 
+/// 探测失败归类（纯函数，便于单测）。
+///
+/// 关键区分：**代理层拒绝**必然带 `x-pproxy-reason` 响应头；没有该头时，
+/// 状态码来自上游——例如 `api.github.com` 会对共享出口 IP 的未认证请求限流返回 403，
+/// 此前一律被误报成"未配置 Gate 隧道出口"，把上游限流说成隧道故障。
+fn describe_probe_failure(code: u16, pproxy_reason: Option<&str>) -> String {
+    match pproxy_reason {
+        Some("tunnel_not_configured") => "未配置 Gate 隧道出口 (需部署 gate-worker)".to_string(),
+        Some("no_tunnel_route") => format!("代理拒绝 {code} (目标不在隧道白名单)"),
+        Some("port_not_allowed") => format!("代理拒绝 {code} (端口不允许)"),
+        Some("tunnel_failed") => "Gate 隧道建连失败 (502 / 端点未通)".to_string(),
+        Some(other) => format!("代理拒绝 {code} ({other})"),
+        None if code == 403 => {
+            "上游拒绝 HTTP 403 (隧道正常，常见于共享出口 IP 被限流)".to_string()
+        }
+        None => format!("上游返回 HTTP {code}"),
+    }
+}
+
 /// 代理外网连通性探测（正向隧道与反向网关状态）
 pub fn probe_connectivity(data_plane: &str) -> (Vec<(&'static str, Result<u128, String>)>, usize) {
     let mut probe_results = Vec::new();
     let targets = [
         ("Google", "https://www.google.com/generate_204"),
-        ("GitHub", "https://api.github.com/zen"),
+        // 不用 api.github.com：它对共享出口 IP 的未认证请求会限流返回 403，
+        // 会周期性把"隧道正常"误报成故障（实测 5 次中 1 次 403）。
+        ("GitHub", "https://github.com/robots.txt"),
     ];
 
     // 1. 优先探测本地代理端口 TCP 是否就绪
@@ -435,12 +456,17 @@ pub fn probe_connectivity(data_plane: &str) -> (Vec<(&'static str, Result<u128, 
             let elapsed = start.elapsed().as_millis();
             match res {
                 Ok(resp) => {
-                    if resp.status().is_success() || resp.status().as_u16() == 204 {
+                    let code = resp.status().as_u16();
+                    if resp.status().is_success() || code == 204 {
                         probe_results.push((name, Ok(elapsed)));
-                    } else if resp.status().as_u16() == 403 {
-                        probe_results.push((name, Err("未配置 Gate 隧道出口 (需部署 gate-worker)".to_string())));
                     } else {
-                        probe_results.push((name, Err(format!("HTTP {}", resp.status().as_u16()))));
+                        // 只有带 x-pproxy-reason 的响应才是**代理层**拒绝；
+                        // 其余状态码来自上游（例如 GitHub 对共享出口 IP 的未认证限流 403）。
+                        let reason = resp
+                            .headers()
+                            .get("x-pproxy-reason")
+                            .and_then(|v| v.to_str().ok());
+                        probe_results.push((name, Err(describe_probe_failure(code, reason))));
                     }
                 }
                 Err(e) => {
@@ -448,7 +474,7 @@ pub fn probe_connectivity(data_plane: &str) -> (Vec<(&'static str, Result<u128, 
                     let err_msg = if err_str.contains("502") || err_str.contains("tunnel_failed") {
                         "Gate 隧道建连失败 (502 / 端点未通)".to_string()
                     } else if err_str.contains("403") {
-                        "未配置 Gate 隧道出口 (403)".to_string()
+                        "代理拒绝 CONNECT (403)".to_string()
                     } else if e.is_timeout() {
                         "Gate 隧道超时 (上游无响应)".to_string()
                     } else {
@@ -1040,5 +1066,22 @@ contexts:
         assert!(!is_loopback_data_plane("https://edge.ponyjob.top"));
         assert!(!is_loopback_data_plane("http://192.168.1.2:8899"));
         assert!(!is_loopback_data_plane("ftp://x"));
+    }
+
+    #[test]
+    fn probe_failure_classification() {
+        // 代理层拒绝：带 x-pproxy-reason
+        assert!(describe_probe_failure(403, Some("tunnel_not_configured")).contains("未配置 Gate 隧道出口"));
+        assert!(describe_probe_failure(403, Some("no_tunnel_route")).contains("目标不在隧道白名单"));
+        assert!(describe_probe_failure(403, Some("port_not_allowed")).contains("端口不允许"));
+        assert!(describe_probe_failure(502, Some("tunnel_failed")).contains("隧道建连失败"));
+        assert!(describe_probe_failure(403, Some("whatever")).contains("whatever"));
+
+        // 上游状态码：不得再误报成隧道故障
+        let upstream_403 = describe_probe_failure(403, None);
+        assert!(upstream_403.contains("上游拒绝"), "got {upstream_403}");
+        assert!(!upstream_403.contains("未配置"), "got {upstream_403}");
+        assert!(describe_probe_failure(500, None).contains("上游返回 HTTP 500"));
+        assert!(describe_probe_failure(429, None).contains("429"));
     }
 }
