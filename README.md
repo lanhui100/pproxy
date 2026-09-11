@@ -1,5 +1,7 @@
 # Pony Proxy (pproxy)
 
+> [English](README.en.md) | 中文
+
 自托管开发者出海代理与智能 API 网关：
 - **第一优先级（正向出海代理）**：基于 HTTP/HTTPS CONNECT 隧道与 WebSocket 待命连接池，提供 CLI 一键环境代理管理（`pproxy on / off / status / env`）、Windows 桌面端白名单代理与移动端/全平台 HTTP 节点接入，毫秒级出海。
 - **第二优先级（API 反向代理网关）**：LLM 优先的多上游智能分发（`/{token}/{route}/*`），按需代理，多节点出口（CF Worker / Vercel AWS IP），自带用量统计与 Token 鉴权。
@@ -93,6 +95,7 @@ curl http://127.0.0.1:8900/api/health -H "Authorization: Bearer <admin_token>"
 > 本仓库为**开源中立形态**：所有私有域名已占位为 `*.example.com`，真实凭据一律不入库
 > （`.secrets.env` / `config.json` / `.pproxy.env` / `*.env.local` / `.vercel/` 均被 `.gitignore` 忽略）。
 > 克隆/自部署前，按下表逐项填写。**未改占位符会导致部署失败；未注凭据会导致边缘 fail-closed（403/401）。**
+> 同款清单镜像见 [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)（运维手册）。
 
 ### 1. 部署前必须改回真实域名的文件
 
