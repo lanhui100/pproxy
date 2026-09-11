@@ -15,13 +15,13 @@ jobs:
   nsis:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: pnpm/action-setup@f40ffcd9367d
         with:
           version: 11.7.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -67,6 +67,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          # 分发基础地址（开源中立默认占位；发版方在仓库 secrets 设 PPROXY_DIST_BASE 指向自己的分发域名）
+          PPROXY_DIST_BASE: ${{ secrets.PPROXY_DIST_BASE }}
         run: |
           mkdir -p dist-assets
           gh release download "${{ github.ref_name }}" --dir dist-assets

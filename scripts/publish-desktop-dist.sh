@@ -21,6 +21,11 @@ set -euo pipefail
 BUNDLE_DIR="${1:?usage: $0 <bundle-dir> <latest.json>}"
 LATEST_JSON="${2:?usage: $0 <bundle-dir> <latest.json>}"
 
+# 分发基础地址（开源中立默认占位；发版方设 PPROXY_DIST_BASE 指向自己的分发域名）
+DIST_BASE="${PPROXY_DIST_BASE:-https://dl.example.com}"
+DIST_HOST="${DIST_BASE#https://}"
+DIST_HOST="${DIST_HOST#http://}"
+
 # 凭据检查：支持 Cloudflare R2 / S3 兼容对象存储，或 Vercel 静态托管
 if [[ -z "${R2_BUCKET:-${S3_BUCKET:-}}" && -z "${VERCEL_TOKEN:-}" ]]; then
   echo "错误：未配置分发凭据。请提供 R2_BUCKET (S3_BUCKET) 或 VERCEL_TOKEN"
@@ -60,7 +65,7 @@ for bin in "$BUNDLE_DIR"/pproxy-*; do
   fi
 done
 
-# 改写 $STAGE/latest.json 内各平台下载地址为 https://dl.example.com/<filename>
+# 改写 $STAGE/latest.json 内各平台下载地址为 ${DIST_BASE}/<filename>
 node -e "
 const fs = require('fs');
 const p = process.argv[1];
@@ -75,7 +80,7 @@ if (d.platforms) {
   }
 }
 fs.writeFileSync(p, JSON.stringify(d, null, 2));
-" "$STAGE/latest.json" "dl.example.com"
+" "$STAGE/latest.json" "$DIST_HOST"
 
 # 生成 vercel.json 缓存策略：latest.json 及时校验；exe、sig 与 pproxy 二进制边缘永久缓存
 cat > "$STAGE/vercel.json" << 'EOF'
@@ -121,7 +126,7 @@ if [[ -n "${R2_BUCKET:-${S3_BUCKET:-}}" ]]; then
     # 2. 上传最新清单 latest.json（即时校验）
     aws s3 cp "$STAGE/latest.json" "s3://$BUCKET/latest.json" $ENDPOINT_FLAG \
       --cache-control "public, max-age=0, must-revalidate"
-    echo "[R2/S3] 发布完成：https://dl.example.com/latest.json（$NAME）"
+    echo "[R2/S3] 发布完成：${DIST_BASE}/latest.json（$NAME）"
     exit 0
   else
     echo "WARN: 未找到 aws cli，回退尝试通过 Vercel 静态分发..."
@@ -149,7 +154,7 @@ if [[ -n "${VERCEL_TOKEN:-}" ]]; then
     npx --yes vercel@latest link --yes --project pony-dsk --token "$VERCEL_TOKEN" >/dev/null
 
   npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
-  echo "发布完成：https://dl.example.com/latest.json（$NAME）"
+  echo "发布完成：${DIST_BASE}/latest.json（$NAME）"
   exit 0
 fi
 

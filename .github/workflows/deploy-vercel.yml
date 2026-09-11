@@ -20,7 +20,7 @@ jobs:
     name: Deploy pproxy-edge-v2
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Detect changes (deploy/vercel)
         id: changes
@@ -43,7 +43,7 @@ jobs:
           rm -rf /tmp/vdeploy && mkdir -p /tmp/vdeploy
           git archive HEAD deploy/vercel | tar -x -C /tmp/vdeploy
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: steps.changes.outputs.changed == 'true'
         with:
           node-version: 22
@@ -61,7 +61,7 @@ jobs:
     name: Deploy vercel-gate-worker
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Detect changes (deploy/vercel-gate-worker)
         id: changes
@@ -84,7 +84,7 @@ jobs:
           rm -rf /tmp/vgdeploy && mkdir -p /tmp/vgdeploy
           git archive HEAD deploy/vercel-gate-worker | tar -x -C /tmp/vgdeploy
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         if: steps.changes.outputs.changed == 'true'
         with:
           node-version: 22
