@@ -3,7 +3,7 @@
 //
 // 用法:
 //   node gate_exitip.mjs [ws-url] [次数]
-//   ws-url 缺省 wss://gate.ponyjob.top/ws
+//   ws-url 缺省 wss://gate.example.com/ws
 // token: 环境变量 PPROXY_TUNNEL_TOKEN，或 ~/.pony/config.toml 的 tunnel_token
 //
 // 依赖 ws：优先从本仓库 scripts/node_modules 解析，其次 deploy/cf-gate-worker/node_modules。
@@ -38,7 +38,7 @@ function loadToken() {
 }
 
 const WebSocket = loadWs()
-const url = process.argv[2] || 'wss://gate.ponyjob.top/ws'
+const url = process.argv[2] || 'wss://gate.example.com/ws'
 const rounds = Number(process.argv[3] || 3)
 const token = loadToken()
 

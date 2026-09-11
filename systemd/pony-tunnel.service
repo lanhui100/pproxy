@@ -7,7 +7,7 @@
 # 凭据经文件路径引用（~/.cloudflared/），本 unit 不含任何 secret（spec §4）。
 
 [Unit]
-Description=pony tunnel - Cloudflare Tunnel for pproxy data plane (access.ponyjob.top)
+Description=pony tunnel - Cloudflare Tunnel for pproxy data plane (access.example.com)
 After=network-online.target
 Wants=network-online.target
 

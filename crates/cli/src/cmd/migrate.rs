@@ -37,9 +37,9 @@ impl Default for VercelMigrateOpts {
             project_edge: "pproxy-edge-v2".to_string(),
             project_gate: "vercel-gate-worker".to_string(),
             project_dsk: "pony-dsk".to_string(),
-            domain_edge: "vedge.ponyjob.top".to_string(),
-            domain_gate: "vgate.ponyjob.top".to_string(),
-            domain_dsk: "dl.ponyjob.top".to_string(),
+            domain_edge: "vedge.example.com".to_string(),
+            domain_gate: "vgate.example.com".to_string(),
+            domain_dsk: "dl.example.com".to_string(),
             skip_deploy: false,
             dry_run: false,
         }

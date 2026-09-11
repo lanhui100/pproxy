@@ -38,7 +38,7 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
     // 1. Server URL
     let server_raw = prompt(
         "管理面服务器地址",
-        "例如: http://192.168.1.100:8900 或 https://api.ponyjob.top:8900",
+        "例如: http://192.168.1.100:8900 或 https://api.example.com:8900",
         "http://127.0.0.1:8900",
     );
     let server = if !server_raw.starts_with("http://") && !server_raw.starts_with("https://") {
@@ -60,7 +60,7 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
     // 3. CF API Token
     println!();
     println!("┌─ Cloudflare API Token ─────────────────────────");
-    println!("│ 用于自动部署 CF Worker（edge.ponyjob.top）。");
+    println!("│ 用于自动部署 CF Worker（edge.example.com）。");
     println!("│ 获取步骤：");
     println!("│   1. 打开 https://dash.cloudflare.com/profile/api-tokens");
     println!("│   2. 点击「Create Token」→「Create Custom Token」");
@@ -85,7 +85,7 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
     // 4. Vercel Token
     println!();
     println!("┌─ Vercel Token ──────────────────────────────────");
-    println!("│ 用于自动部署 Vercel 函数（vedge.ponyjob.top）。");
+    println!("│ 用于自动部署 Vercel 函数（vedge.example.com）。");
     println!("│ 获取步骤：");
     println!("│   1. 打开 https://vercel.com/account/tokens");
     println!("│   2. 点击「Create Token」");
@@ -158,7 +158,7 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
         env_out.push_str(&format!("PPROXY_VERCEL_TOKEN={}\n", vercel_token));
     }
     if !tunnel_token.is_empty() {
-        env_out.push_str("PPROXY_TUNNEL_GATE_URL=wss://gate.ponyjob.top/ws\n");
+        env_out.push_str("PPROXY_TUNNEL_GATE_URL=wss://gate.example.com/ws\n");
         env_out.push_str(&format!("PPROXY_TUNNEL_TOKEN={}\n", tunnel_token));
     }
     for line in env_out.lines() {

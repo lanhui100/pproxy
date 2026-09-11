@@ -27,9 +27,9 @@ pub use pproxy_transport::{WsSink as WsTx, WsStream as WsRx};
 
 use crate::gateway::GatewayState;
 
-/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
-/// 与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
-const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.example.com/ws（见 deploy/cf-gate-worker/wrangler.toml）。
+/// 与 HTTP 数据面网关（edge.example.com，cf-worker）不是同一域名，切勿混用。
+const GATE_WS_URL: &str = "wss://gate.example.com/ws";
 
 /// 网络类失败重试：总尝试 5 次（首次 + 4 重试）；denied 不重试（spec §3.3）。
 const MAX_ATTEMPTS: u32 = 5;
@@ -116,9 +116,9 @@ pub fn derive_gate_url_from_worker(worker_url: &str) -> Option<String> {
         return None;
     }
     let derived = format!("{scheme}://{host_port}/ws");
-    // 产品默认 HTTP 网关（edge.ponyjob.top，cf-worker）不是 WS gate——迁移到正确的 gate 端点
-    // （gate.ponyjob.top/ws，见 deploy/cf-gate-worker/wrangler.toml）。曾用 edge 推导导致隧道拨测超时。
-    if derived.starts_with("wss://edge.ponyjob.top") || derived.starts_with("ws://edge.ponyjob.top") {
+    // 产品默认 HTTP 网关（edge.example.com，cf-worker）不是 WS gate——迁移到正确的 gate 端点
+    // （gate.example.com/ws，见 deploy/cf-gate-worker/wrangler.toml）。曾用 edge 推导导致隧道拨测超时。
+    if derived.starts_with("wss://edge.example.com") || derived.starts_with("ws://edge.example.com") {
         return Some(GATE_WS_URL.to_string());
     }
     Some(derived)
@@ -596,30 +596,30 @@ mod tests {
     #[test]
     fn derive_gate_url_handles_schemes_and_paths() {
         assert_eq!(
-            derive_gate_url_from_worker("https://edge.ponyjob.top"),
-            Some("wss://gate.ponyjob.top/ws".to_string())
+            derive_gate_url_from_worker("https://edge.example.com"),
+            Some("wss://gate.example.com/ws".to_string())
         );
         assert_eq!(
-            derive_gate_url_from_worker("https://edge.ponyjob.top/"),
-            Some("wss://gate.ponyjob.top/ws".to_string())
+            derive_gate_url_from_worker("https://edge.example.com/"),
+            Some("wss://gate.example.com/ws".to_string())
         );
         // 重复 /ws 幂等
         assert_eq!(
-            derive_gate_url_from_worker("https://edge.ponyjob.top/ws"),
-            Some("wss://gate.ponyjob.top/ws".to_string())
+            derive_gate_url_from_worker("https://edge.example.com/ws"),
+            Some("wss://gate.example.com/ws".to_string())
         );
         assert_eq!(
-            derive_gate_url_from_worker("https://edge.ponyjob.top/ws/"),
-            Some("wss://gate.ponyjob.top/ws".to_string())
+            derive_gate_url_from_worker("https://edge.example.com/ws/"),
+            Some("wss://gate.example.com/ws".to_string())
         );
         // 剥离 query 与 fragment
         assert_eq!(
-            derive_gate_url_from_worker("https://edge.ponyjob.top/?env=prod"),
-            Some("wss://gate.ponyjob.top/ws".to_string())
+            derive_gate_url_from_worker("https://edge.example.com/?env=prod"),
+            Some("wss://gate.example.com/ws".to_string())
         );
         assert_eq!(
-            derive_gate_url_from_worker("https://edge.ponyjob.top#tag"),
-            Some("wss://gate.ponyjob.top/ws".to_string())
+            derive_gate_url_from_worker("https://edge.example.com#tag"),
+            Some("wss://gate.example.com/ws".to_string())
         );
         // http 转换为 ws
         assert_eq!(
@@ -690,15 +690,15 @@ mod tests {
         std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
 
         let pool_cfg = pproxy_core::PoolConfig {
-            worker_url: Some("https://edge.ponyjob.top".into()),
+            worker_url: Some("https://edge.example.com".into()),
             worker_secret: Some("sec-secret-123".into()),
             ..Default::default()
         };
 
         let c = TunnelConfig::from_pool_config_and_env(&pool_cfg).unwrap();
-        // edge.ponyjob.top 按 derive_gate_url_from_worker 规则重定向到 WS gate 端点
+        // edge.example.com 按 derive_gate_url_from_worker 规则重定向到 WS gate 端点
         // （HTTP 网关不是 WS gate，见 derive_gate_url_handles_schemes_and_paths）
-        assert_eq!(c.gate_url, "wss://gate.ponyjob.top/ws");
+        assert_eq!(c.gate_url, "wss://gate.example.com/ws");
         assert_eq!(c.token, "sec-secret-123");
         assert!(allowlist_match("oauth2.googleapis.com", &c.allowlist));
         assert!(allowlist_match("api.openai.com", &c.allowlist));
@@ -713,7 +713,7 @@ mod tests {
         assert!(TunnelConfig::from_env().is_none());
 
         let pool_cfg = pproxy_core::PoolConfig {
-            worker_url: Some("https://edge.ponyjob.top".into()),
+            worker_url: Some("https://edge.example.com".into()),
             worker_secret: Some("sec-secret-123".into()),
             ..Default::default()
         };

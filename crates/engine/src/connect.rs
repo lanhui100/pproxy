@@ -22,8 +22,8 @@ pub use pproxy_transport::{WsSink as WsTx, WsStream as WsRx};
 
 use crate::auth::parse_basic_auth;
 
-/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws。
-const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.example.com/ws。
+const GATE_WS_URL: &str = "wss://gate.example.com/ws";
 
 /// 网络类失败重试：总尝试 5 次。
 const MAX_ATTEMPTS: u32 = 5;
@@ -124,8 +124,8 @@ impl TunnelConfig {
                     .trim_start_matches("http://")
                     .trim_end_matches('/');
                 let derived = format!("wss://{clean}/ws");
-                if derived.starts_with("wss://edge.ponyjob.top")
-                    || derived.starts_with("ws://edge.ponyjob.top")
+                if derived.starts_with("wss://edge.example.com")
+                    || derived.starts_with("ws://edge.example.com")
                 {
                     GATE_WS_URL.to_string()
                 } else {

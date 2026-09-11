@@ -75,7 +75,7 @@ success/info 3s、error 6s 自动消失，aria-live polite）、`components/comm
 一屏三步卡（逐步打勾）：
 1. **管理面地址**：帮助文案「形如 `http://100.x.x.x:8900`，需为其他设备可达的 IP（127.0.0.1 仅限本机）」。
 2. **数据面地址（选填）**：留空按 `deriveDataPlane` 自动推导（同主机、端口 8899），展示推导结果预览；
-   走公网入口填 `https://access.ponyjob.top`。帮助注明：管理面无需公网可达。
+   走公网入口填 `https://access.example.com`。帮助注明：管理面无需公网可达。
 3. **admin token**：帮助文案（真实路径，已核实 CLI 无任何打印/生成命令）：
    「在**服务器**上查看：① 部署时注入的环境变量 `PPROXY_ADMIN_TOKEN`；
    ② 或执行 `journalctl -u pproxy | grep ADMIN_TOKEN`（首次启动仅打印一次）；

@@ -15,16 +15,16 @@
 | cloudflared 二进制 | 未安装；`~/.cloudflared/` 不存在 | 从零安装 + 全新凭据链 |
 | 本机 WARP 客户端 | **`warp-svc.service` active（当前 Disconnected）** | 共存红线见 R3：WARP connect 会把 cloudflared 出站长连接卷入 WARP 隧道，运维上两者互斥；m4_test.sh 加非阻断观测项 |
 | sudo | `sudo -n` NOPASSWD 可用 | apt 安装与 unit 安装可脚本化 |
-| access.ponyjob.top | 当前 DNS 无任何记录（实测 dig 为空）；ADR-003 已预留该子域名 | `route dns` 可干净创建；部署前置预检断言 DNS 为空（防 dashboard 占位记录冲突） |
+| access.example.com | 当前 DNS 无任何记录（实测 dig 为空）；ADR-003 已预留该子域名 | `route dns` 可干净创建；部署前置预检断言 DNS 为空（防 dashboard 占位记录冲突） |
 | CF 凭据 | `.secrets.env` 无 CF_API_TOKEN | tunnel 创建需用户授权配合（§3 配合点） |
-| 国内可达性先例 | edge/vedge.ponyjob.top 经 CF 边缘国内正常（ADR-002/003 口径） | tunnel 走同一 CF 边缘网络，可达性风险最低 |
+| 国内可达性先例 | edge/vedge.example.com 经 CF 边缘国内正常（ADR-002/003 口径） | tunnel 走同一 CF 边缘网络，可达性风险最低 |
 | 系统 | Ubuntu 24.04 noble | apt 安装用 signed-by keyring 方式（无 apt-key） |
 
 ## 1. 目标与范围
 
-把生产数据面经 Cloudflare Tunnel 暴露到公网：`https://access.ponyjob.top/{token}/{route}/...`。cloudflared 以 systemd 服务常驻，仅转发数据面 ：8899；TLS 由 CF 边缘终结；服务器不开任何入站端口。
+把生产数据面经 Cloudflare Tunnel 暴露到公网：`https://access.example.com/{token}/{route}/...`。cloudflared 以 systemd 服务常驻，仅转发数据面 ：8899；TLS 由 CF 边缘终结；服务器不开任何入站端口。
 
-验收场景（ROADMAP 原文）：手机 4G 网络下 SDK 经 access.ponyjob.top 调用 zen 成功。
+验收场景（ROADMAP 原文）：手机 4G 网络下 SDK 经 access.example.com 调用 zen 成功。
 
 不在范围内：
 - **管理面公网化**——维持 loopback-only，P2 再评估；
@@ -36,7 +36,7 @@
 
 ```
 [手机 4G SDK]
-   │ https://access.ponyjob.top/{token}/{route}/...
+   │ https://access.example.com/{token}/{route}/...
    ▼
 Cloudflare 边缘（TLS 终结，免费层基础防护）
    │ CF Tunnel 出站长连接——协议钉死 http2（TCP），不用默认 QUIC/UDP：
@@ -60,8 +60,8 @@ pproxy-server 数据面（行为与局域网完全一致）
 | cloudflared 安装 | `/usr/bin/cloudflared` | pkg.cloudflare.com apt 源（signed-by keyring 方式，noble 兼容；需 sudo） |
 | origin 证书 | `~/.cloudflared/cert.pem` | `cloudflared tunnel login` 浏览器授权一次（属主 dm，0600） |
 | tunnel 凭据 | `~/.cloudflared/tunnel-pony-access.json` | `cloudflared tunnel create pony-access` 生成（0600，**永不入库**） |
-| ingress 配置 | `~/.cloudflared/config.yml` ← 模板 `deploy/cloudflared/config.yml` | 唯一规则 access.ponyjob.top → `http://127.0.0.1:8899`；`protocol: http2`；`metrics: 127.0.0.1:19099`（避开业务端口与 m1-m3 测试段） |
-| DNS 路由 | CNAME `<tunnel-id>.cfargotunnel.com` | `tunnel route dns pony-access access.ponyjob.top`；**前置预检**：dig 该域名须为空 |
+| ingress 配置 | `~/.cloudflared/config.yml` ← 模板 `deploy/cloudflared/config.yml` | 唯一规则 access.example.com → `http://127.0.0.1:8899`；`protocol: http2`；`metrics: 127.0.0.1:19099`（避开业务端口与 m1-m3 测试段） |
+| DNS 路由 | CNAME `<tunnel-id>.cfargotunnel.com` | `tunnel route dns pony-access access.example.com`；**前置预检**：dig 该域名须为空 |
 | systemd unit | `systemd/pony-tunnel.service` ← `/etc/systemd/system/` | 规格：User=pproxy、After/Wants=network-online.target、Restart=always、RestartSec=5、NoNewPrivileges=true、ProtectSystem=full、ProtectHome=read-only、PrivateTmp=true |
 
 **执行身份纪律（R2）**：sudo 仅限 apt 安装与 unit 拷贝两步；login/create/route dns 渲染一律 **dm 身份**执行——sudo 执行会把 `~/.cloudflared` 全部生成 root 属主，unit(User=pproxy) 读 0600 root 凭据启动即崩且表象是无限重启循环而非权限报错。部署后 `stat` 断言属主 dm 权限 600。
@@ -82,9 +82,9 @@ pproxy-server 数据面（行为与局域网完全一致）
 ## 5. 部署步骤规格（实现清单，按依赖顺序）
 
 1. **安装 cloudflared**（sudo）：添加 pkg.cloudflare.com keyring + apt 源 → `apt install cloudflared`。
-2. **预检**：`dig +short access.ponyjob.top` 必须为空（防占位记录使 route dns 失败）；`warp-cli status` 观测记录（须 Disconnected）。
+2. **预检**：`dig +short access.example.com` 必须为空（防占位记录使 route dns 失败）；`warp-cli status` 观测记录（须 Disconnected）。
 3. **授权 + 建隧道（dm 身份）**：login（§3 配合点二选一）→ `tunnel create pony-access` → 记录 tunnel-id。
-4. **落配置（dm 身份）**：渲染 `~/.cloudflared/config.yml`（替换 tunnel-id）→ `tunnel route dns pony-access access.ponyjob.top` → `stat` 断言凭据链 dm/600。
+4. **落配置（dm 身份）**：渲染 `~/.cloudflared/config.yml`（替换 tunnel-id）→ `tunnel route dns pony-access access.example.com` → `stat` 断言凭据链 dm/600。
 5. **systemd 化（sudo 仅此步）**：安装 `pony-tunnel.service` → daemon-reload → enable --now → is-active 断言 + `systemctl show -p User` 断言 dm。
 6. **`scripts/m4_test.sh`** 全绿。
 7. **门禁**：m1/m2/m3 回归 + workspace 测试确认不受影响（零代码改动）。

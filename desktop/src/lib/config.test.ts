@@ -27,10 +27,10 @@ afterEach(() => {
 
 describe('isValidTunnelUrl', () => {
   it.each([
-    ['wss://gate.ponyjob.top/ws', true],
+    ['wss://gate.example.com/ws', true],
     ['ws://127.0.0.1:9000/ws', true],
     ['wss://a.example.com/ws,wss://b.example.com/api/ws', true], // 多端点（逗号分隔）合法
-    ['https://gate.ponyjob.top/ws', false], // 仅接受 ws/wss
+    ['https://gate.example.com/ws', false], // 仅接受 ws/wss
     ['wss://has space/ws', false], // 禁空白
     ['', false],
     [`wss://${'a'.repeat(200)}`, false], // 超长拒绝（>200）
@@ -79,9 +79,9 @@ describe('parseGateInput', () => {
 
   it('解析合法连接口令并判定官方域名', async () => {
     const mod = await loadConfig()
-    const r = mod.parseGateInput(makeCode('wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws', 'tok'))
+    const r = mod.parseGateInput(makeCode('wss://gate.example.com/ws,wss://vgate.example.com/api/ws', 'tok'))
     expect(r?.kind).toBe('code')
-    expect(r?.url).toBe('wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws')
+    expect(r?.url).toBe('wss://gate.example.com/ws,wss://vgate.example.com/api/ws')
     expect(r?.official).toBe(true)
   })
 
@@ -92,9 +92,9 @@ describe('parseGateInput', () => {
     expect(r?.official).toBe(false)
   })
 
-  it('仿冒域名（含 ponyjob.top 子串）不得误判为官方', async () => {
+  it('仿冒域名（含 example.com 子串）不得误判为官方', async () => {
     const mod = await loadConfig()
-    for (const u of ['wss://evil-ponyjob.top.attacker.com/ws', 'wss://ponyjob.top.evil.com/ws']) {
+    for (const u of ['wss://evil-example.com.attacker.com/ws', 'wss://example.com.evil.com/ws']) {
       const r = mod.parseGateInput(makeCode(u, 'tok'))
       expect(r?.kind).toBe('code')
       expect(r?.official).toBe(false)
@@ -119,13 +119,13 @@ describe('mapTunnelConfig', () => {
   it('映射正常凭据与指纹', async () => {
     const mod = await loadConfig()
     const c = mod.mapTunnelConfig({
-      url: 'wss://gate.ponyjob.top/ws',
+      url: 'wss://gate.example.com/ws',
       has_token: true,
       cred_error: null,
       fingerprint: 'deadbeef',
     })
     expect(c).toEqual({
-      url: 'wss://gate.ponyjob.top/ws',
+      url: 'wss://gate.example.com/ws',
       hasToken: true,
       credError: null,
       fingerprint: 'deadbeef',

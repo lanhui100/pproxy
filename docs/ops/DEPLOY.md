@@ -5,9 +5,9 @@
 | 组件 | 部署方式 | 位置 |
 |------|---------|------|
 | pony-server (pproxy-server) | systemd `pproxy.service` | dev 服务器 `/home/USER/pproxy/target/release/` |
-| CF Worker | `wrangler deploy` | Cloudflare（edge.ponyjob.top） |
-| Vercel 函数 | Vercel API（v13 deployments） | Vercel（vedge.ponyjob.top） |
-| 桌面分发（updater 主端点） | `scripts/publish-desktop-dist.sh` | Vercel 静态（dl.ponyjob.top，项目 pony-dsk） |
+| CF Worker | `wrangler deploy` | Cloudflare（edge.example.com） |
+| Vercel 函数 | Vercel API（v13 deployments） | Vercel（vedge.example.com） |
+| 桌面分发（updater 主端点） | `scripts/publish-desktop-dist.sh` | Vercel 静态（dl.example.com，项目 pony-dsk） |
 | 凭据 | `.secrets.env`（600） | 本地，不部署 |
 
 ## 日常操作
@@ -27,19 +27,19 @@ curl -s http://127.0.0.1:8899/ | head -c 100   # 健康检查
 cd desktop && pnpm tauri build
 # 2) GitHub Release 归档源（tag desktop-vX.Y.Z；gh 已认证）：
 #    上传产物 *_x64-setup.exe / .sig / latest.json
-#    latest.json 的 platforms.*.url 指向 https://dl.ponyjob.top/<点号文件名>
+#    latest.json 的 platforms.*.url 指向 https://dl.example.com/<点号文件名>
 # 3) Vercel 静态分发（updater 主端点，与 dev 在线状态无关）：
 VERCEL_TOKEN=$(ssh dev 'grep "^PPROXY_VERCEL_TOKEN=" ~/pproxy/.pproxy.env' | cut -d= -f2) \
   scripts/publish-desktop-dist.sh \
   desktop/src-tauri/target/release/bundle/nsis latest.json
-# 4) 过渡期回退端点（客户端 <0.3.18 只认 access.ponyjob.top/dsk/）：
+# 4) 过渡期回退端点（客户端 <0.3.18 只认 access.example.com/dsk/）：
 ssh dev 'cd ~/pproxy && scripts/sync-desktop-release.sh desktop-vX.Y.Z'
-# 5) 验证：curl -s https://dl.ponyjob.top/latest.json | grep version
+# 5) 验证：curl -s https://dl.example.com/latest.json | grep version
 ```
 
 > **分发拓扑（2026-08-30 起，2026-09 存储治理与防爆升级）**：
 > 1. **主分发**：支持 **Cloudflare R2 / S3 对象存储**（零出网费，永久保留历史版本且无空间爆炸上限）与 **Vercel 静态托管**（双轨自适应）。走 Vercel 时发布脚本自动聚合最近 3 个历史版本，彻底解决“快照覆盖导致老版本 404”；
-> 2. **备端点**：`access.ponyjob.top/dsk/`（dev 主机数据面），`sync-desktop-release.sh` 内置轮转淘汰策略（默认只保留最近 3 个版本安装包与签名，旧版本自动淘汰，杜绝磁盘撑爆 `No space left on device`）；
+> 2. **备端点**：`access.example.com/dsk/`（dev 主机数据面），`sync-desktop-release.sh` 内置轮转淘汰策略（默认只保留最近 3 个版本安装包与签名，旧版本自动淘汰，杜绝磁盘撑爆 `No space left on device`）；
 > 3. **对象存储直传配置**：设置 `R2_BUCKET`（或 `S3_BUCKET`）及 `R2_ENDPOINT`，发布脚本优先直传桶内；未配置时无缝回退 Vercel。
 > DNS：dl → cname.vercel.com（或 R2 custom domain）；命名约定：分发文件名统一点号
 > （Pony.Proxy_X.Y.Z_x64-setup.exe），tauri 产物空格由发布脚本归一。
@@ -50,16 +50,16 @@ source /home/USER/pproxy/.secrets.env   # 如脚本需要
 cd /home/USER/pproxy/deploy/cf-worker
 wrangler deploy
 ```
-注意：wrangler.toml 含 routes 配置（edge.ponyjob.top custom_domain）。
+注意：wrangler.toml 含 routes 配置（edge.example.com custom_domain）。
 
 ### 更新 Vercel 函数
 ```bash
 # 经 API 部署（api.vercel.com 大陆直连可达），见 deploy/vercel/
 # 部署后注意: 项目 ssoProtection=all_except_custom_domains
-#   vercel.app 域名有登录墙，必须走 vedge.ponyjob.top（自定义域名无墙）
+#   vercel.app 域名有登录墙，必须走 vedge.example.com（自定义域名无墙）
 ```
 
-> **2026-08 审计整改**：生产已迁移至项目 `pproxy-edge-v2`（vedge.ponyjob.top 已重绑至新项目，
+> **2026-08 审计整改**：生产已迁移至项目 `pproxy-edge-v2`（vedge.example.com 已重绑至新项目，
 > `deploy/vercel/.vercel/` 已 link 过去）。原因：旧项目 `pproxy-edge` 被平台滥用检测标记，
 > API token 部署一律 BLOCKED（hello-world 对照实验可正常部署，确认为项目级拦截而非账号级）。
 > 旧项目暂保留作回滚，确认稳定后可在 dashboard 删除。再遇 BLOCKED 时：先用无关内容对照
@@ -91,8 +91,8 @@ sudo systemctl restart pproxy
 | 服务状态 | `systemctl is-active pproxy` | active |
 | 网关健康 | `curl -s http://127.0.0.1:8899/` | JSON 路由表 |
 | 池状态 | `curl -s http://127.0.0.1:8900/stats` | JSON |
-| Worker 可达 | `curl -o /dev/null -w '%{http_code}' https://edge.ponyjob.top/` | 403（未带密钥） |
-| Vercel 可达 | `curl -o /dev/null -w '%{http_code}' https://vedge.ponyjob.top/api/proxy` | 400/403 |
+| Worker 可达 | `curl -o /dev/null -w '%{http_code}' https://edge.example.com/` | 403（未带密钥） |
+| Vercel 可达 | `curl -o /dev/null -w '%{http_code}' https://vedge.example.com/api/proxy` | 400/403 |
 | 全路由体检 | （M2: pony doctor） | — |
 
 日志：`journalctl -u pproxy -f`
@@ -108,20 +108,20 @@ sudo systemctl restart pproxy
 | 凭据 | `~/.cloudflared/`（cert.pem + tunnel UUID.json + config.yml，均 dm/600，不入库） |
 | 配置模板 | `deploy/cloudflared/config.yml`（占位符 `<TUNNEL_ID>`） |
 | systemd | `systemd/pony-tunnel.service` → `/etc/systemd/system/`，User=pproxy |
-| 公网入口 | `https://access.ponyjob.top/{token}/{route}/...` |
+| 公网入口 | `https://access.example.com/{token}/{route}/...` |
 | metrics | `127.0.0.1:19099/metrics`（只读观测） |
 
 ### 更新 / 重启
 ```bash
 sudo systemctl restart pony-tunnel && sleep 5
-curl -s -o /dev/null -w '%{http_code}\n' https://access.ponyjob.top/openai/models   # 期望 401
+curl -s -o /dev/null -w '%{http_code}\n' https://access.example.com/openai/models   # 期望 401
 ```
 
 ### 回滚 / 卸载（公网入口关闭程序）
 ```bash
 sudo systemctl disable --now pony-tunnel
 sudo rm /etc/systemd/system/pony-tunnel.service && sudo systemctl daemon-reload
-cd ~/pproxy && cloudflared tunnel route ip delete access.ponyjob.top   # 或 dashboard 删 CNAME
+cd ~/pproxy && cloudflared tunnel route ip delete access.example.com   # 或 dashboard 删 CNAME
 cloudflared tunnel delete pony-access                                   # 需先确认隧道已停
 # 局域网路径不受影响：http://127.0.0.1:8899 照常服务
 ```
@@ -149,7 +149,7 @@ cloudflared tunnel delete pony-access                                   # 需先
 git tag desktop-v0.3.x && git push origin desktop-v0.3.x
 ```
 
-- 更新源 = `access.ponyjob.top/dsk/latest.json`，由本机 `pony-dsk-sync.timer`
+- 更新源 = `access.example.com/dsk/latest.json`，由本机 `pony-dsk-sync.timer`
   （每 15 分钟）检测新 tag 并自动执行 `scripts/sync-desktop-release.sh` 同步到
   `/home/USER/pony-desktop-releases`（服务端 `/dsk/:filename` 按请求实时读盘，无需重启）
 - **2026-08-26 事故复盘**：0.3.7/0.3.8 发布后漏跑同步脚本，线上滞留 0.3.6，
@@ -157,4 +157,4 @@ git tag desktop-v0.3.x && git push origin desktop-v0.3.x
   手动补同步仍可用 `scripts/sync-desktop-release.sh <tag>`
 - 排查口令：`journalctl -u pony-dsk-sync.service -n 20`、
   `cat /home/USER/pony-desktop-releases/.synced-tag`（应等于最新 tag）、
-  `curl -s https://access.ponyjob.top/dsk/latest.json | grep version`
+  `curl -s https://access.example.com/dsk/latest.json | grep version`

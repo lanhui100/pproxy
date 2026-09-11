@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# publish-desktop-dist.sh — 将桌面端构建产物发布到 Vercel 静态分发（dl.ponyjob.top）。
+# publish-desktop-dist.sh — 将桌面端构建产物发布到 Vercel 静态分发（dl.example.com）。
 #
 # WHY：桌面端 updater 需要匿名、国内可达的静态分发源。私仓 GitHub 直链 404 且
 # objects.githubusercontent.com 大陆不可达；旧方案（dev 主机 pproxy-server /dsk/，
-# access.ponyjob.top）依赖 dev 在线，2026-08-30 曾因服务被停导致更新源 502 达 23h。
+# access.example.com）依赖 dev 在线，2026-08-30 曾因服务被停导致更新源 502 达 23h。
 # 本脚本将分发迁到 Vercel（团队/项目经 VERCEL_SCOPE 或 .vercel link 指定），GitHub Release 仍作归档源。
 #
 # 用法：
@@ -14,7 +14,7 @@
 #                    分发名统一点号（Pony.Proxy_X.Y.Z_…），脚本自动按两种名字定位。
 #   token 来源：GitHub Secrets `VERCEL_TOKEN` 或 dev 主机 ~/pproxy/.pproxy.env 的 PPROXY_VERCEL_TOKEN
 #
-# 流程：按 latest.json 定位 exe+sig → 暂存（点号命名）→ 改写 latest.json 为 dl.ponyjob.top →
+# 流程：按 latest.json 定位 exe+sig → 暂存（点号命名）→ 改写 latest.json 为 dl.example.com →
 # 生成 vercel.json 缓存策略 → vercel link → vercel deploy --prod（纯静态，无函数）。
 set -euo pipefail
 
@@ -60,7 +60,7 @@ for bin in "$BUNDLE_DIR"/pproxy-*; do
   fi
 done
 
-# 改写 $STAGE/latest.json 内各平台下载地址为 https://dl.ponyjob.top/<filename>
+# 改写 $STAGE/latest.json 内各平台下载地址为 https://dl.example.com/<filename>
 node -e "
 const fs = require('fs');
 const p = process.argv[1];
@@ -75,7 +75,7 @@ if (d.platforms) {
   }
 }
 fs.writeFileSync(p, JSON.stringify(d, null, 2));
-" "$STAGE/latest.json" "dl.ponyjob.top"
+" "$STAGE/latest.json" "dl.example.com"
 
 # 生成 vercel.json 缓存策略：latest.json 及时校验；exe、sig 与 pproxy 二进制边缘永久缓存
 cat > "$STAGE/vercel.json" << 'EOF'
@@ -121,7 +121,7 @@ if [[ -n "${R2_BUCKET:-${S3_BUCKET:-}}" ]]; then
     # 2. 上传最新清单 latest.json（即时校验）
     aws s3 cp "$STAGE/latest.json" "s3://$BUCKET/latest.json" $ENDPOINT_FLAG \
       --cache-control "public, max-age=0, must-revalidate"
-    echo "[R2/S3] 发布完成：https://dl.ponyjob.top/latest.json（$NAME）"
+    echo "[R2/S3] 发布完成：https://dl.example.com/latest.json（$NAME）"
     exit 0
   else
     echo "WARN: 未找到 aws cli，回退尝试通过 Vercel 静态分发..."
@@ -149,7 +149,7 @@ if [[ -n "${VERCEL_TOKEN:-}" ]]; then
     npx --yes vercel@latest link --yes --project pony-dsk --token "$VERCEL_TOKEN" >/dev/null
 
   npx --yes vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
-  echo "发布完成：https://dl.ponyjob.top/latest.json（$NAME）"
+  echo "发布完成：https://dl.example.com/latest.json（$NAME）"
   exit 0
 fi
 

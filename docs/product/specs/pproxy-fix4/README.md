@@ -19,7 +19,7 @@
 
 ### 2.1 问题1：无法连接后端
 
-- **PAC 错误路由**：`sysproxy::enable(Pac)` 将 `AutoConfigURL` 设为 `http://127.0.0.1:18900/pac`。PAC 的 `FindProxyForURL` 对所有 host 执行后缀匹配：`h === e || h.endsWith('.'+e)`。管理面地址若恰为 `access.ponyjob.top` / 局域网 IP，理论应 `DIRECT`，但：
+- **PAC 错误路由**：`sysproxy::enable(Pac)` 将 `AutoConfigURL` 设为 `http://127.0.0.1:18900/pac`。PAC 的 `FindProxyForURL` 对所有 host 执行后缀匹配：`h === e || h.endsWith('.'+e)`。管理面地址若恰为 `access.example.com` / 局域网 IP，理论应 `DIRECT`，但：
   - 引擎未启动时 PAC 端口已指向死端口，PAC fetch 失败时 Windows 会按 `DIRECT` 回退还是按最后已知 PAC 行为不确定，可能短暂阻断。
   - `tauri-plugin-http` 的 `fetch` 是否尊重系统 PAC 未显式禁用——实测在 Windows 上 `reqwest` 默认会读系统代理，管理请求可能被送往 `127.0.0.1:18900`（尚未就绪/已关闭）导致 `network` 错误。
   - 应用关闭路径未还原系统代理：窗口 X 直接 `app.exit` 或进程强杀绕过了 `proxy_disable`，`cleanup_stale` 仅在下次启动时清除，中间窗口期内所有外联走死 PAC。
@@ -71,7 +71,7 @@
   - 拦截 `RunEvent::ExitRequested` / `RunEvent::WindowEvent(CloseRequested)` 写入还原逻辑。
   - 进程强杀兜底：保留 `cleanup_stale`，并将 PAC URL 改为带版本指纹 `http://127.0.0.1:18900/pac?v=1` 便于识别。
   - 管理请求绕过代理：
-    - 方案 A（优选）：PAC 首行注入旁路——若 `host` 为管理面 host（从 `tunnel.json`/`localStorage` 推导 + 常见 `127.0.0.1/localhost/192.168.* /10.* /access.ponyjob.top`），直接 `return 'DIRECT'`。
+    - 方案 A（优选）：PAC 首行注入旁路——若 `host` 为管理面 host（从 `tunnel.json`/`localStorage` 推导 + 常见 `127.0.0.1/localhost/192.168.* /10.* /access.example.com`），直接 `return 'DIRECT'`。
     - 方案 B：`tauri-plugin-http` 侧对 `baseUrl` 域名禁用代理（若 plugin 支持 `proxy` 配置则设 `noProxy`；否则新增 Rust 命令 `api_proxy_bypass_fetch` 使用 `reqwest::Client::builder().no_proxy()`）。双保险：PAC + client。
 - **引擎启动竞态消除**：已存在 2s 探测 + PAC 设置，保持；新增若 `TcpStream::connect` 超时则延迟 500ms 重试一次。
 

@@ -218,7 +218,7 @@ grep -h "errorreport.go\|run_command_handler.go" *.log \
 
 ```bash
 pproxy status                                   # 正向出海连通性
-curl -s https://gate.ponyjob.top/debug/egress \
+curl -s https://gate.example.com/debug/egress \
   -H "Authorization: Bearer $TUNNEL_TOKEN"      # CF gate 自身出站 IP/国家/是否合规
 python3 scripts/antigravity/diag/pproxy_egress_sampler.py 60   # 实时看流量落在哪条出口
 ```

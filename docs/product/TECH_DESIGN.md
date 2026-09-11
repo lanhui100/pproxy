@@ -13,8 +13,8 @@
 pony-server (Rust + axum, dev 服务器, systemd 常驻) ← 唯一状态源
   ├─ 数据面 :8899  /{token}/{route}/...  → 上游分发（token 鉴权）
   ├─ 管理面 :8900  /api/*（tokens/routes/usage/health/alerts）
-  ├─ 上游: CF Worker (edge.ponyjob.top) + Vercel (vedge.ponyjob.top)
-  ├─ CF Tunnel → access.ponyjob.top（公网入口，手机/外网）
+  ├─ 上游: CF Worker (edge.example.com) + Vercel (vedge.example.com)
+  ├─ CF Tunnel → access.example.com（公网入口，手机/外网）
   └─ 监控: 请求计数 → SQLite(30天)；限额轮询(1h) → 80% 告警
 ```
 
@@ -88,10 +88,10 @@ pony config export <service> [--token <name>]   # 输出 env 片段
 打包：NSIS 安装包 + tauri-plugin-updater（P1 自动更新）。
 
 ### 2.4 公网入口（P1，M4）
-- cloudflared tunnel（systemd），`access.ponyjob.top` → `http://127.0.0.1:8899`
-- 手机/外网 SDK base_url：`https://access.ponyjob.top/{token}/{route}/...`
-- TLS 由 CF 边缘提供；路径 token 鉴权；国内可达性已由 edge.ponyjob.top 验证
-- 桌面自更新分发（M6）：网关挂公开路由 `/dsk/:filename`（豁免鉴权，边界=产物非机密+minisign 验签防篡改），updater 端点 `https://access.ponyjob.top/dsk/latest.json`
+- cloudflared tunnel（systemd），`access.example.com` → `http://127.0.0.1:8899`
+- 手机/外网 SDK base_url：`https://access.example.com/{token}/{route}/...`
+- TLS 由 CF 边缘提供；路径 token 鉴权；国内可达性已由 edge.example.com 验证
+- 桌面自更新分发（M6）：网关挂公开路由 `/dsk/:filename`（豁免鉴权，边界=产物非机密+minisign 验签防篡改），updater 端点 `https://access.example.com/dsk/latest.json`
 
 ### 2.5 白名单代理引擎与隧道通道（M6）
 
@@ -100,7 +100,7 @@ pony config export <service> [--token <name>]   # 输出 env 片段
 ```
 [Windows] pony-desktop（引擎嵌进程）
    ├─ 引擎 127.0.0.1:18900：CONNECT/absolute-form → host 后缀匹配白名单
-   ├─ 命中 → wss://gate.ponyjob.top/ws（Bearer tunnel_token）→ TLS 密文透传
+   ├─ 命中 → wss://gate.example.com/ws（Bearer tunnel_token）→ TLS 密文透传
    ├─ 未命中 → 本机直连（绝不静默回落）
    ├─ PAC /pac：命中单条 PROXY 127.0.0.1:18900，无 DIRECT 兜底
    ▼

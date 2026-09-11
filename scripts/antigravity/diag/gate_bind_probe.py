@@ -9,7 +9,7 @@
 
 用法:
     python3 gate_bind_probe.py [ws-url] [host ...]
-默认: wss://gate.ponyjob.top/ws  与 §手册里的典型 host
+默认: wss://gate.example.com/ws  与 §手册里的典型 host
 token: 环境变量 PPROXY_TUNNEL_TOKEN，或 ~/.pony/config.toml 的 tunnel_token
 依赖: pip install websockets
 """
@@ -26,7 +26,7 @@ try:
 except ImportError:
     raise SystemExit("需要 websockets：pip install websockets")
 
-DEFAULT_URL = "wss://gate.ponyjob.top/ws"
+DEFAULT_URL = "wss://gate.example.com/ws"
 DEFAULT_HOSTS = [
     "github.com",                     # 非 Google：不受门禁
     "oauth2.googleapis.com",          # 泛 Google：只受 colo 门禁

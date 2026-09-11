@@ -502,12 +502,12 @@ pub mod tests {
     #[test]
     fn test_parse_domain_verification() {
         let domain_resp = r#"{
-            "name": "vedge.ponyjob.top",
+            "name": "vedge.example.com",
             "verified": false,
             "verification": [
                 {
                     "type": "TXT",
-                    "domain": "_vercel.vedge.ponyjob.top",
+                    "domain": "_vercel.vedge.example.com",
                     "value": "vc-domain-verify=abcdef"
                 }
             ]
@@ -522,7 +522,7 @@ pub mod tests {
         assert!(!d.verified);
         assert_eq!(d.verification.len(), 1);
         assert_eq!(d.verification[0].record_type, "TXT");
-        assert_eq!(d.verification[0].domain, "_vercel.vedge.ponyjob.top");
+        assert_eq!(d.verification[0].domain, "_vercel.vedge.example.com");
         assert_eq!(d.verification[0].value, "vc-domain-verify=abcdef");
     }
 

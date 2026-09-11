@@ -69,7 +69,7 @@ cfg = {
     "listen_port": 18998,
     "static_upstreams": [],
     "countries": [],
-    "worker_url": "https://edge.ponyjob.top",
+    "worker_url": "https://edge.example.com",
     "worker_secret": "test-secret",
     "upstreams": {
         "vercel": {"url": "https://vercel.example/api/proxy", "secret": "s"},

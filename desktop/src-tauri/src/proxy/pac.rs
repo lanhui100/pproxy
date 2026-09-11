@@ -43,7 +43,7 @@ pub fn collect_bypass_hosts() -> BTreeSet<String> {
     }
     // 2. updater.endpoints (tauri.conf.json 静态值)
     // Keep in sync with desktop/src-tauri/tauri.conf.json plugins.updater.endpoints
-    for ep in ["https://access.ponyjob.top/dsk/latest.json"] {
+    for ep in ["https://access.example.com/dsk/latest.json"] {
         if let Ok(p) = url::Url::parse(ep) {
             if let Some(h) = p.host_str() {
                 set.insert(h.to_ascii_lowercase());
@@ -53,7 +53,7 @@ pub fn collect_bypass_hosts() -> BTreeSet<String> {
     }
     // 3. fallback if empty
     if set.is_empty() {
-        set.insert("access.ponyjob.top".to_string());
+        set.insert("access.example.com".to_string());
     }
     set
 }
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn pac_bypass_priority_before_whitelist() {
-        let pac = generate_pac_with_bypass(&["access.ponyjob.top".to_string()], &["access.ponyjob.top".to_string()], ProxyMode::Whitelist);
+        let pac = generate_pac_with_bypass(&["access.example.com".to_string()], &["access.example.com".to_string()], ProxyMode::Whitelist);
         let bypass_pos = pac.find("var bypass").expect("bypass var");
         let entries_pos = pac.find("var entries").expect("entries var");
         assert!(bypass_pos < entries_pos, "bypass must be before whitelist");
@@ -237,6 +237,6 @@ mod tests {
     #[test]
     fn collect_bypass_contains_updater_host() {
         let set = collect_bypass_hosts();
-        assert!(set.contains("access.ponyjob.top"), "updater host should be in bypass");
+        assert!(set.contains("access.example.com"), "updater host should be in bypass");
     }
 }

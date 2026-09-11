@@ -537,7 +537,7 @@ mod tests {
         for h in ["127.0.0.1", "localhost", "::1", "[::1]"] {
             assert!(is_loopback_host(h), "{h} 应判为回环");
         }
-        for h in ["192.0.2.1", "example.com", "gate.ponyjob.top"] {
+        for h in ["192.0.2.1", "example.com", "gate.example.com"] {
             assert!(!is_loopback_host(h), "{h} 不应判为回环");
         }
     }
@@ -605,8 +605,8 @@ mod tests {
 
     #[test]
     fn test_normalize_host_port() {
-        assert_eq!(normalize_host_port("https://gate.ponyjob.top"), Some("gate.ponyjob.top:443".to_string()));
-        assert_eq!(normalize_host_port("https://gate.ponyjob.top:8443"), Some("gate.ponyjob.top:8443".to_string()));
+        assert_eq!(normalize_host_port("https://gate.example.com"), Some("gate.example.com:443".to_string()));
+        assert_eq!(normalize_host_port("https://gate.example.com:8443"), Some("gate.example.com:8443".to_string()));
         assert_eq!(normalize_host_port("http://127.0.0.1"), Some("127.0.0.1:8899".to_string()));
         assert_eq!(normalize_host_port("http://127.0.0.1:9000"), Some("127.0.0.1:9000".to_string()));
         assert_eq!(normalize_host_port("192.168.1.100"), Some("192.168.1.100:8899".to_string()));

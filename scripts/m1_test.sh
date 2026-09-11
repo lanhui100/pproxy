@@ -63,7 +63,7 @@ cfg = {
     "listen_port": 18999,
     "static_upstreams": [],
     "countries": [],
-    "worker_url": "https://edge.ponyjob.top",
+    "worker_url": "https://edge.example.com",
     "worker_secret": "test-secret",
     "routes": {
         "anthropic": "api.anthropic.com",

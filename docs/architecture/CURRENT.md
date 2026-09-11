@@ -19,10 +19,10 @@
              ┌─────────────────────────────────┐   ┌───────────────────────────────────┐
              │ TunnelPool 待命 WS 隧道 (1 RTT)  │   │ EdgeClient 协议转发 (?url=...)    │
              └────────────────┬────────────────┘   └─────────┬─────────────────────────┘
-                              │                              ├─ CF Worker (edge.ponyjob.top)
+                              │                              ├─ CF Worker (edge.example.com)
                               ▼                              │   (anthropic/google/github/x)
-             ┌─────────────────────────────────┐             └─ Vercel 函数 (vedge.ponyjob.top)
-             │ CF gate-worker (gate.ponyjob.top)│                 (openai/opencode, AWS IP)
+             ┌─────────────────────────────────┐             └─ Vercel 函数 (vedge.example.com)
+             │ CF gate-worker (gate.example.com)│                 (openai/opencode, AWS IP)
              │ ├─ Token 验签 + 443 ACL 门禁    │
              │ └─ cloudflare:sockets WS↔TCP透传│
              └────────────────┬────────────────┘

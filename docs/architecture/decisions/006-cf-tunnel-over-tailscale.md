@@ -10,7 +10,7 @@ M4 需要把数据面暴露到公网（手机 4G 下 SDK 可用）。候选方�
 
 ## 决策
 
-数据面公网入口采用 **CF Tunnel**：`access.ponyjob.top`（ADR-003 预留的中性命名）→ cloudflared → `http://127.0.0.1:8899`，systemd 单元 `pony-tunnel.service` 托管，协议钉死 http2（规避大陆 UDP 劣化），ingress 仅此一条规则。
+数据面公网入口采用 **CF Tunnel**：`access.example.com`（ADR-003 预留的中性命名）→ cloudflared → `http://127.0.0.1:8899`，systemd 单元 `pony-tunnel.service` 托管，协议钉死 http2（规避大陆 UDP 劣化），ingress 仅此一条规则。
 
 **否决 Tailscale 作为公网入口替代**，理由：
 

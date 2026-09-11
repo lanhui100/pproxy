@@ -361,26 +361,26 @@ pub(crate) mod tests {
     #[test]
     fn endpoint_order_prefers_vercel_for_google_and_ai() {
         let urls = vec![
-            "wss://gate.ponyjob.top/ws",
-            "wss://vgate.ponyjob.top/api/ws",
+            "wss://gate.example.com/ws",
+            "wss://vgate.example.com/api/ws",
         ];
         let ordered = order_endpoints(urls.clone(), "oauth2.googleapis.com");
-        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws", "Google 应 Vercel 优先");
-        assert_eq!(ordered[1], "wss://gate.ponyjob.top/ws");
+        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws", "Google 应 Vercel 优先");
+        assert_eq!(ordered[1], "wss://gate.example.com/ws");
 
         let ordered = order_endpoints(urls.clone(), "google.com.hk");
-        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws", "Google 国别域应 Vercel 优先");
+        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws", "Google 国别域应 Vercel 优先");
 
         let ordered = order_endpoints(urls.clone(), "antigravity.google");
-        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws", "agy 域名应 Vercel 优先");
+        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws", "agy 域名应 Vercel 优先");
 
         let ordered = order_endpoints(urls.clone(), "api.openai.com");
-        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws", "OpenAI 应 Vercel 优先");
-        assert_eq!(ordered[1], "wss://gate.ponyjob.top/ws");
+        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws", "OpenAI 应 Vercel 优先");
+        assert_eq!(ordered[1], "wss://gate.example.com/ws");
 
         let ordered = order_endpoints(urls.clone(), "github.com");
-        assert_eq!(ordered[0], "wss://gate.ponyjob.top/ws", "常规非 Google/AI 应 CF 优先");
-        assert_eq!(ordered[1], "wss://vgate.ponyjob.top/api/ws");
+        assert_eq!(ordered[0], "wss://gate.example.com/ws", "常规非 Google/AI 应 CF 优先");
+        assert_eq!(ordered[1], "wss://vgate.example.com/api/ws");
     }
 
     #[test]

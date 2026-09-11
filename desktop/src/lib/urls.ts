@@ -218,12 +218,12 @@ export async function openExternalUrl(url: string): Promise<void> {
 
 /**
  * API 反代地址生成结果（对齐 Rust `proxy_access_url_generate` 命令返回结构）。
- * 语义：反代地址 = {数据面基址}/{token}/{route}{subpath}，本地 127.0.0.1:8899、公网 access.ponyjob.top。
+ * 语义：反代地址 = {数据面基址}/{token}/{route}{subpath}，本地 127.0.0.1:8899、公网 access.example.com。
  */
 export interface AccessUrlResult {
   /** 本地数据面接入地址，形如 http://127.0.0.1:8899/{token}/{route}{subpath} */
   local_url: string
-  /** 公网数据面接入地址，形如 https://access.ponyjob.top/{token}/{route}{subpath} */
+  /** 公网数据面接入地址，形如 https://access.example.com/{token}/{route}{subpath} */
   public_url: string
   /** 推导出的服务路由名（如 anthropic / openai / gemini / bai） */
   route: string
@@ -247,7 +247,7 @@ export function buildAccessUrlDev(baseUrl: string, customToken?: string): Access
   const sub = parsed.subPath ? (parsed.subPath.startsWith('/') ? parsed.subPath : `/${parsed.subPath}`) : ''
   return {
     local_url: `http://127.0.0.1:8899/${seg}/${parsed.inferredName}${sub}`,
-    public_url: `https://access.ponyjob.top/${seg}/${parsed.inferredName}${sub}`,
+    public_url: `https://access.example.com/${seg}/${parsed.inferredName}${sub}`,
     route: parsed.inferredName,
     has_token: Boolean(token),
     token: token || null,

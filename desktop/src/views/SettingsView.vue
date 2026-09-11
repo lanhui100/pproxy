@@ -876,7 +876,7 @@ onMounted(async () => {
                 <Input
                   ref="tunnelUrlInputRef"
                   v-model="tunnelUrlEditInput"
-                  placeholder="wss://gate.ponyjob.top/ws"
+                  placeholder="wss://gate.example.com/ws"
                   class="font-mono text-xs h-8 bg-background"
                   @keyup.enter="saveTunnel"
                   @keydown.esc="cancelEditTunnelUrl"

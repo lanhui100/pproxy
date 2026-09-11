@@ -28,7 +28,7 @@
 | 管理面 API | REST API：token CRUD、user CRUD、路由 CRUD、用量查询、健康检查、实时测速 |
 
 ### P1 — 扩展与增强
-- CF Tunnel 公网入口集成（手机/外网公网接入，域名 `access.ponyjob.top`）
+- CF Tunnel 公网入口集成（手机/外网公网接入，域名 `access.example.com`）
 - 通配 / 自定义出海 Allowlist 规则热管理
 - 告警渠道扩展（webhook / 邮件 / 80% 用量阈值告警）
 

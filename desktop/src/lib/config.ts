@@ -90,7 +90,7 @@ export interface GateInput {
   kind: 'code' | 'token'
   /** kind=code 时解析出的端点（用于预览/官方域名警示） */
   url?: string
-  /** 端点是否为官方域名（ponyjob.top），非官方时前端应提示确认 */
+  /** 端点是否为官方域名（example.com），非官方时前端应提示确认 */
   official?: boolean
 }
 
@@ -102,7 +102,7 @@ function isOfficialGateUrl(url: string): boolean {
     .every((u) => {
       try {
         const h = new URL(u).hostname
-        return h === 'ponyjob.top' || h.endsWith('.ponyjob.top')
+        return h === 'example.com' || h.endsWith('.example.com')
       } catch {
         return false
       }
@@ -161,8 +161,8 @@ export async function tunnelSelfCheck(): Promise<TunnelSelfCheck> {
       cred_ok: true,
       cred_error: null,
       gates: [
-        { name: 'cf', url: 'wss://gate.ponyjob.top/ws', ok: true, ms: 120 },
-        { name: 'vercel', url: 'wss://vgate.ponyjob.top/api/ws', ok: true, ms: 210 },
+        { name: 'cf', url: 'wss://gate.example.com/ws', ok: true, ms: 120 },
+        { name: 'vercel', url: 'wss://vgate.example.com/api/ws', ok: true, ms: 210 },
       ],
     }
   }

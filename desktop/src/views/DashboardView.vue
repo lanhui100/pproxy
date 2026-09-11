@@ -602,7 +602,7 @@ async function submitDirectSetup() {
       }
       await invoke('proxy_mode_switch', {
         modeType: 'direct',
-        config: { worker_url: 'https://edge.ponyjob.top' },
+        config: { worker_url: 'https://edge.example.com' },
       })
     }
     toast.success('配置成功！已准备就绪。')

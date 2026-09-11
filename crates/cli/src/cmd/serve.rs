@@ -193,12 +193,19 @@ pub fn run(
             });
         }
 
+        // 上游出口端点可经环境变量覆盖（开源中立默认值；部署方设置
+        // PPROXY_EDGE_URL / PPROXY_VERCEL_URL 指向自己的 worker/函数）。
+        let edge_url = std::env::var("PPROXY_EDGE_URL")
+            .unwrap_or_else(|_| "https://edge.example.com".to_string());
+        let vercel_url = std::env::var("PPROXY_VERCEL_URL")
+            .unwrap_or_else(|_| "https://vedge.example.com/api/proxy".to_string());
+
         let mut edges = HashMap::new();
         if let Some(secret) = &cfg.proxy_secret {
-            if let Ok(cf_edge) = EdgeClient::new("https://edge.ponyjob.top", secret) {
+            if let Ok(cf_edge) = EdgeClient::new(&edge_url, secret) {
                 edges.insert("worker".to_string(), cf_edge);
             }
-            if let Ok(vercel_edge) = EdgeClient::new("https://vedge.ponyjob.top/api/proxy", secret) {
+            if let Ok(vercel_edge) = EdgeClient::new(&vercel_url, secret) {
                 edges.insert("vercel".to_string(), vercel_edge);
             }
         }
@@ -211,7 +218,7 @@ pub fn run(
         let tunnel_allowlist = std::env::var("PPROXY_TUNNEL_ALLOWLIST").ok();
 
         let pool_config = PoolConfig {
-            worker_url: Some("https://edge.ponyjob.top".to_string()),
+            worker_url: Some(edge_url),
             worker_secret: cfg.proxy_secret.clone(),
             ..Default::default()
         };

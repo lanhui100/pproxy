@@ -1,6 +1,6 @@
 //! 目标域名感知与端点智能排序策略。
 
-/// 出口归账口径：gate 端点域名含 vercel/vgate → Vercel 出口，其余（gate.ponyjob.top 等）→ CF。
+/// 出口归账口径：gate 端点域名含 vercel/vgate → Vercel 出口，其余（gate.example.com 等）→ CF。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Egress {
     Cf,
@@ -203,17 +203,17 @@ mod tests {
     #[test]
     fn test_order_endpoints() {
         let urls = vec![
-            "wss://gate.ponyjob.top/ws",
-            "wss://vgate.ponyjob.top/api/ws",
+            "wss://gate.example.com/ws",
+            "wss://vgate.example.com/api/ws",
         ];
         let ordered = order_endpoints_with(urls.clone(), "google.com.hk", false);
-        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws");
+        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws");
 
         let ordered = order_endpoints_with(urls.clone(), "api.openai.com", false);
-        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws");
+        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws");
 
         let ordered = order_endpoints_with(urls.clone(), "github.com", false);
-        assert_eq!(ordered[0], "wss://gate.ponyjob.top/ws");
+        assert_eq!(ordered[0], "wss://gate.example.com/ws");
     }
 
     #[test]
@@ -245,8 +245,8 @@ mod tests {
     #[test]
     fn test_order_endpoints_compliant_egress_beats_conserve() {
         let urls = vec![
-            "wss://gate.ponyjob.top/ws",
-            "wss://vgate.ponyjob.top/api/ws",
+            "wss://gate.example.com/ws",
+            "wss://vgate.example.com/api/ws",
         ];
 
         // 省额度模式下仍必须优先合规出口（本专项的核心承诺）
@@ -257,31 +257,31 @@ mod tests {
         ] {
             let ordered = order_endpoints_with(urls.clone(), h, true);
             assert_eq!(
-                ordered[0], "wss://vgate.ponyjob.top/api/ws",
+                ordered[0], "wss://vgate.example.com/api/ws",
                 "省额度模式下 {h} 仍应优先合规出口"
             );
-            assert_eq!(ordered[1], "wss://gate.ponyjob.top/ws", "{h} 需保留 CF 兜底");
+            assert_eq!(ordered[1], "wss://gate.example.com/ws", "{h} 需保留 CF 兜底");
         }
 
         // 认证类不受影响：省额度模式下继续 CF 优先
         let ordered = order_endpoints_with(urls.clone(), "oauth2.googleapis.com", true);
-        assert_eq!(ordered[0], "wss://gate.ponyjob.top/ws");
+        assert_eq!(ordered[0], "wss://gate.example.com/ws");
     }
 
     #[test]
     fn test_ordered_gate_urls() {
-        let gate = "wss://gate.ponyjob.top/ws , wss://vgate.ponyjob.top/api/ws";
+        let gate = "wss://gate.example.com/ws , wss://vgate.example.com/api/ws";
         let ordered = ordered_gate_urls(gate, "daily-cloudcode-pa.googleapis.com");
         assert_eq!(
             ordered,
             vec![
-                "wss://vgate.ponyjob.top/api/ws".to_string(),
-                "wss://gate.ponyjob.top/ws".to_string(),
+                "wss://vgate.example.com/api/ws".to_string(),
+                "wss://gate.example.com/ws".to_string(),
             ]
         );
 
         let ordered = ordered_gate_urls(gate, "github.com");
-        assert_eq!(ordered[0], "wss://gate.ponyjob.top/ws");
+        assert_eq!(ordered[0], "wss://gate.example.com/ws");
         // 空串/纯空白端点被过滤，不产生空端点
         assert!(ordered_gate_urls(" , ", "github.com").is_empty());
     }
@@ -304,17 +304,17 @@ mod tests {
     #[test]
     fn test_order_endpoints_conserve_vercel() {
         let urls = vec![
-            "wss://gate.ponyjob.top/ws",
-            "wss://vgate.ponyjob.top/api/ws",
+            "wss://gate.example.com/ws",
+            "wss://vgate.example.com/api/ws",
         ];
 
         // 节能模式下：Google 优先走 CF gate
         let ordered = order_endpoints_with(urls.clone(), "google.com.hk", true);
-        assert_eq!(ordered[0], "wss://gate.ponyjob.top/ws");
+        assert_eq!(ordered[0], "wss://gate.example.com/ws");
 
         // 节能模式下：严格受限 AI 站点依然优先走 Vercel
         let ordered = order_endpoints_with(urls.clone(), "api.openai.com", true);
-        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws");
+        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws");
     }
 
     #[test]
@@ -322,11 +322,11 @@ mod tests {
         // 环境变量边界：只验证读取路径本身，其余用例走纯函数内核避免并发竞争
         std::env::set_var("PPROXY_CONSERVE_VERCEL", "1");
         let urls = vec![
-            "wss://gate.ponyjob.top/ws",
-            "wss://vgate.ponyjob.top/api/ws",
+            "wss://gate.example.com/ws",
+            "wss://vgate.example.com/api/ws",
         ];
         let ordered = order_endpoints(urls, "daily-cloudcode-pa.googleapis.com");
-        assert_eq!(ordered[0], "wss://vgate.ponyjob.top/api/ws");
+        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws");
         std::env::remove_var("PPROXY_CONSERVE_VERCEL");
     }
 }

@@ -11,9 +11,9 @@
 #      sudo systemctl enable --now pony-gate-node
 #   4) cloudflared config.yml 增加 ingress：<备用子域> → http://localhost:3101，
 #      并在 CF DNS 加对应 CNAME（同 access 隧道）；重启 pony-tunnel。
-#      注意：vgate.ponyjob.top 已被方案 B（Vercel 部署）占用，VPS 部署须换子域。
+#      注意：vgate.example.com 已被方案 B（Vercel 部署）占用，VPS 部署须换子域。
 #   5) 桌面端「设置 → 隧道中继」端点改为逗号分隔：
-#      wss://gate.ponyjob.top/ws,wss://<备用子域>/ws
+#      wss://gate.example.com/ws,wss://<备用子域>/ws
 #
 # node 路径按部署机实际调整（`which node`）。
 

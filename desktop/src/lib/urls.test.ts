@@ -26,7 +26,7 @@ describe('deriveDataPlane', () => {
   })
 
   it('公网形态同样按端口规则推导', () => {
-    expect(deriveDataPlane('https://access.ponyjob.top')).toBe('https://access.ponyjob.top:8899')
+    expect(deriveDataPlane('https://access.example.com')).toBe('https://access.example.com:8899')
   })
 
   it('非法输入返回 null', () => {
@@ -140,7 +140,7 @@ describe('buildAccessUrlDev（对齐 Rust proxy_access_url_generate）', () => {
     const r = buildAccessUrlDev('https://api.anthropic.com')
     expect(r.route).toBe('anthropic')
     expect(r.local_url).toBe('http://127.0.0.1:8899/<token>/anthropic')
-    expect(r.public_url).toBe('https://access.ponyjob.top/<token>/anthropic')
+    expect(r.public_url).toBe('https://access.example.com/<token>/anthropic')
     expect(r.has_token).toBe(false)
   })
 
@@ -157,7 +157,7 @@ describe('buildAccessUrlDev（对齐 Rust proxy_access_url_generate）', () => {
       const r = buildAccessUrlDev('https://api.groq.com')
       expect(r.has_token).toBe(true)
       expect(r.local_url).toBe('http://127.0.0.1:8899/dev-abc/groq')
-      expect(r.public_url).toBe('https://access.ponyjob.top/dev-abc/groq')
+      expect(r.public_url).toBe('https://access.example.com/dev-abc/groq')
     } finally {
       if (prev === null) localStorage.removeItem('pony-dev-tunnel-token')
       else localStorage.setItem('pony-dev-tunnel-token', prev)
@@ -186,7 +186,7 @@ describe('buildAccessUrlDev（对齐 Rust proxy_access_url_generate）', () => {
     const r = buildAccessUrlDev('api.b.ai/v1', 'pony_31abcbd448a003be0ea27524d60973d8')
     expect(r.route).toBe('bai')
     expect(r.local_url).toBe('http://127.0.0.1:8899/pony_31abcbd448a003be0ea27524d60973d8/bai/v1')
-    expect(r.public_url).toBe('https://access.ponyjob.top/pony_31abcbd448a003be0ea27524d60973d8/bai/v1')
+    expect(r.public_url).toBe('https://access.example.com/pony_31abcbd448a003be0ea27524d60973d8/bai/v1')
     expect(r.has_token).toBe(true)
   })
 })

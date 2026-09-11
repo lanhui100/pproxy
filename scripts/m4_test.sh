@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PUBLIC_URL="https://access.ponyjob.top"
+PUBLIC_URL="https://access.example.com"
 METRICS_URL="http://127.0.0.1:19099"
 DATA_ADDR="127.0.0.1:8899"
 # M5 ADR-007 重绑后：管理面监听 tailnet 地址（经 TAILNET_ADMIN_BASE 注入，
@@ -52,8 +52,8 @@ done
 
 # ---- 步骤 3：DNS 双解析器回归（ADR-003 口径）----
 echo "[步骤 3] DNS 双解析器"
-ALI="$(dig +short @223.5.5.5 access.ponyjob.top A 2>/dev/null | grep -c '^[0-9]') "
-SYS="$(dig +short access.ponyjob.top A 2>/dev/null | grep -c '^[0-9]')"
+ALI="$(dig +short @223.5.5.5 access.example.com A 2>/dev/null | grep -c '^[0-9]') "
+SYS="$(dig +short access.example.com A 2>/dev/null | grep -c '^[0-9]')"
 if [ "${ALI:-0}" -ge 1 ]; then PASS=$((PASS + 1)); echo "  PASS: 阿里 DNS 223.5.5.5 解析正常（敏感词过滤未复发）"; else
   echo "  FAIL: 阿里 DNS 解析为空"; exit 1; fi
 if [ "${SYS:-0}" -ge 1 ]; then PASS=$((PASS + 1)); echo "  PASS: 系统解析器解析正常"; else

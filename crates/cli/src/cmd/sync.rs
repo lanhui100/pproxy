@@ -389,7 +389,7 @@ mod tests {
             nonce: unique_nonce,
             data: SyncData {
                 server_url: Some("http://127.0.0.1:8899".into()),
-                worker_url: Some("https://edge.ponyjob.top".into()),
+                worker_url: Some("https://edge.example.com".into()),
                 proxy_secret: Some("my_secret_token_123".into()),
                 routes: HashMap::new(),
             },

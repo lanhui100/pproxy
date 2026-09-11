@@ -44,7 +44,7 @@
 - `cargo test --manifest-path desktop/src-tauri/Cargo.toml` — 22 passed
 - `pnpm --prefix desktop check` — vue-tsc pass
 - `pnpm --prefix desktop test` — 87 passed (10 files)
-- 手工（Windows）：待发布后按 Spec §6 六步执行，需抓包确认 `access.ponyjob.top` 永远 `DIRECT`，强杀后重启注册表按快照还原
+- 手工（Windows）：待发布后按 Spec §6 六步执行，需抓包确认 `access.example.com` 永远 `DIRECT`，强杀后重启注册表按快照还原
 
 ## 已知限制/后续
 
@@ -56,5 +56,5 @@
 
 1. `cargo test` + `pnpm check/test` 全绿（已满足）
 2. `pnpm build && cargo build --release` 出 NSIS
-3. 置 `access.ponyjob.top/dsk/latest.json` 自更新
+3. 置 `access.example.com/dsk/latest.json` 自更新
 4. Windows 实机六步手工 + `curl --proxy ""` 对照

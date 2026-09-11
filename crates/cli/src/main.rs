@@ -360,7 +360,7 @@ enum ConfigCmd {
     },
     /// 设置出海隧道 Gate URL 与 Token（持久化至 config.toml 与 .pproxy.env）
     SetTunnel {
-        /// Gate 端点 URL（支持逗号分隔多个，如 wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws）
+        /// Gate 端点 URL（支持逗号分隔多个，如 wss://vgate.example.com/api/ws,wss://gate.example.com/ws）
         #[arg(long)]
         gate_url: Option<String>,
         /// 隧道认证 Token（如 gate_xxx）
@@ -611,13 +611,13 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             let gate_url = match gate_url {
                 Some(u) => u.clone(),
                 None => {
-                    print!("请输入 Gate 端点 URL (默认: wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws): ");
+                    print!("请输入 Gate 端点 URL (默认: wss://vgate.example.com/api/ws,wss://gate.example.com/ws): ");
                     let _ = std::io::stdout().flush();
                     let mut input = String::new();
                     let _ = std::io::stdin().read_line(&mut input);
                     let input = input.trim();
                     if input.is_empty() {
-                        "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws".to_string()
+                        "wss://vgate.example.com/api/ws,wss://gate.example.com/ws".to_string()
                     } else {
                         input.to_string()
                     }

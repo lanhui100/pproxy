@@ -10,13 +10,13 @@
 [开发终端 / 浏览器 / 手机客户端]
    │
    ├─ 1. 正向代理流量 (CONNECT / HTTP Proxy)
-   │     └─ pony-engine (:8899 / :18900) ──[TunnelPool 待命 WS 隧道]──> gate.ponyjob.top (CF gate-worker)
+   │     └─ pony-engine (:8899 / :18900) ──[TunnelPool 待命 WS 隧道]──> gate.example.com (CF gate-worker)
    │           └─ Basic Auth / Token 鉴权 + Allowlist 过滤 ──> 目标海外站点 (TCP 443)
    │
    └─ 2. 反向 API 网关流量 (/{token}/{route}/*)
          └─ pony-server (dev 服务器, 127.0.0.1:8899)
-               ├─ anthropic/google/github/x/facebook → CF Worker  (edge.ponyjob.top)
-               └─ openai/opencode                   → Vercel 函数 (vedge.ponyjob.top, AWS 出口)
+               ├─ anthropic/google/github/x/facebook → CF Worker  (edge.example.com)
+               └─ openai/opencode                   → Vercel 函数 (vedge.example.com, AWS 出口)
 ```
 
 - **双模架构**：正向 CONNECT 隧道（支持通用出海与全平台代理节点）+ 反向 HTTP 网关（`/{token}/{route}/*path` 零配置客户端 SDK）。
@@ -110,9 +110,9 @@ crates/core/      # store（SQLite）/token/route/usage/EdgeClient（上游转�
 crates/server/    # 独立守护服务（gateway 分发 + 管理 API）
 crates/cli/       # CLI 工具链（环境代理 on/off/env/status、服务管理、路由与用量管理）
 desktop/          # Windows 桌面客户端（Tauri 2 + 托盘 + 白名单代理引擎）
-deploy/cf-worker/      # CF Worker（edge.ponyjob.top）
-deploy/cf-gate-worker/ # CF Gate Worker（gate.ponyjob.top，出海 WS↔TCP 隧道桥）
-deploy/vercel/         # Vercel 函数（vedge.ponyjob.top）
+deploy/cf-worker/      # CF Worker（edge.example.com）
+deploy/cf-gate-worker/ # CF Gate Worker（gate.example.com，出海 WS↔TCP 隧道桥）
+deploy/vercel/         # Vercel 函数（vedge.example.com）
 config.json       # 运行配置（上游、密钥；路由已迁 SQLite，勿提交）
 systemd/          # pproxy.service
 .secrets.env      # 凭据（chmod 600，勿提交）

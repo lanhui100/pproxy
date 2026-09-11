@@ -1063,7 +1063,7 @@ contexts:
         assert!(is_loopback_data_plane("http://127.0.0.1:8899"));
         assert!(is_loopback_data_plane("http://localhost:8899"));
         assert!(is_loopback_data_plane("http://[::1]:8899"));
-        assert!(!is_loopback_data_plane("https://edge.ponyjob.top"));
+        assert!(!is_loopback_data_plane("https://edge.example.com"));
         assert!(!is_loopback_data_plane("http://192.168.1.2:8899"));
         assert!(!is_loopback_data_plane("ftp://x"));
     }

@@ -67,7 +67,7 @@ UI 上的「已开启」只代表**本地监听起来了 + 系统代理被接管
 **`pproxy-sync://` 口令 / 方案 A 的 Cloudflare Token**
 
 只有 payload 携带 `proxy_secret` 时才写隧道，由 `configure_direct_tunnel`（`lib.rs:696-718`）
-落到 `wss://edge.ponyjob.top`。secret 无效或该 worker 不支持 WS 中继时，
+落到 `wss://edge.example.com`。secret 无效或该 worker 不支持 WS 中继时，
 每个请求都在 `engine_tunnel::establish`（`proxy/engine_tunnel.rs:80-110`）失败 → 回 502 →
 站点检测全红，而状态灯依旧是绿的。
 
@@ -566,11 +566,11 @@ pub struct Upstream {
 
 ### gate 端点修复（已完成）
 
-- **根因**：gate worker（WS 桥）部署在 `gate.ponyjob.top/ws`（wrangler.toml 注明），但桌面端与 server
-  的推导逻辑都用 `edge.ponyjob.top`（HTTP 网关域名，被 CF 403），且旧 `tunnel.json` 缺 `/ws`。
+- **根因**：gate worker（WS 桥）部署在 `gate.example.com/ws`（wrangler.toml 注明），但桌面端与 server
+  的推导逻辑都用 `edge.example.com`（HTTP 网关域名，被 CF 403），且旧 `tunnel.json` 缺 `/ws`。
 - **修复**：桌面端 `GATE_WS_URL` 常量 + `configure_direct_tunnel` 固定端点 +
   `migrate_tunnel_url`（edge→gate 自动迁移）；server 端 `derive_gate_url_from_worker` 同步迁移。
-- 用户数据 `tunnel.json` 已改为 `wss://gate.ponyjob.top/ws`。
+- 用户数据 `tunnel.json` 已改为 `wss://gate.example.com/ws`。
 
 ### 隧道令牌重置（已完成，curl 101 验证生效）
 
@@ -616,7 +616,7 @@ pub struct Upstream {
 
 1. **报错文本是 Cloudflare Workers `connect()`（cloudflare:sockets）的平台错误**，不是本仓库代码生成的
    （全仓库 grep 无该文本）。它出现在 WS 握手与令牌校验**通过之后**、gate worker 向目标拨号的阶段。
-2. 用本机存储的隧道令牌直接对 `wss://gate.ponyjob.top/ws` 复测（`deploy/vercel-gate-worker/smoke-test.mjs`）：
+2. 用本机存储的隧道令牌直接对 `wss://gate.example.com/ws` 复测（`deploy/vercel-gate-worker/smoke-test.mjs`）：
    - `www.google.com:443` → `{"ok":true}` + 真实 TLS 握手成功（TLS_AES_256_GCM_SHA384）；
    - `openai.com:443` → `{"ok":false}`，reason 与用户日志**逐字一致**。
    证明：令牌有效、gate 正常、代理主体已通；失败被精确定位在 worker `connect()` 到 openai.com。
@@ -629,7 +629,7 @@ pub struct Upstream {
 | 1 | CF 平台回环防护 | Workers `connect()` 禁止连到 Cloudflare 自有 IP（官方 TCP sockets 限制）。openai.com 是 CF 托管（橙云）→ 拨号必然被拒，即本次报错 |
 | 2 | OpenAI 封禁 CF 出口 | [ADR-002](../architecture/decisions/002-dual-upstream-cf-vercel.md) 早已记录：OpenAI 按 AS13335（Cloudflare ASN）整段拉黑；CF 托管目标即使能连也会被对端拒绝 |
 
-单体化重构后桌面端唯一隧道端点是 CF gate（`tunnel.json` 单端点 `wss://gate.ponyjob.top/ws`），
+单体化重构后桌面端唯一隧道端点是 CF gate（`tunnel.json` 单端点 `wss://gate.example.com/ws`），
 而旧架构里承担 OpenAI 流量的 Vercel 出口（ADR-002「敏感服务走 Vercel，AWS 真实 IP 放行」）
 **从未提供 WS gate 形态**——`deploy/vercel-gate-worker` 写好了但没部署，且代码带致命 bug（见下）。
 
@@ -674,7 +674,7 @@ failover 永远轮不到后续端点，每个请求卡满整条建连循环。�
 2. **令牌散列坑**：dev 主机 `.pproxy.env` 里的 `PPROXY_TUNNEL_TOKEN` 是**轮换前旧令牌**，
    与桌面端凭据管理器 `tunnel_token.pony-desktop` 的 sha256 不一致（实测比对 MISMATCH）。
    CF gate 与 Vercel gate 都以**桌面端 keyring 令牌**为准（该令牌经 CF gate 实测认证通过）。
-3. **域名**：项目绑定 `vgate.ponyjob.top`（`POST /v9/projects/pony-gate-node/domains`，即时 verified）；
+3. **域名**：项目绑定 `vgate.example.com`（`POST /v9/projects/pony-gate-node/domains`，即时 verified）；
    CF DNS 记录 `CNAME vgate → cname.vercel.com`（DNS only）。
    坑：`.pproxy.env` 的 `PPROXY_CF_API_TOKEN` 与 `.secrets.env` 的
    `CLOUDFLARE_API_TOKEN_FOR_GATE` 均无 DNS 权限；最终用 dev 主机
@@ -683,19 +683,19 @@ failover 永远轮不到后续端点，每个请求卡满整条建连循环。�
 4. **端点形态**：Vercel Function 挂载于 `/api/ws`（非 standalone 的 `/ws`）；
    `vercel.app` 域有 SSO 登录墙且被 GFW 屏蔽，自定义域为必需项（同 vedge 先例）。
 5. **生效配置**：桌面端 `tunnel.json` 已写多端点：
-   `wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws`
+   `wss://gate.example.com/ws,wss://vgate.example.com/api/ws`
    （CF 优先，CF 平台拒绝的连接逐连接自动落到 Vercel 出口；桌面端引擎无需再改代码）。
 
 **验证结果（2026-08-30 实测）**
 
 ```text
-node smoke-test.mjs wss://gate.ponyjob.top/ws    www.google.com 443 --token '<keyring令牌>'
+node smoke-test.mjs wss://gate.example.com/ws    www.google.com 443 --token '<keyring令牌>'
   → OK: TLS established (TLS_AES_256_GCM_SHA384)          # 既有出口回归 ✓
-node smoke-test.mjs wss://vgate.ponyjob.top/api/ws www.google.com 443 --token '<keyring令牌>'
+node smoke-test.mjs wss://vgate.example.com/api/ws www.google.com 443 --token '<keyring令牌>'
   → OK: TLS established (TLS_AES_256_GCM_SHA384)          # 备用出口回归 ✓
-node smoke-test.mjs wss://vgate.ponyjob.top/api/ws openai.com   443 --token '<keyring令牌>'
+node smoke-test.mjs wss://vgate.example.com/api/ws openai.com   443 --token '<keyring令牌>'
   → OK: TLS established (TLS_AES_256_GCM_SHA384)          # 本次故障目标打通 ✓
-node smoke-test.mjs wss://gate.ponyjob.top/ws    openai.com   443 --token '<keyring令牌>'
+node smoke-test.mjs wss://gate.example.com/ws    openai.com   443 --token '<keyring令牌>'
   → DENIED: proxy request failed, cannot connect ...      # CF 平台限制原样复现（对照）
 ```
 
@@ -756,21 +756,21 @@ tailnet 管理面），不属于桌面端退役范围，予以保留。
 Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution terminated due to error`。通过扫描会话 SQLite 数据库底层真实响应，发现全部错误均为 Google API 返回的 `FAILED_PRECONDITION (code 400): User location is not supported for the API use`（Server: ESF）。
 
 **根因**：
-`agy` 经本地 pproxy 路由至 Cloudflare Gate Worker（`gate.ponyjob.top`）。CF Worker 出口网络地理位置跟随 edge colo 调度，国内用户频繁被调度至香港节点（HKG/MFM），而香港属于 Gemini/Google API 不支持的区域，从而导致请求被 Google ESF 拦截并报 400。
+`agy` 经本地 pproxy 路由至 Cloudflare Gate Worker（`gate.example.com`）。CF Worker 出口网络地理位置跟随 edge colo 调度，国内用户频繁被调度至香港节点（HKG/MFM），而香港属于 Gemini/Google API 不支持的区域，从而导致请求被 Google ESF 拦截并报 400。
 
 **落地修复**：
 1. **Vercel Gate 钉死美区物理执行算力**：
    - 在 [`deploy/vercel-gate-worker/vercel.json`](deploy/vercel-gate-worker/vercel.json) 显式配置 `"regions": ["iad1"]`（AWS 美东弗吉尼亚数据中心），确保所有出网 TCP 具有合规的原生美国 IP。
-   - 生产环境绑定自定义域名 [`vgate.ponyjob.top`](https://vgate.ponyjob.top)。
+   - 生产环境绑定自定义域名 [`vgate.example.com`](https://vgate.example.com)。
 2. **三端 SHA-256 鉴权令牌对齐**：
    - 统一使用当前 `GATE_TUNNEL_TOKEN` 的 SHA-256 散列值（轮换后重新计算，散列值本身勿写入公开文档）。
-   - 同步注入到 Cloudflare Worker (`gate.ponyjob.top`) 密钥、Vercel 环境变量 (`TUNNEL_TOKEN_HASH`) 以及本地 Windows 凭据管理器 (`tunnel_token.pony-desktop`)。
+   - 同步注入到 Cloudflare Worker (`gate.example.com`) 密钥、Vercel 环境变量 (`TUNNEL_TOKEN_HASH`) 以及本地 Windows 凭据管理器 (`tunnel_token.pony-desktop`)。
 3. **双网关 Failover 协同策略**：
-   - 客户端配置多端点：`wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws`。
+   - 客户端配置多端点：`wss://gate.example.com/ws,wss://vgate.example.com/api/ws`。
    - 当 CF Worker 调度至非合规区域（HKG/MFM）且目标为 Google 时返回 `denied (unsupported_colo)`，桌面端 `engine_tunnel` 自动秒级 Failover 至 Vercel 美区出口；常规流量继续享受 CF Worker 低延迟直连。
 4. **验证取证**：
-   - `node smoke-test.mjs wss://vgate.ponyjob.top/api/ws www.google.com 443` -> `OK: TLS established (TLS_AES_256_GCM_SHA384)`
-   - `node smoke-test.mjs wss://vgate.ponyjob.top/api/ws openai.com 443` -> `OK: TLS established (TLS_AES_256_GCM_SHA384)`
+   - `node smoke-test.mjs wss://vgate.example.com/api/ws www.google.com 443` -> `OK: TLS established (TLS_AES_256_GCM_SHA384)`
+   - `node smoke-test.mjs wss://vgate.example.com/api/ws openai.com 443` -> `OK: TLS established (TLS_AES_256_GCM_SHA384)`
    - 单元测试：Rust 44/44 通过、Vitest 69/69 通过。
 
 ### 门禁加固与端点策略 · 2026-09-02（P1/P2 设计审核落地）
@@ -780,7 +780,7 @@ Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution
 - **P1-1 · agy 域名纳入 Google 系门禁**：`GOOGLE_SUFFIXES` 补充 `antigravity.google` / `labs.google`（桌面端白名单默认项）。此前这两个域名会被当作非 Google 流量在 HKG/MFM 等区域被全量放行，Google 拒绝时不触发 Vercel failover——正是 agy 场景的门禁盲区。
 - **P1-2 · 严格白名单默认开启（fail-closed）**：`worker.js` 改为 `STRICT_GOOGLE_WHITELIST` 未设置/非 `false|0` 时即启用严格白名单；`wrangler.toml` 显式声明 `STRICT_GOOGLE_WHITELIST="true"`。此前白名单仅在显式开启时生效，属名不副实。
 - **P2-3 · 端点 host 感知优先级**：`engine_tunnel.rs` 新增 `is_google_host`/`order_endpoints`——Google 系 host（含 agy 域名）→ Vercel 合规出口优先；非 Google → CF 低延迟优先。与 gate-policy 口径一致，消除「全量 Vercel 优先拖慢非 Google 流量」与「Google 先吃 CF denied 往返」两个问题。
-- **P2-4 · 单 CF 端点旧配置迁移**：`migrate_tunnel_url` 对单独 `wss://gate.ponyjob.top/ws` 也自动补齐默认双端点。
+- **P2-4 · 单 CF 端点旧配置迁移**：`migrate_tunnel_url` 对单独 `wss://gate.example.com/ws` 也自动补齐默认双端点。
 - **P2-5 · 前端站点测速走本地引擎**：新增 `proxy_test_site_local` 命令，`DashboardView` 站点行改为经本地引擎真实分流（命中白名单/全局走隧道、未命中直连），移除站点行的手动 C/V 切换（引擎已按 host 自动选出口）；接口行保留 gate RTT 测速。
 - **方案 A · 桌面端待命隧道池**（`engine_tunnel.rs` `TunnelPool`，对齐 `crates/server connect.rs`）：解决「经本地引擎测速 1s 内 → 1-3s」的口径问题——之前的测速命令把**冷建连成本**计入了计时，而旧 C/V 直拨测速用热态口径剥离了冷建连。池化后引擎按端点预建 WS 待命会话，establish 命中池时只需热态首帧（1 RTT）。桌面端差异：按端点分组 + host 感知 checkout（P2-3 端点策略）+ watch 热更新清池 + Weak 自引用防泄漏；`engine::run` 异步上下文幂等启动。
 - **安装体验 · 安装/升级成功自动打开（默认勾选）+ 桌面图标**（`desktop/src-tauri/windows/installer-hooks.nsh`）：`NSIS_HOOK_POSTINSTALL` 无条件调用 `CreateOrUpdateDesktopShortcut`（GUI 未勾选/升级残留图标场景下桌面图标始终存在并指向当前版本）；自动打开走模板自带机制、hook 内不得直接拉起——GUI 安装由完成页「运行」复选框触发（`MUI_FINISHPAGE_RUN` 默认勾选、用户可取消，点完成后经 `RunMainBinary` 以 `RunAsUser` 拉起，单实例锁防重复），被动/静默升级（updater 下发 `/P /UPDATE /R`）完成页被跳过、由 `.onInstSuccess` 凭 `/R` 携带 `/ARGS` 拉起。
@@ -841,7 +841,7 @@ bash scripts/check-egress-parity.sh                # Rust/JS 两侧 host 清单�
 
 ```bash
 # 出站地理探测（返回本 Worker 出站 IP/国家码）
-curl -s https://gate.ponyjob.top/debug/egress -H "Authorization: Bearer <tunnel_token>"
+curl -s https://gate.example.com/debug/egress -H "Authorization: Bearer <tunnel_token>"
 # 数据面出口归位（合规 host 应落 vgate 66.33.60.x，认证类仍落 CF）
 pproxy status
 ```

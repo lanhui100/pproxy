@@ -19,7 +19,7 @@ fn legacy_config_json() -> String {
   "listen_port": 8899,
   "static_upstreams": [],
   "countries": [],
-  "worker_url": "https://edge.ponyjob.top",
+  "worker_url": "https://edge.example.com",
   "worker_secret": "test-secret",
   "routes": {
     "anthropic": "api.anthropic.com",
@@ -232,7 +232,7 @@ fn migrate_imports_and_rewrites_config() {
     let rewritten: Value = serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
     let obj = rewritten.as_object().unwrap();
     assert!(!obj.contains_key("routes"), "routes 键应删除");
-    assert_eq!(obj.get("worker_url").and_then(Value::as_str), Some("https://edge.ponyjob.top"));
+    assert_eq!(obj.get("worker_url").and_then(Value::as_str), Some("https://edge.example.com"));
     assert_eq!(obj.get("worker_secret").and_then(Value::as_str), Some("test-secret"));
     assert!(obj.get("upstreams").is_some(), "upstreams 应保留");
     assert!(obj.get("route_upstreams").is_some(), "route_upstreams 应保留");
@@ -267,7 +267,7 @@ fn migrate_skips_invalid_routes_without_failing() {
     write_file(
         &cfg_path,
         r#"{
-  "worker_url": "https://edge.ponyjob.top",
+  "worker_url": "https://edge.example.com",
   "worker_secret": "s",
   "routes": {
     "good_route": "api.example.com",
@@ -299,7 +299,7 @@ fn migrate_binding_lands_in_override_upstream_and_resolve_picks_it() {
     write_file(
         &cfg_path,
         r#"{
-  "worker_url": "https://edge.ponyjob.top",
+  "worker_url": "https://edge.example.com",
   "worker_secret": "s",
   "routes": { "echo": "echo.example.com" },
   "route_upstreams": { "echo": "localstub" }

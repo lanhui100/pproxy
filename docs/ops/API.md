@@ -25,7 +25,7 @@ Proxy-Authorization: Basic {base64(username:password)} 或 X-Pony-Token: {token}
 - **鉴权**：支持 Basic Auth（users 表校验）与 Token Auth；未鉴权一律返回 `407 Proxy Authentication Required`
 - **安全防爆破**：Gatekeeper 连续失败锁定 IP，返回 `429 Too Many Requests`
 - **Allowlist 策略**：仅放行白名单域名（默认 OpenAI/Anthropic/Google/GitHub 等，支持通配/自定义扩展），未命中返回 `403 Forbidden (no_tunnel_route)`
-- **传输**：通过 `TunnelPool` 待命 WebSocket 连接池向 `gate.ponyjob.top/ws` 发起 1-RTT 隧道绑定，随后进入双向二进制透传
+- **传输**：通过 `TunnelPool` 待命 WebSocket 连接池向 `gate.example.com/ws` 发起 1-RTT 隧道绑定，随后进入双向二进制透传
 
 - 网关 → 上游：`X-Proxy-Secret`（服务器内注入，客户端无感）
 
@@ -36,8 +36,8 @@ Proxy-Authorization: Basic {base64(username:password)} 或 X-Pony-Token: {token}
 ## 外部访问（M4 公网入口）
 
 ```
-https://access.ponyjob.top/{token}/{route}/{path}      # 与局域网路径模式完全同构
-https://access.ponyjob.top/{route}/{path} + X-Pony-Token  # header 模式
+https://access.example.com/{token}/{route}/{path}      # 与局域网路径模式完全同构
+https://access.example.com/{route}/{path} + X-Pony-Token  # header 模式
 ```
 - 链路：CF 边缘（TLS 终结）→ CF Tunnel（出站长连接，服务器零入站端口）→ 本机 :8899
 - 鉴权与错误语义同数据面；token 等同密码，禁止写入客户端持久日志/剪贴板同步
@@ -75,17 +75,17 @@ Authorization: Bearer <admin_token>
 
 ## 上游协议（服务器 ↔ 出口）
 
-### CF Worker（edge.ponyjob.top）
+### CF Worker（edge.example.com）
 ```
-ANY https://edge.ponyjob.top/<任意路径>?url=<urlencoded target>
+ANY https://edge.example.com/<任意路径>?url=<urlencoded target>
 Header: X-Proxy-Secret: <worker_secret>
 ```
 - Worker 剥离 geo/hop-by-hop 头后 fetch 目标，流式回传
 - 无密钥 → 403 "Unauthorized"
 
-### Vercel 函数（vedge.ponyjob.top/api/proxy）
+### Vercel 函数（vedge.example.com/api/proxy）
 ```
-ANY https://vedge.ponyjob.top/api/proxy?url=<urlencoded target>
+ANY https://vedge.example.com/api/proxy?url=<urlencoded target>
 Header: X-Proxy-Secret: <vercel secret>
 ```
 - Node fetch 转发，流式回传（maxDuration 300s）

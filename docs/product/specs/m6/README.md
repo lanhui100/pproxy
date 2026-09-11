@@ -56,7 +56,7 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
    ├─ PAC 服务 /pac（命中→单条 PROXY 无兜底；未命中→DIRECT；格式钉死见 §5，R4）
    ├─ 系统代理模式：PAC（推荐）/ 手动（实验性，Override=<local>+内网排除，F7）
    ├─ 分流：host 后缀匹配 → 是：wss 隧道；否：本机 dial
-        │ wss://gate.ponyjob.top/ws （Authorization: Bearer <tunnel_token>）
+        │ wss://gate.example.com/ws （Authorization: Bearer <tunnel_token>）
         ▼
 [CF Worker] gate worker（新部署，独立于 edge；账户级额度共享风险见 §10）
    ├─ Bearer 校验（TUNNEL_TOKEN_HASH，sha256(tunnel_token)）
@@ -72,7 +72,7 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 
 | 项 | 规格 |
 |----|------|
-| 端点 | `wss://gate.ponyjob.top/ws` |
+| 端点 | `wss://gate.example.com/ws` |
 | 鉴权 | Upgrade 头 `Authorization: Bearer <tunnel_token>`；服务端 sha256 后比对 TUNNEL_TOKEN_HASH；失败 401 关闭 |
 | 首帧 | 文本帧 `{"host":"…","port":443}`；ACL 校验后回 `{"ok":true}` / `{"ok":false,"reason":"…"}` 后关闭 |
 | ACL | **port 仅允许 443**（80 明文透传默认禁用，需显式配置开关才放行——R8/F12）；host 经归一化后拒绝空值/私网与 CF 字面量（解析级校验视 S4 spike 决定，平台依赖声明见 §7/R5） |
@@ -105,7 +105,7 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 
 - 流程：/ws 校验 Bearer→sha256 比对 env.TUNNEL_TOKEN_HASH→首帧 ACL→connect()→WebSocketPair 双向 pipe（背压感知）
 - 可观测：每连接记录 `{ts, host_hash, port, duration, up_bytes, down_bytes}`——**host 只记 SHA-256 前 16 字节**（浏览画像隐私，F13），映射表仅存本地 GUI 供展示；observability 采样率固定 100%（DEPLOY.md 登记）
-- 部署：wrangler secret 注入 TUNNEL_TOKEN_HASH；route 绑定 gate.ponyjob.top
+- 部署：wrangler secret 注入 TUNNEL_TOKEN_HASH；route 绑定 gate.example.com
 
 ## 7. 安全
 
@@ -179,7 +179,7 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 
 | 发现 | 证据 |
 |------|------|
-| gate.ponyjob.top 已上线 | 账户级 Custom Domains API 绑定成功（绕开 dashboard 故障）；/debug 200 |
+| gate.example.com 已上线 | 账户级 Custom Domains API 绑定成功（绕开 dashboard 故障）；/debug 200 |
 | **CF 官方 Minor Service Outage 进行中** | 状态页：全球数十个 PoP partial_outage/under_maintenance；但 Workers/WebSockets/Dashboard 组件标记 operational（组件级与 PoP 级状态背离） |
 | **WS 数据帧黑洞（核心症状）** | 101 握手协议层正常完成（curl verbose 确认 Sec-WebSocket-Accept 正确），但握手后双向数据帧全部丢失；accept 前置/ctx 两模式、本地计数器均无法收到帧 |
 | 行为抖动 | 同一请求时而 101 时而 Empty Reply（不同 PoP/路径健康度不一） |
@@ -193,5 +193,5 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 | CF 状态页 | 恢复全绿（Workers/WebSockets/Dashboard operational，未解决事件=0）——重测窗口开启 |
 | **accept 口径裁决（B001 附带裁决完成）** | 生产边缘实证：`server.accept()` 后 Response 必须携带 **`pair[0]`（client 端）**→ 数据帧正常；`ctx.acceptWebSocket(server)`/返回 server → 升级阶段抛 500。两个会话独立实测交叉验证一致；与 §12 S4「本地 alpha 工具链两模式全坏」不矛盾——平台行为只能真机裁决（R7 证明力分层的再验证）。gate 已按可用口径部署带鉴权正版代码 |
 | 凭据轮换 | 审计整改轮换 tunnel_token：旧明文 gate-spike-**** 作废，桌面端 GUI 重录新 token 方可走隧道（R2 轮换语义兑现）；源码去硬编码端点/令牌，引擎隧道改 opt-in 由配置注入（属下一版内容） |
-| v0.3.5 发布 | NSIS installerHooks（POSTINSTALL/PREUNINSTALL 定向清理历史 pony-desktop.lnk，仅匹配旧安装目标路径防误删）；sync-desktop-release.sh 资产 URL 改写口径迁 `https://access.ponyjob.top/dsk/`（与 updater 端点一致，公开可达验证 200）；本地分发目录旧版本产物已清理 |
+| v0.3.5 发布 | NSIS installerHooks（POSTINSTALL/PREUNINSTALL 定向清理历史 pony-desktop.lnk，仅匹配旧安装目标路径防误删）；sync-desktop-release.sh 资产 URL 改写口径迁 `https://access.example.com/dsk/`（与 updater 端点一致，公开可达验证 200）；本地分发目录旧版本产物已清理 |
 | S1/S2 吞吐并发 | CF 全绿但执行车道移交审计会话（其持有轮换后新凭据）；数据回填 **ADR-008** 后 M6 方可整体打 ✅ |

@@ -10,8 +10,8 @@ use crate::EXIT_OK;
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const GITHUB_REPO: &str = "lanhui100/pproxy";
-pub const DEFAULT_GATEWAY_DIST: &str = "https://access.ponyjob.top/dsk";
-pub const DEFAULT_FALLBACK_DIST: &str = "https://dl.ponyjob.top";
+pub const DEFAULT_GATEWAY_DIST: &str = "https://access.example.com/dsk";
+pub const DEFAULT_FALLBACK_DIST: &str = "https://dl.example.com";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GitHubReleaseAsset {
@@ -610,7 +610,7 @@ mod tests {
             "pub_date": "2026-09-02T08:56:21Z",
             "platforms": {
                 "windows-x86_64": {
-                    "url": "https://access.ponyjob.top/dsk/Pony.Proxy_0.3.27_x64-setup.exe"
+                    "url": "https://access.example.com/dsk/Pony.Proxy_0.3.27_x64-setup.exe"
                 }
             }
         }"#;

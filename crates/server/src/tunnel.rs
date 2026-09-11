@@ -45,12 +45,12 @@ mod tests {
     #[test]
     fn tunnel_provision_from_pool_config() {
         let pool_cfg = pproxy_core::PoolConfig {
-            worker_url: Some("https://edge.ponyjob.top".into()),
+            worker_url: Some("https://edge.example.com".into()),
             worker_secret: Some("sec123".into()),
             ..Default::default()
         };
         let p = TunnelProvision::from_pool_config_and_env(&pool_cfg).unwrap();
-        assert_eq!(p.url, "wss://gate.ponyjob.top/ws");
+        assert_eq!(p.url, "wss://gate.example.com/ws");
         assert_eq!(p.token, "sec123");
     }
 }

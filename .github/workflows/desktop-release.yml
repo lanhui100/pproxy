@@ -61,7 +61,7 @@ jobs:
           prerelease: false
           projectPath: desktop
 
-      - name: Deploy static distribution to Vercel (dl.ponyjob.top)
+      - name: Deploy static distribution to Vercel
         if: env.VERCEL_TOKEN != ''
         shell: bash
         env:

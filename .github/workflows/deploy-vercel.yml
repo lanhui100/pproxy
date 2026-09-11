@@ -17,7 +17,7 @@ on:
 
 jobs:
   deploy-edge:
-    name: Deploy pproxy-edge-v2 (vedge.ponyjob.top)
+    name: Deploy pproxy-edge-v2
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +58,7 @@ jobs:
         run: npx -y vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
 
   deploy-gate:
-    name: Deploy vercel-gate-worker (vgate.ponyjob.top)
+    name: Deploy vercel-gate-worker
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

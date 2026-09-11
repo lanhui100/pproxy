@@ -432,22 +432,22 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
 
 // ---- 隧道中继配置 ----
 const TUNNEL_FILE: &str = "tunnel.json";
-/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
-/// 注意：与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
-const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.example.com/ws（见 deploy/cf-gate-worker/wrangler.toml）。
+/// 注意：与 HTTP 数据面网关（edge.example.com，cf-worker）不是同一域名，切勿混用。
+const GATE_WS_URL: &str = "wss://gate.example.com/ws";
 /// 默认双 gate 端点（主备 failover）：裸 token 保存且无端点配置时自动补齐。
-const DEFAULT_TUNNEL_URLS: &str = "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws";
+const DEFAULT_TUNNEL_URLS: &str = "wss://vgate.example.com/api/ws,wss://gate.example.com/ws";
 
-/// 旧配置迁移：早期版本把 HTTP 网关域名（edge.ponyjob.top）误当作 WS gate 端点，
+/// 旧配置迁移：早期版本把 HTTP 网关域名（edge.example.com）误当作 WS gate 端点，
 /// 且曾缺 /ws 路径。读到这类值一律映射到正确的 gate 端点（防止拨测超时/隧道连接失败）。
 /// 同时将旧版 CF 在前的默认端点自动迁移为主备双端点，确保 Google/AI API 稳定出网。
-/// 单一 CF 端点（纯 gate.ponyjob.top）同样补齐默认双端点，避免缺 Vercel 兜底（P2-4）。
+/// 单一 CF 端点（纯 gate.example.com）同样补齐默认双端点，避免缺 Vercel 兜底（P2-4）。
 fn migrate_tunnel_url(url: &str) -> String {
     let t = url.trim();
-    if t.starts_with("wss://edge.ponyjob.top") || t.starts_with("ws://edge.ponyjob.top") {
+    if t.starts_with("wss://edge.example.com") || t.starts_with("ws://edge.example.com") {
         return GATE_WS_URL.to_string();
     }
-    if t == "wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws" {
+    if t == "wss://gate.example.com/ws,wss://vgate.example.com/api/ws" {
         return DEFAULT_TUNNEL_URLS.to_string();
     }
     if t == GATE_WS_URL {
@@ -1099,7 +1099,7 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
     // 方案 A：Direct 独立中继隧道模式（cf / vercel）
     let gate = match iface.as_str() {
         "cf" => GATE_WS_URL,
-        "vercel" => "wss://vgate.ponyjob.top/api/ws",
+        "vercel" => "wss://vgate.example.com/api/ws",
         _ => return Err("未知接口：仅支持 cf / vercel / chained".into()),
     };
 
@@ -1137,8 +1137,8 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
 
     // 未配置授权码时，按 TCP 握手 RTT 测试节点连通性
     let host_port = match iface.as_str() {
-        "cf" => "gate.ponyjob.top:443",
-        "vercel" => "vgate.ponyjob.top:443",
+        "cf" => "gate.example.com:443",
+        "vercel" => "vgate.example.com:443",
         _ => return Err("未知接口".into()),
     };
     let started = std::time::Instant::now();
@@ -1227,7 +1227,7 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
     let gate = match iface.as_str() {
         "cf" => GATE_WS_URL,
         // Vercel gate（deploy/vercel-gate-worker，挂载 /api/ws）
-        "vercel" => "wss://vgate.ponyjob.top/api/ws",
+        "vercel" => "wss://vgate.example.com/api/ws",
         _ => return Err("未知接口：仅支持 cf / vercel / chained".into()),
     };
     let token = cred_get_impl(CREDENTIAL_USER_TUNNEL)
@@ -1326,7 +1326,7 @@ fn proxy_bypass_hosts() -> Vec<String> { proxy::pac::collect_bypass_hosts().into
 
 // ---- API 反代地址生成（设置页一键生成接入地址）----
 // 语义对齐 README「API 反向代理网关使用」与 crates/cli/src/export.rs：
-// 反代地址 = {数据面基址}/{token}/{route}，本地 127.0.0.1:8899、公网 access.ponyjob.top。
+// 反代地址 = {数据面基址}/{token}/{route}，本地 127.0.0.1:8899、公网 access.example.com。
 // 路由由模型提供商 base_url 的主机名自动推导（对齐旧 serviceTemplates / urls.parseServiceUrlInput）。
 const PROVIDER_ROUTES: &[(&str, &str)] = &[
     ("api.openai.com", "openai"),
@@ -1532,7 +1532,7 @@ fn infer_route(host: &str) -> Option<String> {
 fn build_access_urls(route: &str, subpath: &str, token: Option<&str>) -> serde_json::Value {
     let token_seg = token.unwrap_or("<token>");
     let local_url = format!("http://127.0.0.1:8899/{token_seg}/{route}{subpath}");
-    let public_url = format!("https://access.ponyjob.top/{token_seg}/{route}{subpath}");
+    let public_url = format!("https://access.example.com/{token_seg}/{route}{subpath}");
     serde_json::json!({
         "local_url": local_url,
         "public_url": public_url,
@@ -1587,7 +1587,7 @@ fn proxy_api_token_set(token: String) -> Result<(), String> {
 
 /// 生成 API 反代接入地址：输入模型提供商 base_url（带不带 https:// 均可），
 /// 自动推导服务路由并保留原始子路径（如 /v1），并使用本机保存的 pony_ 反代数据面授权码，
-/// 生成本地（127.0.0.1:8899）与公网（access.ponyjob.top）两条反代地址。
+/// 生成本地（127.0.0.1:8899）与公网（access.example.com）两条反代地址。
 /// 若传入 custom_token（且非空），将校验并持久化到本地 API 反代凭据库。
 #[tauri::command]
 fn proxy_access_url_generate(base_url: String, custom_token: Option<String>) -> Result<serde_json::Value, String> {
@@ -1670,9 +1670,9 @@ fn proxy_get_current_config() -> serde_json::Value {
 }
 
 fn configure_direct_tunnel(_worker_url: &str, secret: &str) -> Result<(), String> {
-    // gate 隧道端点是产品基础设施（gate.ponyjob.top/ws）。
-    // worker_url 是 HTTP 数据面出口地址（edge.ponyjob.top），与 WS 隧道桥不是同一域名——
-    // 曾用 worker_url 推导隧道端点导致 wss://edge.ponyjob.top[/ws] 拨测超时（CF 层 403），已废弃推导。
+    // gate 隧道端点是产品基础设施（gate.example.com/ws）。
+    // worker_url 是 HTTP 数据面出口地址（edge.example.com），与 WS 隧道桥不是同一域名——
+    // 曾用 worker_url 推导隧道端点导致 wss://edge.example.com[/ws] 拨测超时（CF 层 403），已废弃推导。
     let ws_url = GATE_WS_URL.to_string();
 
     let dir = data_dir();
@@ -1705,7 +1705,7 @@ fn proxy_mode_switch(mode_type: String, config: serde_json::Value) -> Result<(),
             let _ = cred_set_impl(CREDENTIAL_USER_PROXY, pass.to_string());
         }
     } else if mode_type == "direct" {
-        let worker = config.get("worker_url").and_then(|v| v.as_str()).unwrap_or("https://edge.ponyjob.top");
+        let worker = config.get("worker_url").and_then(|v| v.as_str()).unwrap_or("https://edge.example.com");
         patch["worker_url"] = serde_json::json!(worker);
         if let Some(sec) = config.get("proxy_secret").and_then(|v| v.as_str()) {
             let _ = configure_direct_tunnel(worker, sec);
@@ -1780,7 +1780,7 @@ fn proxy_import_sync(sync_uri: String, passphrase: Option<String>) -> Result<ser
 
         let data = payload.get("data").cloned().unwrap_or_default();
         let server_url = data.get("server_url").and_then(|v| v.as_str()).unwrap_or("http://127.0.0.1:8899");
-        let worker_url = data.get("worker_url").and_then(|v| v.as_str()).unwrap_or("https://edge.ponyjob.top");
+        let worker_url = data.get("worker_url").and_then(|v| v.as_str()).unwrap_or("https://edge.example.com");
         let proxy_secret = data.get("proxy_secret").and_then(|v| v.as_str());
 
         let patch = serde_json::json!({
@@ -1904,15 +1904,15 @@ mod tests {
 
     #[test]
     fn migrate_tunnel_url_maps_old_gate_to_correct_endpoint() {
-        // 旧配置把 HTTP 网关域名当 gate 用（edge.ponyjob.top，可能缺 /ws）→ 必须迁移到 gate.ponyjob.top/ws
-        assert_eq!(migrate_tunnel_url("wss://edge.ponyjob.top"), "wss://gate.ponyjob.top/ws");
-        assert_eq!(migrate_tunnel_url("wss://edge.ponyjob.top/ws"), "wss://gate.ponyjob.top/ws");
-        assert_eq!(migrate_tunnel_url("ws://edge.ponyjob.top"), "wss://gate.ponyjob.top/ws");
+        // 旧配置把 HTTP 网关域名当 gate 用（edge.example.com，可能缺 /ws）→ 必须迁移到 gate.example.com/ws
+        assert_eq!(migrate_tunnel_url("wss://edge.example.com"), "wss://gate.example.com/ws");
+        assert_eq!(migrate_tunnel_url("wss://edge.example.com/ws"), "wss://gate.example.com/ws");
+        assert_eq!(migrate_tunnel_url("ws://edge.example.com"), "wss://gate.example.com/ws");
         // 正确端点与自定义端点保持原样
-        assert_eq!(migrate_tunnel_url("wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws");
+        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws,wss://vgate.example.com/api/ws"), "wss://vgate.example.com/api/ws,wss://gate.example.com/ws");
         assert_eq!(migrate_tunnel_url("wss://self-host.example.com/tunnel"), "wss://self-host.example.com/tunnel");
         // P2-4：单 CF 端点补齐默认双端点（Vercel 兜底）
-        assert_eq!(migrate_tunnel_url("wss://gate.ponyjob.top/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws");
+        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws"), "wss://vgate.example.com/api/ws,wss://gate.example.com/ws");
     }
 
     // ---- pony-gate:// 连接口令解析 ----
@@ -1923,17 +1923,17 @@ mod tests {
     }
     #[test]
     fn connect_code_parses_valid_payload() {
-        let (u, t) = parse_connect_code(&make_code("wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws", "tok-123")).unwrap();
-        assert_eq!(u, "wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws");
+        let (u, t) = parse_connect_code(&make_code("wss://gate.example.com/ws,wss://vgate.example.com/api/ws", "tok-123")).unwrap();
+        assert_eq!(u, "wss://gate.example.com/ws,wss://vgate.example.com/api/ws");
         assert_eq!(t, "tok-123");
     }
     #[test]
     fn connect_code_accepts_standard_base64_and_whitespace() {
         use base64::Engine as _;
-        let j = serde_json::json!({ "u": "wss://gate.ponyjob.top/ws", "t": "abc" }).to_string();
+        let j = serde_json::json!({ "u": "wss://gate.example.com/ws", "t": "abc" }).to_string();
         let code = format!("  pony-gate://{}  ", base64::engine::general_purpose::STANDARD.encode(j));
         let (u, t) = parse_connect_code(&code).unwrap();
-        assert_eq!(u, "wss://gate.ponyjob.top/ws");
+        assert_eq!(u, "wss://gate.example.com/ws");
         assert_eq!(t, "abc");
     }
     #[test]
@@ -2040,13 +2040,13 @@ mod tests {
         let res = build_access_urls("anthropic", "", None);
         assert_eq!(res["route"], "anthropic");
         assert_eq!(res["local_url"], "http://127.0.0.1:8899/<token>/anthropic");
-        assert_eq!(res["public_url"], "https://access.ponyjob.top/<token>/anthropic");
+        assert_eq!(res["public_url"], "https://access.example.com/<token>/anthropic");
         assert_eq!(res["has_token"], false);
 
         // 有凭据且带 subpath（如 /v1）：完整保留
         let res2 = build_access_urls("bai", "/v1", Some("pony_31abc"));
         assert_eq!(res2["local_url"], "http://127.0.0.1:8899/pony_31abc/bai/v1");
-        assert_eq!(res2["public_url"], "https://access.ponyjob.top/pony_31abc/bai/v1");
+        assert_eq!(res2["public_url"], "https://access.example.com/pony_31abc/bai/v1");
         assert_eq!(res2["has_token"], true);
     }
 
@@ -2056,7 +2056,7 @@ mod tests {
         let res = proxy_access_url_generate("api.b.ai/v1".into(), Some("pony_31abcbd448a003be0ea27524d60973d8".into())).unwrap();
         assert_eq!(res["route"], "bai");
         assert_eq!(res["local_url"], "http://127.0.0.1:8899/pony_31abcbd448a003be0ea27524d60973d8/bai/v1");
-        assert_eq!(res["public_url"], "https://access.ponyjob.top/pony_31abcbd448a003be0ea27524d60973d8/bai/v1");
+        assert_eq!(res["public_url"], "https://access.example.com/pony_31abcbd448a003be0ea27524d60973d8/bai/v1");
         assert_eq!(res["has_token"], true);
 
         // 带 https:// 与尾斜杠的输入同样正确处理

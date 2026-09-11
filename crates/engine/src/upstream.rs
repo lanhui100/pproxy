@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 /// 远端代理服务器配置。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteProxyConfig {
-    pub server_url: String, // e.g. "https://access.ponyjob.top" 或 "http://192.168.1.100:8899"
+    pub server_url: String, // e.g. "https://access.example.com" 或 "http://192.168.1.100:8899"
     pub username: Option<String>,
     pub password: Option<String>,
 }

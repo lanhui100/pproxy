@@ -50,8 +50,8 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFBMzM1MTQ1NjZDNjE1RTAKUldUZ0ZjWm1SVkV6R3AxQWVtWmFOQW15NUtoTTR6Q3JXQ0hZZ1N5dVljN0tHaEsxQ2I5U3Q2WjgK",
       "endpoints": [
-        "https://dl.ponyjob.top/latest.json",
-        "https://access.ponyjob.top/dsk/latest.json"
+        "https://dl.example.com/latest.json",
+        "https://access.example.com/dsk/latest.json"
       ]
     }
   },

@@ -3,7 +3,7 @@
 # Pony Proxy (pproxy) — Linux 生产级一键自动化安装脚本
 # 支持架构: x86_64 (amd64), aarch64 (arm64)
 # 支持环境: Root / 非 Root 普通用户 / Docker 容器 / Systemd
-# 用法: curl -fsSL https://get.ponyjob.top/install.sh | bash
+# 用法: curl -fsSL https://get.example.com/install.sh | bash
 # ==============================================================================
 
 set -euo pipefail
@@ -91,7 +91,7 @@ else
 
     if ! curl -fSL $CURL_PROGRESS "$DOWNLOAD_URL" -o "$TMP_FILE"; then
         echo -e "\n${YELLOW}[WARN] 主下载源连接失败，尝试从 CDN 备用镜像源下载...${RESET}"
-        CDN_URL="https://get.ponyjob.top/dist/${BINARY_NAME}"
+        CDN_URL="https://get.example.com/dist/${BINARY_NAME}"
         if ! curl -fSL $CURL_PROGRESS "$CDN_URL" -o "$TMP_FILE"; then
             echo -e "${RED}[ERROR] 二进制下载失败，请检查网络连接或从 GitHub Releases 手动下载。${RESET}"
             exit 1

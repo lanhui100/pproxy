@@ -26,8 +26,8 @@ python3 scripts/antigravity/diag/cloudcode_probe.py
 
 # 2) 出口是否合规
 node scripts/antigravity/diag/gate_exitip.mjs                       # 经 CF gate
-node scripts/antigravity/diag/gate_exitip.mjs wss://vgate.ponyjob.top/api/ws
-curl -s https://gate.ponyjob.top/debug/egress -H "Authorization: Bearer $PPROXY_TUNNEL_TOKEN"
+node scripts/antigravity/diag/gate_exitip.mjs wss://vgate.example.com/api/ws
+curl -s https://gate.example.com/debug/egress -H "Authorization: Bearer $PPROXY_TUNNEL_TOKEN"
 
 # 3) 门禁是否生效（负向验证）
 python3 scripts/antigravity/diag/gate_bind_probe.py

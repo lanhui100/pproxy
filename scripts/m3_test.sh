@@ -82,7 +82,7 @@ cat > "$CONFIG" <<EOF
   "listen_port": 18896,
   "static_upstreams": [],
   "countries": [],
-  "worker_url": "https://edge.ponyjob.top",
+  "worker_url": "https://edge.example.com",
   "worker_secret": "ci-secret",
   "upstreams": {},
   "route_upstreams": {},

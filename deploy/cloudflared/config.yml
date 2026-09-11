@@ -11,8 +11,9 @@ protocol: http2
 metrics: 127.0.0.1:19099
 
 ingress:
+  # ⚠️ 开源中立占位：access.example.com 为占位域名，部署前改回你自己的入口域名。
   # 唯一业务规则：仅数据面，管理面 8900 结构性隔离（spec §4）
-  - hostname: access.ponyjob.top
+  - hostname: access.example.com
     service: http://127.0.0.1:8899
   # catch-all 兜底：未匹配域名一律 404
   - service: http_status:404

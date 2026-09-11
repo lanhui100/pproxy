@@ -37,7 +37,7 @@
 
 - **v0.1**：`if (h===backendHost||isPrivate(h)) DIRECT`，推导源不全、私网判定用后缀。
 - **v0.2**：
-  - 抽 `collect_bypass_hosts() -> BTreeSet<String>`：解析 `tunnel.json url`、`localStorage pony-backend-url`（前端启动时 `invoke('proxy_bypass_hosts')` 注入）、`tauri.conf.json plugins.updater.endpoints`，各取 `Url::parse().host_str().to_ascii_lowercase()` 去重，`access.ponyjob.top` 仅 fallback。
+  - 抽 `collect_bypass_hosts() -> BTreeSet<String>`：解析 `tunnel.json url`、`localStorage pony-backend-url`（前端启动时 `invoke('proxy_bypass_hosts')` 注入）、`tauri.conf.json plugins.updater.endpoints`，各取 `Url::parse().host_str().to_ascii_lowercase()` 去重，`access.example.com` 仅 fallback。
   - PAC 模板：`DIRECT` 优先级最高（`isPlainHostName / localhost / isPrivateHost / bypassSet` 均 `return 'DIRECT'` 后才进入 whitelist 循环）；私网走严格前缀/范围（`10.`, `192.168.`, `172.16-31.`, `127.`, `::1`, `fc00:`, `fe80:`），域名走 `h===e || h.endsWith('.'+e)`，IP 不走后缀；陷阱单测 `172.17.5.1 / 192.168.evil.com / notyoutube.com`。
   - 注入点归一化二次校验（regex `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$` 且 `len<=253`），拒绝 `_ * : / ? #`；bypass 列表仅信任 `tunnel.json` 解析出的 host，禁止 `localStorage` 任意拼串。
   - PAC 生成统一走 `serde_json::to_string` 转义（覆盖 `\b\f\n\r\t\u2028\u2029`），手写 replace 废弃；`generate_pac` 单测含 JS parse 校验。

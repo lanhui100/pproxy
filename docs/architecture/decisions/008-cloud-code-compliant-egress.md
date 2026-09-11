@@ -103,10 +103,10 @@ node deploy/cf-gate-worker/gate-policy.test.mjs           # 75 pass
 node deploy/cf-gate-worker/egress-geo.test.mjs            # 19 pass
 bash scripts/check-egress-parity.sh                       # 两侧 host 清单一致性
 # 出站地理探测自检（需 tunnel token）：返回本 Worker 出站 IP/国家码与是否合规
-curl -s https://gate.ponyjob.top/debug/egress \
+curl -s https://gate.example.com/debug/egress \
   -H "Authorization: Bearer <tunnel_token>"
 # 线上出口实测（只读，需 tunnel token）
-node deploy/vercel-gate-worker/smoke-test.mjs wss://vgate.ponyjob.top/api/ws \
+node deploy/vercel-gate-worker/smoke-test.mjs wss://vgate.example.com/api/ws \
   daily-cloudcode-pa.googleapis.com --token <tunnel_token>
 ```
 

@@ -36,9 +36,9 @@ impl Target {
 
     fn label(self) -> &'static str {
         match self {
-            Target::CfWorker => "CF Worker (edge.ponyjob.top)",
-            Target::Vercel => "Vercel 函数 (vedge.ponyjob.top)",
-            Target::Gate => "Gate Worker (gate.ponyjob.top)",
+            Target::CfWorker => "CF Worker (edge.example.com)",
+            Target::Vercel => "Vercel 函数 (vedge.example.com)",
+            Target::Gate => "Gate Worker (gate.example.com)",
             Target::All => "全部",
         }
     }
@@ -256,7 +256,7 @@ fn deploy_cf_worker(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String>
         return Err("CF Worker 部署失败".into());
     }
 
-    println!("✓ CF Worker 部署成功 (edge.ponyjob.top)");
+    println!("✓ CF Worker 部署成功 (edge.example.com)");
     Ok(EXIT_OK)
 }
 
@@ -347,7 +347,7 @@ fn deploy_vercel(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
         return Err("Vercel 部署失败".into());
     }
 
-    println!("✓ Vercel 函数部署成功 (vedge.ponyjob.top)");
+    println!("✓ Vercel 函数部署成功 (vedge.example.com)");
     Ok(EXIT_OK)
 }
 
@@ -455,18 +455,18 @@ fn deploy_gate(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
         eprintln!("│ npx wrangler deploy");
         eprintln!("│");
         eprintln!("│ 部署完成后在 Cloudflare Dashboard 绑定自定义域：");
-        eprintln!("│   gate.ponyjob.top → 此 Worker");
+        eprintln!("│   gate.example.com → 此 Worker");
         eprintln!("└─────────────────────────────────────────────────");
         return Err("Gate Worker 部署失败".into());
     }
 
-    println!("✓ Gate Worker 部署成功 (gate.ponyjob.top)");
+    println!("✓ Gate Worker 部署成功 (gate.example.com)");
     println!();
     println!("┌─ 后续配置 ──────────────────────────────────────");
     println!("│ 1. 在 Cloudflare Dashboard 绑定自定义域：");
-    println!("│    gate.ponyjob.top → 此 Worker");
+    println!("│    gate.example.com → 此 Worker");
     println!("│ 2. 更新 .pproxy.env（如需）：");
-    println!("│    PPROXY_TUNNEL_GATE_URL=wss://gate.ponyjob.top/ws");
+    println!("│    PPROXY_TUNNEL_GATE_URL=wss://gate.example.com/ws");
     println!("│    PPROXY_TUNNEL_TOKEN={}", crate::config::redact(&tunnel_token));
     println!("└─────────────────────────────────────────────────");
 

@@ -37,7 +37,7 @@
 
 ### vercel.app 域名返回 Login 页面
 - **原因**：项目 ssoProtection=all_except_custom_domains（vercel.app 域名有登录墙）
-- **解决**：始终使用自定义域名 vedge.ponyjob.top
+- **解决**：始终使用自定义域名 vedge.example.com
 
 ### 服务无响应
 ```bash
@@ -56,11 +56,11 @@ curl -s http://127.0.0.1:8899/     # 网关健康
 
 ```bash
 # 出口 IP 验证（经 Worker）——密钥从 .secrets.env 读取，禁止写入文档（2026-08 审计整改）
-curl -s "https://edge.ponyjob.top/get?url=https://httpbin.org/ip" -H "X-Proxy-Secret: $(source .secrets.env && echo $PROXY_SECRET)"
+curl -s "https://edge.example.com/get?url=https://httpbin.org/ip" -H "X-Proxy-Secret: $(source .secrets.env && echo $PROXY_SECRET)"
 # 期望: CF 出口 IP（104.22.x / 2a06:98c0::），不含真实家庭出口 IP（泄露检查）
 
 # 出口 IP 验证（经 Vercel）
-curl -s "https://vedge.ponyjob.top/api/proxy?url=https%3A%2F%2Fhttpbin.org%2Fip" -H "X-Proxy-Secret: $(source .secrets.env && echo $PROXY_SECRET)"
+curl -s "https://vedge.example.com/api/proxy?url=https%3A%2F%2Fhttpbin.org%2Fip" -H "X-Proxy-Secret: $(source .secrets.env && echo $PROXY_SECRET)"
 # 期望: 3.x.x.x（AWS us-east）
 ```
 
