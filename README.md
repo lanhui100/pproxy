@@ -2,6 +2,8 @@
 
 > [English](README.en.md) | 中文
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 自托管开发者出海代理与智能 API 网关：
 - **第一优先级（正向出海代理）**：基于 HTTP/HTTPS CONNECT 隧道与 WebSocket 待命连接池，提供 CLI 一键环境代理管理（`pproxy on / off / status / env`）、Windows 桌面端白名单代理与移动端/全平台 HTTP 节点接入，毫秒级出海。
 - **第二优先级（API 反向代理网关）**：LLM 优先的多上游智能分发（`/{token}/{route}/*`），按需代理，多节点出口（CF Worker / Vercel AWS IP），自带用量统计与 Token 鉴权。

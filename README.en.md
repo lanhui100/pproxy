@@ -2,6 +2,8 @@
 
 > [English](README.en.md) | [中文](README.md)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Self-hosted developer proxy for overseas access + intelligent API gateway:
 - **Priority 1 (forward proxy)**: HTTP/HTTPS CONNECT tunneling over a WebSocket standby connection pool — one-command environment proxy (`pproxy on / off / status / env`), Windows desktop whitelist proxy, and mobile/all-platform HTTP node access with millisecond-level latency.
 - **Priority 2 (reverse API gateway)**: LLM-first multi-upstream intelligent routing (`/{token}/{route}/*`), on-demand proxying, multi-node egress (CF Worker / Vercel AWS IPs), with usage accounting and token auth.
