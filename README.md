@@ -88,6 +88,56 @@ curl http://127.0.0.1:8900/api/health -H "Authorization: Bearer <admin_token>"
 | /openai | api.openai.com | Vercel |
 | /opencode | opencode.ai | Vercel |
 
+## 开源部署清单：占位符与凭据
+
+> 本仓库为**开源中立形态**：所有私有域名已占位为 `*.example.com`，真实凭据一律不入库
+> （`.secrets.env` / `config.json` / `.pproxy.env` / `*.env.local` / `.vercel/` 均被 `.gitignore` 忽略）。
+> 克隆/自部署前，按下表逐项填写。**未改占位符会导致部署失败；未注凭据会导致边缘 fail-closed（403/401）。**
+
+### 1. 部署前必须改回真实域名的文件
+
+| 文件 | 占位位置 | 不改的后果 |
+|---|---|---|
+| `deploy/cf-worker/wrangler.toml` | `routes` 的 `pattern` | `wrangler deploy` 失败 |
+| `deploy/cf-gate-worker/wrangler.toml` | 注释与绑定域名 | gate 隧道桥域名错误 |
+| `deploy/cloudflared/config.yml` | `ingress.hostname` | CF Tunnel 入口域名错误 |
+| `desktop/src-tauri/tauri.conf.json` | updater `endpoints` | 桌面端无法自动更新 |
+| `scripts/install.sh` | CDN `get.example.com`、`GITHUB_RELEASE_BASE` | 一键安装下载源 404 |
+| `scripts/publish-desktop-dist.sh` / `sync-desktop-release.sh` | `dl` / `access` 分发地址 | 桌面版发布/同步失败 |
+| `scripts/m4_test.sh` | `PUBLIC_URL` | 生产冒烟测试打错端点 |
+
+### 2. 必填凭据（环境变量/密钥注入，勿写进提交）
+
+| 凭据 | 注入位置 | 说明 |
+|---|---|---|
+| `PROXY_SECRET` | CF Worker `wrangler secret put PROXY_SECRET`；Vercel env `PROXY_SECRET` | edge/vedge 共享上游密钥；缺失即 500 fail-closed |
+| `GATE_TUNNEL_TOKEN` → `TUNNEL_TOKEN_HASH` | CF Gate Worker `wrangler secret put TUNNEL_TOKEN_HASH`；Vercel env `TUNNEL_TOKEN_HASH`；VPS 版 `.pony-gate.env` | 隧道 Bearer 鉴权；`TUNNEL_TOKEN_HASH = sha256(GATE_TUNNEL_TOKEN)`，**三端必须同源**，轮换后须同步重录 |
+| `VERCEL_TOKEN` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID_EDGE` / `VERCEL_PROJECT_ID_GATE` | GitHub Actions secrets | 供 `.github/workflows/deploy-vercel.yml` gitOps 部署 |
+
+### 3. 可用环境变量覆盖的默认值（无需改代码）
+
+| 变量 | 作用 |
+|---|---|
+| `PPROXY_EDGE_URL` / `PPROXY_VERCEL_URL` | `pproxy serve` 的上游出口端点（默认占位） |
+| `PPROXY_DOWNLOAD_BASE` | `install.sh` 的二进制下载源（默认 GitHub Releases） |
+| `PONY_DIST_URL` | CLI 自更新（`pproxy upgrade`）分发源 |
+| `PPROXY_DESKTOP_DIST_DIR` | `/dsk/` 静态分发目录（默认 `/opt/pony-desktop-releases`） |
+| `PPROXY_CONFIG` | server 配置文件路径（默认 `/etc/pproxy/config.json`） |
+| `PPROXY_TUNNEL_GATE_URL` / `PPROXY_TUNNEL_TOKEN` / `PPROXY_TUNNEL_ALLOWLIST` | 隧道端点/令牌/白名单（server 侧 `.pproxy.env`） |
+| `PPROXY_LISTEN_ADMIN` | 管理面监听地址（tailnet 重绑，systemd drop-in） |
+| `PPROXY_SERVICE_USER` | `m4_test.sh` 断言的服务运行用户（默认 `pproxy`） |
+
+### 4. 桌面端配置
+
+桌面端（Tauri）无需改源码：在「设置 → 方案 A」粘贴**授权码**（`pony-gate://` 口令或裸 token，口令自带端点）即可
+开通隧道；端点在客户端侧持久化，代码内的回退默认端点仅为占位。
+
+### 5. 凭据卫生（开源红线）
+
+- 真实值只放不入库位置：`.secrets.env`（chmod 600）、`config.json`、`.pproxy.env`、`*.env.local`、`.vercel/`。
+- 轮换 `GATE_TUNNEL_TOKEN` 后必须**同步三端 `TUNNEL_TOKEN_HASH`**（CF secret / Vercel env / VPS env）并让桌面端重录授权码，否则隧道 401。
+- 本仓库 git 历史已做凭据清洗（filter-repo）；**后续提交严禁引入任何真实 token / 密钥字面量**。
+
 ## 文档索引
 
 | 文档 | 内容 |
