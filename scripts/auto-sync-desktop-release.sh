@@ -13,7 +13,7 @@ git fetch --tags --quiet origin
 NEWEST=$(git tag -l 'desktop-v*' | sort -V | tail -1)
 [[ -n "$NEWEST" ]] || { echo "[auto-sync] 无 desktop-v* tag，跳过"; exit 0; }
 
-DIST="${PPROXY_DESKTOP_DIST_DIR:-/home/USER/pony-desktop-releases}"
+DIST="${PPROXY_DESKTOP_DIST_DIR:-$HOME/pony-desktop-releases}"
 MARKER="$DIST/.synced-tag"
 
 if [[ -f "$MARKER" && "$(cat "$MARKER")" == "$NEWEST" ]]; then

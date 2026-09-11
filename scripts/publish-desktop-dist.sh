@@ -4,7 +4,7 @@
 # WHY：桌面端 updater 需要匿名、国内可达的静态分发源。私仓 GitHub 直链 404 且
 # objects.githubusercontent.com 大陆不可达；旧方案（dev 主机 pproxy-server /dsk/，
 # access.ponyjob.top）依赖 dev 在线，2026-08-30 曾因服务被停导致更新源 502 达 23h。
-# 本脚本将分发迁到 Vercel（团队 pony7 / 项目 pony-dsk），GitHub Release 仍作归档源。
+# 本脚本将分发迁到 Vercel（团队/项目经 VERCEL_SCOPE 或 .vercel link 指定），GitHub Release 仍作归档源。
 #
 # 用法：
 #   VERCEL_TOKEN=<token> scripts/publish-desktop-dist.sh <bundle-dir> <latest.json>

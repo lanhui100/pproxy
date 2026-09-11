@@ -62,7 +62,7 @@
 ## 配置
 
 - `config.json`：监听地址、路由表、上游（worker_url + upstreams）、密钥
-- `systemd/pproxy.service`：User=dm，Restart=always，RUST_LOG=info
+- `systemd/pproxy.service`：User=pproxy，Restart=always，RUST_LOG=info
 - 凭据：`.secrets.env`（600），运行时不依赖
 
 ## 已知限制与运行边界

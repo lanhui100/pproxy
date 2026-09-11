@@ -38,15 +38,15 @@ prod_guard
 echo "[步骤 1] pony-tunnel 服务状态"
 expect_eq "$(systemctl is-active pony-tunnel.service)" "active" "pony-tunnel active"
 expect_eq "$(systemctl is-enabled pony-tunnel.service)" "enabled" "pony-tunnel enabled（开机自启）"
-expect_eq "$(systemctl show -p User --value pony-tunnel.service)" "dm" "unit 以 dm 运行（R2：防 service install 覆盖降级）"
+expect_eq "$(systemctl show -p User --value pony-tunnel.service)" "${PPROXY_SERVICE_USER:-pproxy}" "unit 以配置用户运行（R2：防 service install 覆盖降级）"
 
 # ---- 步骤 2：凭据权限（R2）----
-echo "[步骤 2] 凭据链权限（dm 属主 + 仅属主可读）"
+echo "[步骤 2] 凭据链权限（属主 + 仅属主可读）"
 for f in "$HOME/.cloudflared/cert.pem" "$HOME"/.cloudflared/*.json "$HOME/.cloudflared/config.yml"; do
   PERM="$(stat -c '%U:%a' "$f")"
   case "$PERM" in
-    dm:600|dm:400) PASS=$((PASS + 1)); echo "  PASS: $f = $PERM" ;;
-    *) echo "  FAIL: $f 权限异常 = $PERM（应为 dm/600 或更严）"; exit 1 ;;
+    *:600|*:400) PASS=$((PASS + 1)); echo "  PASS: $f = $PERM" ;;
+    *) echo "  FAIL: $f 权限异常 = $PERM（应为 <用户>/600 或更严）"; exit 1 ;;
   esac
 done
 

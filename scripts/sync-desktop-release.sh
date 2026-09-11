@@ -3,11 +3,11 @@
 # 供 pproxy /dsk/ 端点向 tailnet 内的桌面端提供自更新（M5 拓展）。
 #
 # 用法：scripts/sync-desktop-release.sh desktop-v0.2.0
-# 前提：gh 已认证（lanhui100）；分发目录默认 /home/USER/pony-desktop-releases
+# 前提：gh 已认证（lanhui100）；分发目录默认 $HOME/pony-desktop-releases
 set -euo pipefail
 
 TAG="${1:?usage: $0 <tag> 例: desktop-v0.2.0}"
-DEST="${PPROXY_DESKTOP_DIST_DIR:-/home/USER/pony-desktop-releases}"
+DEST="${PPROXY_DESKTOP_DIST_DIR:-$HOME/pony-desktop-releases}"
 
 [[ "$TAG" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag 形如 desktop-v0.2.0"; exit 2; }
 

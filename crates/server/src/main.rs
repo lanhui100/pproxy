@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // 1. 环境变量覆盖（PPROXY_DB 在 core::default_db_path 内解析）
-    let config_path = std::env::var("PPROXY_CONFIG").unwrap_or_else(|_| "/home/USER/pproxy/config.json".into());
+    let config_path = std::env::var("PPROXY_CONFIG").unwrap_or_else(|_| "/etc/pproxy/config.json".into());
     let listen_data = std::env::var("PPROXY_LISTEN_DATA").unwrap_or_else(|_| String::new());
     let listen_admin = std::env::var("PPROXY_LISTEN_ADMIN").unwrap_or_else(|_| "127.0.0.1:8900".into());
 

@@ -78,7 +78,7 @@ Got an error: token exchange failed: Post "https://oauth2.googleapis.com/token":
 | 隧道 token 部署链 | `crates/cli/src/cmd/deploy.rs:393-453`（读取既有 token 并设置 worker `TUNNEL_TOKEN_HASH`，打印 `PPROXY_TUNNEL_GATE_URL`/`PPROXY_TUNNEL_TOKEN`；不生成 token） | 复用变量命名；token 溯源见 §5 |
 | 依赖 | `crates/server/Cargo.toml` 已有 workspace `futures`（SinkExt/StreamExt/Split* 可直接用）；**仅缺 `tokio-tungstenite 0.24 (rustls-tls-webpki-roots)`**（与 axum 0.7/hyper 1 同基于 http 1.x，无版本冲突） | T1 新增 |
 | doctor | `crates/cli/src/cmd/doctor.rs`（4 段探测：health/routes/route tests/data plane） | 阶段 2 追加零机密隧道探针段（§3.7） |
-| 服务形态 | `systemd/pproxy.service`：`EnvironmentFile=/home/USER/pproxy/.pproxy.env`（User=dm）、`ExecStart=/home/USER/pproxy/target/release/pproxy-server`；dev 另有 drop-in `override.conf`（PPROXY_LISTEN_ADMIN） | T3 部署 = dev 上 `cargo build --release` + restart；回滚见 §5 |
+| 服务形态 | `systemd/pproxy.service`：`EnvironmentFile=/home/USER/pproxy/.pproxy.env`（User=pproxy）、`ExecStart=/home/USER/pproxy/target/release/pproxy-server`；dev 另有 drop-in `override.conf`（PPROXY_LISTEN_ADMIN） | T3 部署 = dev 上 `cargo build --release` + restart；回滚见 §5 |
 
 ## 3. 方案设计
 
@@ -128,7 +128,7 @@ crates/server 网关 127.0.0.1:8899（hyper http1, header_read_timeout=30s 既�
 - **本方案新增数据面消费者**：`connect.rs::TunnelConfig::from_env` → CONNECT 隧道。
 
 在 dev 上设置这组 env（已设置，见 §0 预核查）即同时激活两者——此耦合为既成事实，非本 spec 引入；spec 义务是记录并保证两者校验独立（数据面额外强制 wss:// 与 allowlist 非空才启用）。
-载体：`~/pproxy/.pproxy.env`（User=dm 属主、600、systemd `EnvironmentFile` 已挂载）；**机密只进该文件，systemd drop-in 只放非机密变量**（防 644 drop-in 泄 token）。config.json 零改动。
+载体：`~/pproxy/.pproxy.env`（User=pproxy 属主、600、systemd `EnvironmentFile` 已挂载）；**机密只进该文件，systemd drop-in 只放非机密变量**（防 644 drop-in 泄 token）。config.json 零改动。
 
 ### 3.5 安全语义（v0.2 修订）
 

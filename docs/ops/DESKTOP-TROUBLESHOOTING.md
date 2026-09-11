@@ -668,7 +668,7 @@ failover 永远轮不到后续端点，每个请求卡满整条建连循环。�
 
 ### 收尾部署记录（方案 B：Vercel，2026-08-30 已执行完毕）
 
-1. **项目**：`pony7/pony-gate-node`（Vercel CLI 59，token 取自 dev 主机 `~/pproxy/.pproxy.env`
+1. **项目**：`pony-gate-node`（Vercel CLI 59，token 取自 dev 主机 `~/pproxy/.pproxy.env`
    的 `PPROXY_VERCEL_TOKEN`；`vercel projects add` → `vercel link` → `env add TUNNEL_TOKEN_HASH production` →
    `vercel --prod --yes`，部署 Ready）。
 2. **令牌散列坑**：dev 主机 `.pproxy.env` 里的 `PPROXY_TUNNEL_TOKEN` 是**轮换前旧令牌**，

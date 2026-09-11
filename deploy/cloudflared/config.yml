@@ -6,7 +6,7 @@
 # metrics 显式绑回环：locally-managed 默认随机端口不可接受（F11）；19099 避开
 # 业务端口与 m1-m3 测试段 18893-18899
 tunnel: <TUNNEL_ID>
-credentials-file: /home/USER/.cloudflared/<TUNNEL_ID>.json
+credentials-file: /home/pproxy/.cloudflared/<TUNNEL_ID>.json
 protocol: http2
 metrics: 127.0.0.1:19099
 

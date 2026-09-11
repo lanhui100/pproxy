@@ -1,5 +1,5 @@
 //! 桌面端更新分发（M5 拓展，用户裁决 2026-08-22）：
-//! GET /dsk/:filename —— 从 PPROXY_DESKTOP_DIST_DIR（默认 /home/USER/pony-desktop-releases）
+//! GET /dsk/:filename —— 从 PPROXY_DESKTOP_DIST_DIR（默认 /opt/pony-desktop-releases）
 //! 提供最新 release 的 latest.json / 安装包 / .sig 签名三件套，
 //! 供 Tauri updater 在 tailnet 内自更新（避免直连 GitHub 的国内网络问题）。
 //!
@@ -16,7 +16,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
-const DEFAULT_DIST_DIR: &str = "/home/USER/pony-desktop-releases";
+const DEFAULT_DIST_DIR: &str = "/opt/pony-desktop-releases";
 const MAX_NAME_LEN: usize = 100;
 
 fn dist_dir() -> PathBuf {
@@ -82,7 +82,7 @@ pub(crate) async fn dsk_file_public(
         return (StatusCode::BAD_REQUEST, "invalid filename").into_response()
     };
     let dir = std::env::var("PPROXY_DESKTOP_DIST_DIR")
-        .unwrap_or_else(|_| "/home/USER/pony-desktop-releases".into());
+        .unwrap_or_else(|_| "/opt/pony-desktop-releases".into());
     match tokio::fs::read(std::path::PathBuf::from(dir).join(&name)).await {
         Ok(bytes) => {
             let ct = if name.ends_with(".json") { "application/json" }

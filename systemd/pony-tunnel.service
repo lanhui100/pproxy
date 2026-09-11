@@ -13,8 +13,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=dm
-ExecStart=/usr/local/bin/cloudflared tunnel --config /home/USER/.cloudflared/config.yml run pony-access
+User=pproxy
+ExecStart=/usr/local/bin/cloudflared tunnel --config /home/pproxy/.cloudflared/config.yml run pony-access
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

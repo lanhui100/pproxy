@@ -107,7 +107,7 @@ sudo systemctl restart pproxy
 | 隧道 | `pony-access`（UUID 见 `~/.cloudflared/config.yml`） |
 | 凭据 | `~/.cloudflared/`（cert.pem + tunnel UUID.json + config.yml，均 dm/600，不入库） |
 | 配置模板 | `deploy/cloudflared/config.yml`（占位符 `<TUNNEL_ID>`） |
-| systemd | `systemd/pony-tunnel.service` → `/etc/systemd/system/`，User=dm |
+| systemd | `systemd/pony-tunnel.service` → `/etc/systemd/system/`，User=pproxy |
 | 公网入口 | `https://access.ponyjob.top/{token}/{route}/...` |
 | metrics | `127.0.0.1:19099/metrics`（只读观测） |
 

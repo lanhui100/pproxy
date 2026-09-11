@@ -42,7 +42,7 @@ Cloudflare 边缘（TLS 终结，免费层基础防护）
    │ CF Tunnel 出站长连接——协议钉死 http2（TCP），不用默认 QUIC/UDP：
    │ 大陆运营商 UDP 劣化正是否决 Tailscale 的同源教训（R3）
    ▼
-pony-tunnel.service (cloudflared, User=dm, metrics 绑 127.0.0.1:19099)
+pony-tunnel.service (cloudflared, User=pproxy, metrics 绑 127.0.0.1:19099)
    │ http://127.0.0.1:8899（ingress 唯一规则）
    ▼
 pproxy-server 数据面（行为与局域网完全一致）
@@ -62,9 +62,9 @@ pproxy-server 数据面（行为与局域网完全一致）
 | tunnel 凭据 | `~/.cloudflared/tunnel-pony-access.json` | `cloudflared tunnel create pony-access` 生成（0600，**永不入库**） |
 | ingress 配置 | `~/.cloudflared/config.yml` ← 模板 `deploy/cloudflared/config.yml` | 唯一规则 access.ponyjob.top → `http://127.0.0.1:8899`；`protocol: http2`；`metrics: 127.0.0.1:19099`（避开业务端口与 m1-m3 测试段） |
 | DNS 路由 | CNAME `<tunnel-id>.cfargotunnel.com` | `tunnel route dns pony-access access.ponyjob.top`；**前置预检**：dig 该域名须为空 |
-| systemd unit | `systemd/pony-tunnel.service` ← `/etc/systemd/system/` | 规格：User=dm、After/Wants=network-online.target、Restart=always、RestartSec=5、NoNewPrivileges=true、ProtectSystem=full、ProtectHome=read-only、PrivateTmp=true |
+| systemd unit | `systemd/pony-tunnel.service` ← `/etc/systemd/system/` | 规格：User=pproxy、After/Wants=network-online.target、Restart=always、RestartSec=5、NoNewPrivileges=true、ProtectSystem=full、ProtectHome=read-only、PrivateTmp=true |
 
-**执行身份纪律（R2）**：sudo 仅限 apt 安装与 unit 拷贝两步；login/create/route dns 渲染一律 **dm 身份**执行——sudo 执行会把 `~/.cloudflared` 全部生成 root 属主，unit(User=dm) 读 0600 root 凭据启动即崩且表象是无限重启循环而非权限报错。部署后 `stat` 断言属主 dm 权限 600。
+**执行身份纪律（R2）**：sudo 仅限 apt 安装与 unit 拷贝两步；login/create/route dns 渲染一律 **dm 身份**执行——sudo 执行会把 `~/.cloudflared` 全部生成 root 属主，unit(User=pproxy) 读 0600 root 凭据启动即崩且表象是无限重启循环而非权限报错。部署后 `stat` 断言属主 dm 权限 600。
 
 **用户配合点（凭据缺口，类比 M3-R2）**：`cloudflared tunnel login` 浏览器授权一次；或提供 API Token（Zone.DNS:Edit + Account.Cloudflare Tunnel:Edit）。二选一，实现开始前提供。
 

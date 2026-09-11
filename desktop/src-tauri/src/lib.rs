@@ -435,12 +435,12 @@ const TUNNEL_FILE: &str = "tunnel.json";
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（见 deploy/cf-gate-worker/wrangler.toml）。
 /// 注意：与 HTTP 数据面网关（edge.ponyjob.top，cf-worker）不是同一域名，切勿混用。
 const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
-/// 默认双 gate 端点（Vercel iad1 美区主 + CF 低延迟兜底）：裸 token 保存且无端点配置时自动补齐。
+/// 默认双 gate 端点（主备 failover）：裸 token 保存且无端点配置时自动补齐。
 const DEFAULT_TUNNEL_URLS: &str = "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws";
 
 /// 旧配置迁移：早期版本把 HTTP 网关域名（edge.ponyjob.top）误当作 WS gate 端点，
 /// 且曾缺 /ws 路径。读到这类值一律映射到正确的 gate 端点（防止拨测超时/隧道连接失败）。
-/// 同时将旧版 CF 在前的默认端点自动迁移为 Vercel 美区优先，确保 Google/AI API 稳定出网。
+/// 同时将旧版 CF 在前的默认端点自动迁移为主备双端点，确保 Google/AI API 稳定出网。
 /// 单一 CF 端点（纯 gate.ponyjob.top）同样补齐默认双端点，避免缺 Vercel 兜底（P2-4）。
 fn migrate_tunnel_url(url: &str) -> String {
     let t = url.trim();
@@ -1226,7 +1226,7 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
     // 方案 A：Direct 独立中继隧道模式（cf / vercel）
     let gate = match iface.as_str() {
         "cf" => GATE_WS_URL,
-        // Vercel gate（deploy/vercel-gate-worker，挂载 /api/ws；vgate CNAME → cname.vercel.com）
+        // Vercel gate（deploy/vercel-gate-worker，挂载 /api/ws）
         "vercel" => "wss://vgate.ponyjob.top/api/ws",
         _ => return Err("未知接口：仅支持 cf / vercel / chained".into()),
     };
@@ -1670,7 +1670,7 @@ fn proxy_get_current_config() -> serde_json::Value {
 }
 
 fn configure_direct_tunnel(_worker_url: &str, secret: &str) -> Result<(), String> {
-    // gate 隧道端点是产品基础设施（gate.ponyjob.top/ws，见 deploy/cf-gate-worker/wrangler.toml）。
+    // gate 隧道端点是产品基础设施（gate.ponyjob.top/ws）。
     // worker_url 是 HTTP 数据面出口地址（edge.ponyjob.top），与 WS 隧道桥不是同一域名——
     // 曾用 worker_url 推导隧道端点导致 wss://edge.ponyjob.top[/ws] 拨测超时（CF 层 403），已废弃推导。
     let ws_url = GATE_WS_URL.to_string();

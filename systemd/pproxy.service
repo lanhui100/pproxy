@@ -5,20 +5,20 @@ Wants=network-online.target
 
 [Service]
 # M3-R2/M5：监控凭据经环境文件注入（600，不入库）
-EnvironmentFile=/home/USER/pproxy/.pproxy.env
+EnvironmentFile=/opt/pproxy/.pproxy.env
 # ADR-007：管理面走 tailnet 承载远程管理（数据面公网入口仍为 CF Tunnel）
 # 管理面地址不入库：由部署机的 systemd drop-in 注入实际值
 # （/etc/systemd/system/pproxy.service.d/override.conf →
 #   Environment=PPROXY_LISTEN_ADMIN=<TAILNET_IP>:8900）；
 # 未注入时应用按缺省回落 127.0.0.1:8900
 Type=simple
-User=dm
-WorkingDirectory=/home/USER/pproxy
-ExecStart=/home/USER/pproxy/target/release/pproxy-server
+User=pproxy
+WorkingDirectory=/opt/pproxy
+ExecStart=/opt/pproxy/target/release/pproxy-server
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=info
-Environment=PPROXY_CONFIG=/home/USER/pproxy/config.json
+Environment=PPROXY_CONFIG=/opt/pproxy/config.json
 
 [Install]
 WantedBy=multi-user.target

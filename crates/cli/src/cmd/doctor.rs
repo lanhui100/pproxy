@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn host_of_extracts_host() {
-        assert_eq!(host_of("http://<TAILNET_IP>:8900"), Some("<TAILNET_IP>"));
+        assert_eq!(host_of("http://192.0.2.1:8900"), Some("192.0.2.1"));
         assert_eq!(host_of("http://127.0.0.1:8900"), Some("127.0.0.1"));
         assert_eq!(host_of("https://localhost:8900"), Some("localhost"));
         assert_eq!(host_of("http://localhost"), Some("localhost"));
@@ -537,7 +537,7 @@ mod tests {
         for h in ["127.0.0.1", "localhost", "::1", "[::1]"] {
             assert!(is_loopback_host(h), "{h} 应判为回环");
         }
-        for h in ["<TAILNET_IP>", "example.com", "gate.ponyjob.top"] {
+        for h in ["192.0.2.1", "example.com", "gate.ponyjob.top"] {
             assert!(!is_loopback_host(h), "{h} 不应判为回环");
         }
     }
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn loopback_fallback_non_loopback_returns_loopback() {
         assert_eq!(
-            loopback_fallback("http://<TAILNET_IP>:8899"),
+            loopback_fallback("http://192.0.2.1:8899"),
             Some("http://127.0.0.1:8899".to_string())
         );
         assert_eq!(
@@ -575,8 +575,8 @@ mod tests {
     #[test]
     fn derive_from_base_keeps_behavior() {
         assert_eq!(
-            derive_from_base("http://<TAILNET_IP>:8900"),
-            Some("http://<TAILNET_IP>:8899".to_string())
+            derive_from_base("http://192.0.2.1:8900"),
+            Some("http://192.0.2.1:8899".to_string())
         );
         assert_eq!(
             derive_from_base("http://127.0.0.1:8900"),
