@@ -53,8 +53,8 @@ jobs:
         working-directory: /tmp/vdeploy/deploy/vercel
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: team_qvTJpS67DKENfSbk8buPpQCW
-          VERCEL_PROJECT_ID: prj_cped4WrkVRFNoHVCO3rPt1i6hdKF
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_EDGE }}
         run: npx -y vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"
 
   deploy-gate:
@@ -94,6 +94,6 @@ jobs:
         working-directory: /tmp/vgdeploy/deploy/vercel-gate-worker
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: team_qvTJpS67DKENfSbk8buPpQCW
-          VERCEL_PROJECT_ID: prj_4CmjEiW0WOyDQfVUfvEi49c7Plx9
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_GATE }}
         run: npx -y vercel@latest deploy --prod --yes --token "$VERCEL_TOKEN"

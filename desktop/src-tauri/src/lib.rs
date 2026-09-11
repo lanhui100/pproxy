@@ -1727,7 +1727,14 @@ fn proxy_import_sync(sync_uri: String, passphrase: Option<String>) -> Result<ser
     if raw.starts_with("pproxy-sync://") {
         use base64::Engine as _;
         let encoded = raw.strip_prefix("pproxy-sync://").unwrap_or(raw);
-        let pass = passphrase.as_deref().unwrap_or("pony-proxy-universal-sync-salt-v1");
+        // 开源安全整改（2026-09 审计）：移除公开默认口令。pproxy-sync:// 口令由导出方
+        // 生成（CLI 无口令导出时会生成 128-bit 随机 Passkey），导入必须显式提供，禁止静态回退。
+        let pass = passphrase
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| {
+                "导入 pproxy-sync:// 口令需要同步口令（导出时生成的随机 Passkey），请在口令输入框填写".to_string()
+            })?;
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
             .or_else(|_| base64::engine::general_purpose::STANDARD.decode(encoded))

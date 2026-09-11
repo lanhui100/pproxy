@@ -46,3 +46,9 @@ deploy/render-gate/node_modules/
 
 # AI 工具本地状态（不入库）
 .workbuddy/
+
+# 开源前补充：本机运行时快照与本地 LLM 进程文件（git add . 防误提交）
+telemetry-snapshot.json
+ponyllm.pid
+ponyllm-serve.log
+ponyllm.toml.bak

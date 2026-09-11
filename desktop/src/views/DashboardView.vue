@@ -56,6 +56,7 @@ const setupTab = ref<'direct' | 'chained'>('direct')
 const cfToken = ref('')
 const GATE_INPUT_TIP = '用于开通出口通道。支持粘贴 pony-gate:// 口令或授权码。由服务管理员提供。'
 const syncUriInput = ref('')
+const syncPassphrase = ref('')
 const remoteHost = ref('')
 const remoteUser = ref('')
 const remotePass = ref('')
@@ -624,6 +625,7 @@ async function submitImportOrChained() {
         const { invoke } = await import('@tauri-apps/api/core')
         const res = (await invoke('proxy_import_sync', {
           syncUri: syncUriInput.value.trim(),
+          passphrase: syncPassphrase.value.trim() || null,
         })) as any
         toast.success(res.message || '导入成功！')
       } else {
@@ -801,6 +803,13 @@ async function submitImportOrChained() {
               <Input
                 v-model="syncUriInput"
                 placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
+                class="font-mono text-xs"
+                @keyup.enter="submitImportOrChained"
+              />
+              <Input
+                v-model="syncPassphrase"
+                type="password"
+                placeholder="同步口令（pproxy-sync:// 导出时生成，可留空）"
                 class="font-mono text-xs"
                 @keyup.enter="submitImportOrChained"
               />

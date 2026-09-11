@@ -522,10 +522,10 @@ mod tests {
             sha256_hex("hello"),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
-        // gate tunnel token from .secrets.env
+        // 开源安全整改：合成测试向量（勿放真实 token）
         assert_eq!(
-            sha256_hex("gate_<REDACTED>"),
-            "<REDACTED_SHA256>"
+            sha256_hex("gate_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "134581fb8dacdff0775c40219f89deabb59af765c14d3fe55d9e65502b2c8800"
         );
     }
 

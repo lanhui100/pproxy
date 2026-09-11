@@ -760,10 +760,10 @@ Antigravity CLI（`agy`）执行任务时频繁中断报错 `⚠ Agent execution
 
 **落地修复**：
 1. **Vercel Gate 钉死美区物理执行算力**：
-   - 在 [`deploy/vercel-gate-worker/vercel.json`](file:///D:/Documents/pproxy/deploy/vercel-gate-worker/vercel.json) 显式配置 `"regions": ["iad1"]`（AWS 美东弗吉尼亚数据中心），确保所有出网 TCP 具有合规的原生美国 IP。
+   - 在 [`deploy/vercel-gate-worker/vercel.json`](deploy/vercel-gate-worker/vercel.json) 显式配置 `"regions": ["iad1"]`（AWS 美东弗吉尼亚数据中心），确保所有出网 TCP 具有合规的原生美国 IP。
    - 生产环境绑定自定义域名 [`vgate.ponyjob.top`](https://vgate.ponyjob.top)。
 2. **三端 SHA-256 鉴权令牌对齐**：
-   - 统一使用 SHA-256 散列值 `<REDACTED_SHA256>`。
+   - 统一使用当前 `GATE_TUNNEL_TOKEN` 的 SHA-256 散列值（轮换后重新计算，散列值本身勿写入公开文档）。
    - 同步注入到 Cloudflare Worker (`gate.ponyjob.top`) 密钥、Vercel 环境变量 (`TUNNEL_TOKEN_HASH`) 以及本地 Windows 凭据管理器 (`tunnel_token.pony-desktop`)。
 3. **双网关 Failover 协同策略**：
    - 客户端配置多端点：`wss://gate.ponyjob.top/ws,wss://vgate.ponyjob.top/api/ws`。

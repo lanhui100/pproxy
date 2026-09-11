@@ -466,6 +466,7 @@ const isEditingRemote = ref(false)
 const isSaving = ref(false)
 
 const importSyncUri = ref('')
+const importSyncPassphrase = ref('')
 const isImportingSync = ref(false)
 
 function startEditRemote(): void {
@@ -567,7 +568,10 @@ async function doImportSync(): Promise<void> {
   try {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core')
-      const res = (await invoke('proxy_import_sync', { syncUri: uri })) as any
+      const res = (await invoke('proxy_import_sync', {
+        syncUri: uri,
+        passphrase: importSyncPassphrase.value.trim() || null,
+      })) as any
       toast.success(res.message || '导入成功')
       importSyncUri.value = ''
       isImportingSync.value = false
@@ -937,6 +941,14 @@ onMounted(async () => {
                   ref="importSyncInputRef"
                   v-model="importSyncUri"
                   placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
+                  class="font-mono text-xs h-8 bg-background"
+                  @keyup.enter="doImportSync"
+                  @keydown.esc="cancelImportSync"
+                />
+                <Input
+                  v-model="importSyncPassphrase"
+                  type="password"
+                  placeholder="同步口令（可选，pproxy-sync:// 导出时生成）"
                   class="font-mono text-xs h-8 bg-background"
                   @keyup.enter="doImportSync"
                   @keydown.esc="cancelImportSync"
