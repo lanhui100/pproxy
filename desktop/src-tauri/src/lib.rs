@@ -514,6 +514,45 @@ fn tunnel_token_fingerprint() -> Option<String> {
   Some(hex::encode(&h[..4]))
 }
 
+/// 从配置或默认端点中解析指定接口 (cf / vercel) 的 gate URL。
+fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
+    let url_raw = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(migrate_tunnel_url))
+        .unwrap_or_else(|| DEFAULT_TUNNEL_URLS.to_string());
+    let urls: Vec<String> = url_raw.split([',', ';', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+    match iface {
+        "vercel" => urls.into_iter().find(|u| u.contains("vercel") || u.contains("vgate")).or_else(|| Some("wss://vgate.example.com/api/ws".to_string())),
+        "cf" => urls.into_iter().find(|u| !u.contains("vercel") && !u.contains("vgate")).or_else(|| Some(GATE_WS_URL.to_string())),
+        _ => None,
+    }
+}
+
+/// 从 ws/wss/http/https URL 提取 host:port（缺省端口根据 scheme 设为 443 或 80）。
+fn extract_host_port_from_url(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    let (scheme, without_scheme) = if let Some(rest) = s.strip_prefix("wss://") {
+        ("wss", rest)
+    } else if let Some(rest) = s.strip_prefix("ws://") {
+        ("ws", rest)
+    } else if let Some(rest) = s.strip_prefix("https://") {
+        ("https", rest)
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        ("http", rest)
+    } else {
+        ("", s)
+    };
+    let host_part = without_scheme.split('/').next()?.split('?').next()?.split('#').next()?;
+    if host_part.is_empty() { return None; }
+    if host_part.contains(':') {
+        Some(host_part.to_string())
+    } else {
+        let default_port = if scheme == "ws" || scheme == "http" { 80 } else { 443 };
+        Some(format!("{host_part}:{default_port}"))
+    }
+}
+
 /// 解析 pony-gate:// 连接口令：base64url(JSON {"u": url, "t": token})。
 /// 长期有效、无加密（机密性与 token 等同）；与一次性迁移用的 pproxy-sync:// 定位不同。
 fn parse_connect_code(code: &str) -> Result<(String, String), String> {
@@ -1097,11 +1136,8 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
     }
 
     // 方案 A：Direct 独立中继隧道模式（cf / vercel）
-    let gate = match iface.as_str() {
-        "cf" => GATE_WS_URL,
-        "vercel" => "wss://vgate.example.com/api/ws",
-        _ => return Err("未知接口：仅支持 cf / vercel / chained".into()),
-    };
+    let gate = resolve_gate_url_for_iface(&iface)
+        .ok_or_else(|| "未知接口：仅支持 cf / vercel / chained".to_string())?;
 
     let token = match cred_get_impl(CREDENTIAL_USER_TUNNEL) {
         Ok(t) => t,
@@ -1116,7 +1152,7 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
         }
     };
     if let Some(ref tok) = token {
-        match proxy::engine_tunnel::probe_gate_rtt(gate, tok).await {
+        match proxy::engine_tunnel::probe_gate_rtt(&gate, tok).await {
             Ok(ms) => {
                 return Ok(serde_json::json!({
                     "iface": iface,
@@ -1136,11 +1172,10 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
     }
 
     // 未配置授权码时，按 TCP 握手 RTT 测试节点连通性
-    let host_port = match iface.as_str() {
-        "cf" => "gate.example.com:443",
-        "vercel" => "vgate.example.com:443",
-        _ => return Err("未知接口".into()),
-    };
+    let host_port = extract_host_port_from_url(&gate).unwrap_or_else(|| match iface.as_str() {
+        "vercel" => "vgate.example.com:443".to_string(),
+        _ => "gate.example.com:443".to_string(),
+    });
     let started = std::time::Instant::now();
     let dial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     match tokio::time::timeout_at(dial_deadline, tokio::net::TcpStream::connect(host_port)).await {
@@ -1224,17 +1259,13 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
     }
 
     // 方案 A：Direct 独立中继隧道模式（cf / vercel）
-    let gate = match iface.as_str() {
-        "cf" => GATE_WS_URL,
-        // Vercel gate（deploy/vercel-gate-worker，挂载 /api/ws）
-        "vercel" => "wss://vgate.example.com/api/ws",
-        _ => return Err("未知接口：仅支持 cf / vercel / chained".into()),
-    };
+    let gate = resolve_gate_url_for_iface(&iface)
+        .ok_or_else(|| "未知接口：仅支持 cf / vercel / chained".to_string())?;
     let token = cred_get_impl(CREDENTIAL_USER_TUNNEL)
         .ok()
         .flatten()
         .ok_or_else(|| "未配置授权码：请先在「设置」完善方案 A 配置".to_string())?;
-    match proxy::engine_tunnel::probe_via_gate(gate, &token, &host, 443).await {
+    match proxy::engine_tunnel::probe_via_gate(&gate, &token, &host, 443).await {
         Ok(ms) => Ok(serde_json::json!({
             "site": host,
             "iface": iface,
@@ -2067,5 +2098,19 @@ mod tests {
         // 非法输入明确报错
         assert!(proxy_access_url_generate("   ".into(), None).is_err());
         assert!(proxy_access_url_generate("hello world".into(), None).is_err());
+    }
+
+    #[test]
+    fn resolve_gate_url_and_extract_host_port() {
+        assert_eq!(extract_host_port_from_url("wss://custom.gate.io:8443/ws"), Some("custom.gate.io:8443".to_string()));
+        assert_eq!(extract_host_port_from_url("wss://custom.gate.io/ws"), Some("custom.gate.io:443".to_string()));
+        assert_eq!(extract_host_port_from_url("ws://127.0.0.1:8787/ws"), Some("127.0.0.1:8787".to_string()));
+        assert_eq!(extract_host_port_from_url("ws://127.0.0.1/ws"), Some("127.0.0.1:80".to_string()));
+        assert_eq!(extract_host_port_from_url("invalid url"), Some("invalid url:443".to_string()));
+
+        // 默认无配置时 fallback 到默认端点
+        assert!(resolve_gate_url_for_iface("cf").unwrap().contains("gate.example.com"));
+        assert!(resolve_gate_url_for_iface("vercel").unwrap().contains("vgate.example.com"));
+        assert_eq!(resolve_gate_url_for_iface("unknown"), None);
     }
 }

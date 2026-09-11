@@ -87,7 +87,7 @@ describe('parseGateInput', () => {
 
   it('非官方域名端点标记为非官方（前端警示）', async () => {
     const mod = await loadConfig()
-    const r = mod.parseGateInput(makeCode('wss://evil.example.com/ws', 'tok'))
+    const r = mod.parseGateInput(makeCode('wss://evil.otherdomain.com/ws', 'tok'))
     expect(r?.kind).toBe('code')
     expect(r?.official).toBe(false)
   })
