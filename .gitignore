@@ -52,3 +52,4 @@ telemetry-snapshot.json
 ponyllm.pid
 ponyllm-serve.log
 ponyllm.toml.bak
+desktop/src-tauri/tauri.updater.json

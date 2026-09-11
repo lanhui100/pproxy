@@ -41,6 +41,28 @@ jobs:
         run: pnpm build
         working-directory: desktop
 
+      - name: Prepare updater endpoints fragment (build-time injection)
+        shell: bash
+        # tracked tauri.conf.json 保持开源中立占位；发版时经 UPDATER_ENDPOINTS secret 注入真实
+        # 分发地址（逗号分隔）。secret 未设时回落占位端点，保证构建确定性。
+        env:
+          UPDATER_ENDPOINTS: ${{ secrets.UPDATER_ENDPOINTS }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const src = (process.env.UPDATER_ENDPOINTS || "")
+              .split(",").map(s => s.trim()).filter(Boolean);
+            const def = [
+              "https://dl.example.com/latest.json",
+              "https://access.example.com/dsk/latest.json",
+            ];
+            fs.writeFileSync(
+              "desktop/src-tauri/tauri.updater.json",
+              JSON.stringify({ plugins: { updater: { endpoints: src.length ? src : def } } })
+            );
+          '
+          cat desktop/src-tauri/tauri.updater.json
+
       - uses: tauri-apps/tauri-action@fce9c6108b31
         env:
           # 账号级 GITHUB_TOKEN 权限策略已限制为只读（2026-08 起 release 创建被拒），
@@ -60,6 +82,7 @@ jobs:
           releaseDraft: false
           prerelease: false
           projectPath: desktop
+          args: --config desktop/src-tauri/tauri.updater.json
 
       - name: Deploy static distribution to Vercel
         if: env.VERCEL_TOKEN != ''
