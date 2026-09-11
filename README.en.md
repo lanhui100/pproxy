@@ -124,6 +124,7 @@ Routes are managed hot in SQLite (`/api/routes` takes effect immediately). The i
 |---|---|
 | `PPROXY_EDGE_URL` / `PPROXY_VERCEL_URL` | `pproxy serve` upstream egress endpoints (placeholder defaults) |
 | `PPROXY_DOWNLOAD_BASE` | `install.sh` binary download source (default GitHub Releases) |
+| `PPROXY_DIST_BASE` | desktop static distribution base URL (`publish-desktop-dist.sh` writes it into latest.json as the download source; placeholder default) |
 | `PONY_DIST_URL` | CLI self-update (`pproxy upgrade`) dist source |
 | `PPROXY_DESKTOP_DIST_DIR` | `/dsk/` static distribution dir (default `/opt/pony-desktop-releases`) |
 | `PPROXY_CONFIG` | server config file path (default `/etc/pproxy/config.json`) |

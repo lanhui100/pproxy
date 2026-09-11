@@ -42,6 +42,7 @@
 |---|---|
 | `PPROXY_EDGE_URL` / `PPROXY_VERCEL_URL` | `pproxy serve` 的上游出口端点（默认占位） |
 | `PPROXY_DOWNLOAD_BASE` | `install.sh` 的二进制下载源（默认 GitHub Releases） |
+| `PPROXY_DIST_BASE` | 桌面版静态分发基础地址（`publish-desktop-dist.sh` 写入 latest.json 的下载源，默认占位） |
 | `PONY_DIST_URL` | CLI 自更新（`pproxy upgrade`）分发源 |
 | `PPROXY_DESKTOP_DIST_DIR` | `/dsk/` 静态分发目录（默认 `/opt/pony-desktop-releases`） |
 | `PPROXY_CONFIG` | server 配置文件路径（默认 `/etc/pproxy/config.json`） |
