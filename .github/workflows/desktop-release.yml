@@ -82,7 +82,7 @@ jobs:
           releaseDraft: false
           prerelease: false
           projectPath: desktop
-          args: --config desktop/src-tauri/tauri.updater.json
+          args: --config src-tauri/tauri.updater.json
 
       - name: Deploy static distribution to Vercel
         if: env.VERCEL_TOKEN != ''
