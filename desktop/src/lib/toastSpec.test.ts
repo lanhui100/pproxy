@@ -30,8 +30,8 @@ describe('Toast Component & UX Specification', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
     // 毛玻璃特性：backdrop-blur 或 backdrop-filter
     expect(content).toMatch(/backdrop-blur|backdrop-filter/)
-    // 白色半透明毛玻璃背景
-    expect(content).toContain('rgba(255, 255, 255')
+    // 白色半透明毛玻璃背景（class 或 style）
+    expect(content).toMatch(/bg-white\/(80|75|70)|rgba\(255,\s*255,\s*255/)
     // 宽度收窄（原 26rem，现缩至约 18~20rem）
     expect(content).toMatch(/w-\[min\(calc\(100vw-3rem\),(18|19|20)rem\)\]/)
     // 圆角改小（克制小圆角 rounded 或 rounded-lg，不再是 rounded-2xl）
