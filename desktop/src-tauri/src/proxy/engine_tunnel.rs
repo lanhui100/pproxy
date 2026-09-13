@@ -100,7 +100,9 @@ async fn establish(
         };
         if let (Some(u), Some(t)) = (fresh_url, fresh_token) {
             let current = cfg.tunnel.borrow().clone();
-            if Some(t.clone()) != current.1 && t != token {
+            // 严防倒灌：仅当重读出来的 token 与当前内存 token 不同、且确有值时才轮换；
+            // 且必须确保 fresh_token 经过基本有效性检验（不能是空串）。
+            if Some(t.clone()) != current.1 && t != token && !t.trim().is_empty() {
                 log::info!("tunnel token rotated on disk, refreshing watch and retrying once");
                 *LAST_SELF_HEAL.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
                 let _ = crate::ensure_tunnel_watch().send((Some(u.clone()), Some(t.clone())));

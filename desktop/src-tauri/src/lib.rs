@@ -228,32 +228,59 @@ fn cred_entry(user: &str) -> Result<keyring::Entry, String> {
 fn cred_dev_file(user: &str) -> Option<std::path::PathBuf> {
   std::env::var("PONY_DESKTOP_DEV_FILE_KEYRING").ok().map(|_| std::env::temp_dir().join("pony-desktop-dev-keyring").join(user))
 }
+fn cred_fallback_file(user: &str) -> std::path::PathBuf {
+  data_dir().join(format!(".{user}.dat"))
+}
+
 fn cred_set_impl(user: &str, secret: String) -> Result<(), String> {
   #[cfg(debug_assertions)]
   if let Some(p) = cred_dev_file(user) {
     std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
     return std::fs::write(p, secret).map_err(|e| e.to_string());
   }
-  let ent = cred_entry(user)?;
-  ent.set_password(&secret).map_err(|e| format!("credential set failed: {e}"))
+
+  // 1. 本地私有目录双重备份（防 Windows Keyring 权限受限/写失败/被外部脏数据覆盖）
+  let fallback = cred_fallback_file(user);
+  let _ = std::fs::create_dir_all(fallback.parent().unwrap());
+  let _ = std::fs::write(&fallback, secret.as_bytes());
+
+  // 2. 写入系统凭据库
+  if let Ok(ent) = cred_entry(user) {
+    let _ = ent.set_password(&secret);
+  }
+  Ok(())
 }
+
 fn cred_get_impl(user: &str) -> Result<Option<String>, String> {
   #[cfg(debug_assertions)]
   if let Some(p) = cred_dev_file(user) { return Ok(std::fs::read_to_string(p).ok()); }
-  match cred_entry(user)?.get_password() {
-    Ok(v) => Ok(Some(v)),
-    Err(keyring::Error::NoEntry) => Ok(None),
-    Err(e) => Err(format!("credential get failed: {e}")),
+
+  // 1. 优先读取系统凭据库
+  let keyring_val = cred_entry(user).ok().and_then(|ent| ent.get_password().ok());
+
+  // 2. 读取本地私有目录兜底文件
+  let fallback_val = std::fs::read_to_string(cred_fallback_file(user)).ok().filter(|s| !s.trim().is_empty());
+
+  // 3. 智能判定：优先使用本地显式写入的兜底备份，若本地无再回退 keyring，
+  // 杜绝操作系统 Keyring 遗留的陈旧脏 Token 反向污染！
+  match (fallback_val, keyring_val) {
+    (Some(f), _) => Ok(Some(f.trim().to_string())),
+    (None, Some(k)) => Ok(Some(k.trim().to_string())),
+    (None, None) => Ok(None),
   }
 }
+
 fn cred_delete_impl(user: &str) -> Result<(), String> {
   #[cfg(debug_assertions)]
   if let Some(p) = cred_dev_file(user) { let _=std::fs::remove_file(p); return Ok(()); }
-  match cred_entry(user)?.delete_credential() {
-    Ok(()) => Ok(()),
-    Err(keyring::Error::NoEntry) => Ok(()),
-    Err(e) => Err(format!("credential delete failed: {e}")),
+
+  let fallback = cred_fallback_file(user);
+  let _ = std::fs::remove_file(fallback);
+
+  if let Ok(ent) = cred_entry(user) {
+    let _ = ent.delete_credential();
   }
+  Ok(())
 }
 
 // ---- M6 + T1 watch 通道 ----
