@@ -1409,7 +1409,7 @@ onMounted(async () => {
               class="text-xs h-8 cursor-not-allowed"
             >
               <Download class="size-3.5 mr-1 animate-bounce" />
-              {{ downloaded ? '启动中…' : `${downloadProgress}%` }}
+              {{ downloaded ? '安装重启中…' : `${downloadProgress}%` }}
             </Button>
             <Button
               v-else-if="updateAvailable"

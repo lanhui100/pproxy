@@ -8,6 +8,18 @@ static TRAY_TOGGLE_ITEM: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = Once
 static TRAY_MODE_WL_ITEM: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
 static TRAY_MODE_GB_ITEM: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = OnceLock::new();
 
+#[tauri::command]
+fn proxy_prepare_update_exit(app: tauri::AppHandle) -> Result<(), String> {
+  log::info!("proxy_prepare_update_exit: 准备更新退出，复原系统代理并清理单实例锁");
+  // 1. 复原系统代理，防止安装过渡期系统断网
+  if let Err(e) = proxy_disable_inner(app) {
+    log::warn!("proxy_prepare_update_exit: proxy_disable failed: {e}");
+  }
+  // 2. 清理单实例锁，确保新版本安装后自启不会撞锁闪退
+  let _ = std::fs::remove_file(data_dir().join("instance.lock"));
+  Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   // ---- 单实例保护（严格基于 PID 存活性，严禁基于运行时间自毁锁文件）----
@@ -190,7 +202,7 @@ pub fn run() {
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
       proxy_traffic_stats, proxy_test_egress, proxy_test_site_via, proxy_test_site_local,
       proxy_access_url_generate, proxy_api_token_get, proxy_api_token_set,
-      open_external_url,
+      open_external_url, proxy_prepare_update_exit,
     ])
     .build(ctx)
     .expect("error while building tauri application");

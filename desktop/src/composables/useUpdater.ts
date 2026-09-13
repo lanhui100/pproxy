@@ -82,7 +82,7 @@ export async function downloadAndInstall(): Promise<void> {
     if (!u) return
     let total = 0
     let received = 0
-    await u.downloadAndInstall((event) => {
+    await u.downloadAndInstall(async (event) => {
       switch (event.event) {
         case 'Started':
           total = event.data.contentLength ?? 0
@@ -93,13 +93,27 @@ export async function downloadAndInstall(): Promise<void> {
           break
         case 'Finished':
           downloadProgress.value = 100
+          // 标记下载完成，进入安装并重启阶段
+          downloaded.value = true
+          // 在 Windows 安装器唤起退出前，提前通知 Rust 端清理锁文件和系统代理
+          try {
+            const { invoke } = await import('@tauri-apps/api/core')
+            await invoke('proxy_prepare_update_exit')
+          } catch {
+            // 兜底忽略
+          }
           break
       }
     })
+    // 正常情况下 Windows 下 u.downloadAndInstall 唤起安装包后 Rust 侧会立即执行 exit(0)
+    // 若在其他平台或未立即退出，调用 relaunch 兜底拉起
     downloaded.value = true
-    // passive 安装完成后进程由安装器接管，此处 relaunch 兜底新版本启动
-    const { relaunch } = await import('@tauri-apps/plugin-process')
-    await relaunch()
+    try {
+      const { relaunch } = await import('@tauri-apps/plugin-process')
+      await relaunch()
+    } catch {
+      // 忽略
+    }
   } catch (e) {
     updateError.value = String(e)
   } finally {
