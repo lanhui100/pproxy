@@ -523,8 +523,8 @@ fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
     let urls: Vec<String> = url_raw.split([',', ';', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     match iface {
-        "vercel" => urls.into_iter().find(|u| u.contains("vercel") || u.contains("vgate")).or_else(|| Some("wss://vgate.example.com/api/ws".to_string())),
-        "cf" => urls.into_iter().find(|u| !u.contains("vercel") && !u.contains("vgate")).or_else(|| Some(GATE_WS_URL.to_string())),
+        "vercel" => urls.into_iter().find(|u| u.contains("vercel") || u.contains("vgate")).or_else(|| Some(DEFAULT_TUNNEL_URLS.split(',').next().unwrap_or("").to_string())),
+        "cf" => urls.into_iter().find(|u| !u.contains("vercel") && !u.contains("vgate")).or_else(|| Some(DEFAULT_TUNNEL_URLS.split(',').nth(1).unwrap_or(GATE_WS_URL).to_string())),
         _ => None,
     }
 }
@@ -1701,10 +1701,12 @@ fn proxy_get_current_config() -> serde_json::Value {
 }
 
 fn configure_direct_tunnel(_worker_url: &str, secret: &str) -> Result<(), String> {
-    // gate 隧道端点是产品基础设施（gate.example.com/ws）。
-    // worker_url 是 HTTP 数据面出口地址（edge.example.com），与 WS 隧道桥不是同一域名——
-    // 曾用 worker_url 推导隧道端点导致 wss://edge.example.com[/ws] 拨测超时（CF 层 403），已废弃推导。
-    let ws_url = GATE_WS_URL.to_string();
+    // 方案 A 独立隧道端点：优先沿用已有合法配置；无配置时使用默认双 gate 端点
+    let (existing_url, _) = tunnel_config_load();
+    let ws_url = match existing_url {
+        Some(u) if !u.is_empty() => u,
+        _ => DEFAULT_TUNNEL_URLS.to_string(),
+    };
 
     let dir = data_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -2083,6 +2085,7 @@ mod tests {
 
     #[test]
     fn access_url_generate_derives_route_and_subpath_and_custom_token() {
+        std::env::set_var("PONY_DESKTOP_DEV_FILE_KEYRING", "1");
         // 测试 api.b.ai/v1 正向用例：推导为 bai 并保留 /v1
         let res = proxy_access_url_generate("api.b.ai/v1".into(), Some("pony_31abcbd448a003be0ea27524d60973d8".into())).unwrap();
         assert_eq!(res["route"], "bai");
@@ -2098,6 +2101,7 @@ mod tests {
         // 非法输入明确报错
         assert!(proxy_access_url_generate("   ".into(), None).is_err());
         assert!(proxy_access_url_generate("hello world".into(), None).is_err());
+        std::env::remove_var("PONY_DESKTOP_DEV_FILE_KEYRING");
     }
 
     #[test]
