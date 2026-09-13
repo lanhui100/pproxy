@@ -116,7 +116,7 @@ curl http://127.0.0.1:8900/api/health -H "Authorization: Bearer <admin_token>"
 | 凭据 | 注入位置 | 说明 |
 |---|---|---|
 | `PROXY_SECRET` | CF Worker `wrangler secret put PROXY_SECRET`；Vercel env `PROXY_SECRET` | edge/vedge 共享上游密钥；缺失即 500 fail-closed |
-| `GATE_TUNNEL_TOKEN` → `TUNNEL_TOKEN_HASH` | CF Gate Worker `wrangler secret put TUNNEL_TOKEN_HASH`；Vercel env `TUNNEL_TOKEN_HASH`；VPS 版 `.pony-gate.env` | 隧道 Bearer 鉴权；`TUNNEL_TOKEN_HASH = sha256(GATE_TUNNEL_TOKEN)`，**三端必须同源**，轮换后须同步重录 |
+| `GATE_TUNNEL_TOKEN` → `TUNNEL_TOKEN_HASH` | CF Gate Worker `wrangler versions secret put TUNNEL_TOKEN_HASH` + `wrangler versions deploy <version-id>`（wrangler 4）；Vercel env `TUNNEL_TOKEN_HASH`（改后必须重部署） | 隧道 Bearer 鉴权；`TUNNEL_TOKEN_HASH = sha256(GATE_TUNNEL_TOKEN)`（`printf '%s'` 取 hash），**live 双端（CF+Vercel）必须同源**（VPS 为遗留备选未部署，不计入），轮换纪律见 `docs/ops/DEPLOY.md` |
 | `VERCEL_TOKEN` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID_EDGE` / `VERCEL_PROJECT_ID_GATE` | GitHub Actions secrets | 供 `.github/workflows/deploy-vercel.yml` gitOps 部署 |
 
 ### 3. 可用环境变量覆盖的默认值（无需改代码）
@@ -141,7 +141,7 @@ curl http://127.0.0.1:8900/api/health -H "Authorization: Bearer <admin_token>"
 ### 5. 凭据卫生（开源红线）
 
 - 真实值只放不入库位置：`.secrets.env`（chmod 600）、`config.json`、`.pproxy.env`、`*.env.local`、`.vercel/`。
-- 轮换 `GATE_TUNNEL_TOKEN` 后必须**同步三端 `TUNNEL_TOKEN_HASH`**（CF secret / Vercel env / VPS env）并让桌面端重录授权码，否则隧道 401。
+- 轮换 `GATE_TUNNEL_TOKEN` 纪律见 `docs/ops/DEPLOY.md`（双端同源 + 版本留痕 + 取证验证后再分发口令），否则隧道 401。
 - 本仓库 git 历史已做凭据清洗（filter-repo）；**后续提交严禁引入任何真实 token / 密钥字面量**。
 
 ## 文档索引

@@ -18,7 +18,7 @@ const port = Number(args[2] || 443)
 
 let tokenFlag = null
 for (let i = 3; i < args.length; i++) {
-  if (args[i] === '--token') tokenFlag = args[++i]
+  if (args[i] === '--token') tokenFlag = String(args[++i]).trim()
   if (args[i] === '--token-file') tokenFlag = fs.readFileSync(args[++i], 'utf8').trim()
 }
 if (!url || !host || !tokenFlag) {

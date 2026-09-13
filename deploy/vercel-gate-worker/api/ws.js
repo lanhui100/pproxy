@@ -14,7 +14,7 @@
 // - standalone：`node server.js`（VPS systemd 常驻，见 systemd/pony-gate-node.service），
 //   端点 /ws；
 // - Vercel Function：Fluid compute 常驻，官方模式默认导出 http.Server，
-//   端点 /api/ws（vercel.json maxDuration=300 即连接寿命上限）。
+//   端点 /api/ws（vercel.json maxDuration=120 即连接寿命上限，以实码为准）。
 import http from 'node:http'
 import net from 'node:net'
 import crypto from 'node:crypto'
@@ -27,6 +27,15 @@ const GATE_PATHS = new Set(['/ws', '/api/ws'])
 
 function sha256Hex(s) {
   return crypto.createHash('sha256').update(s).digest('hex')
+}
+
+/// hash 归一化：trim + 小写（与 cf-gate-worker 同口径，fail-closed）。
+function normHash(h) {
+  return typeof h === 'string' ? h.trim().toLowerCase() : ''
+}
+
+function isHashWellFormed(h) {
+  return /^[0-9a-f]{64}$/.test(normHash(h))
 }
 
 function validHost(h) {
@@ -43,7 +52,8 @@ export function createGateServer() {
     const parsed = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
     if (parsed.pathname === '/debug' || parsed.searchParams.has('debug')) {
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ set: typeof process.env.TUNNEL_TOKEN_HASH === 'string', len: (process.env.TUNNEL_TOKEN_HASH || '').length }))
+      // 与 CF /debug 对齐：trim().length（env 尾换行时两端 len 一致才有排障价值）
+      res.end(JSON.stringify({ set: typeof process.env.TUNNEL_TOKEN_HASH === 'string', len: (process.env.TUNNEL_TOKEN_HASH || '').trim().length }))
       return
     }
     if (parsed.pathname === '/' || parsed.pathname === '/api/ws' || parsed.pathname === '/ws') {
@@ -64,11 +74,15 @@ export function createGateServer() {
       return
     }
     const auth = req.headers['authorization'] ?? ''
-    const presented = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-    const expectedHash = process.env.TUNNEL_TOKEN_HASH
+    const presented = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
+    const expectedHash = normHash(process.env.TUNNEL_TOKEN_HASH)
     // fail-closed（同 deploy/vercel/api/proxy.js 安全基线）：env 缺失一律拒绝
+    // 归一化：env 侧 trim+小写（消灭 dashboard/CLI 写入的尾换行与大小写漂移），presented 侧 trim。
     if (!expectedHash || !presented || sha256Hex(presented) !== expectedHash) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+      if (!isHashWellFormed(process.env.TUNNEL_TOKEN_HASH)) {
+        console.log('[gate] TUNNEL_TOKEN_HASH malformed: len=', String(process.env.TUNNEL_TOKEN_HASH ?? '').trim().length)
+      }
+      socket.write('HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n')
       socket.destroy()
       return
     }

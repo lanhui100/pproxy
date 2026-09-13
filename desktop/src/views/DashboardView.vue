@@ -645,12 +645,18 @@ async function submitImportOrChained() {
     try {
       if (isTauri()) {
         const { invoke } = await import('@tauri-apps/api/core')
+        // P0：空密码禁止穿透覆盖（后端同样拒绝，但前端先拦以给出明确提示）
+        const pwd = remotePass.value.trim()
+        if (!pwd) {
+          toast.error('远端密码不能为空', '留空不会保留旧密码，请键入密码后重试')
+          return
+        }
         await invoke('proxy_mode_switch', {
           modeType: 'chained',
           config: {
             remote_host: remoteHost.value.trim(),
             username: remoteUser.value.trim(),
-            password: remotePass.value.trim(),
+            password: pwd,
           },
         })
       }

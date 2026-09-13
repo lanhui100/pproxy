@@ -54,6 +54,16 @@ function jsonResp(obj, status = 200) {
   })
 }
 
+/// hash 归一化：trim + 小写。服务端只接受 64 位小写 hex 的 sha256；
+/// 人肉粘贴/旧工具链带入的尾换行、大写一律归一，格式非法则比对必败（fail-closed）并由调用方记日志。
+function normHash(h) {
+  return typeof h === 'string' ? h.trim().toLowerCase() : ''
+}
+
+function isHashWellFormed(h) {
+  return /^[0-9a-f]{64}$/.test(normHash(h))
+}
+
 /// 出站地理探测的生效配置（/debug/egress 与门禁共用，避免两处漂移）。
 function egressProbeConfig(env) {
   return {
@@ -67,7 +77,11 @@ export default {
     const url = new URL(request.url)
     if (url.pathname === '/debug') {
       return new Response(
-        JSON.stringify({ set: typeof env.TUNNEL_TOKEN_HASH === 'string' }),
+        JSON.stringify({
+          set: typeof env.TUNNEL_TOKEN_HASH === 'string',
+          // 只暴露长度不暴露 hash 本体：len!=64 即 env 写脏（换行/截断），与 Vercel /debug 口径对齐
+          len: typeof env.TUNNEL_TOKEN_HASH === 'string' ? env.TUNNEL_TOKEN_HASH.trim().length : 0,
+        }),
         { headers: { 'content-type': 'application/json' } },
       )
     }
@@ -75,8 +89,11 @@ export default {
     // 直接返回探测结果或真实报错，便于排查 unsupported_egress:UNKNOWN 的成因。
     if (url.pathname === '/debug/egress') {
       const auth = request.headers.get('Authorization') ?? ''
-      const presented = auth.startsWith('Bearer ') ? auth.slice(7) : ''
-      if (!presented || (await sha256Hex(presented)) !== env.TUNNEL_TOKEN_HASH) {
+      const presented = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
+      if (!presented || (await sha256Hex(presented)) !== normHash(env.TUNNEL_TOKEN_HASH)) {
+        if (!isHashWellFormed(env.TUNNEL_TOKEN_HASH)) {
+          console.log('[gate] TUNNEL_TOKEN_HASH malformed: len=', String(env.TUNNEL_TOKEN_HASH ?? '').trim().length)
+        }
         return new Response('unauthorized', { status: 401 })
       }
       const cfg = egressProbeConfig(env)
@@ -100,9 +117,14 @@ export default {
       return new Response('websocket required', { status: 400 })
     }
     const auth = request.headers.get('Authorization') ?? ''
-    const presented = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    const presented = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
     const hash = await sha256Hex(presented)
-    if (!presented || hash !== env.TUNNEL_TOKEN_HASH) {
+    // 归一化比对：env 侧 trim+小写（消灭 wrangler secret/手工粘贴带入的尾换行与大小写漂移）；
+    // presented 侧 trim（token 字母表无首尾空格）。格式非法时服务端日志告警，不向客户端泄细节。
+    if (!presented || hash !== normHash(env.TUNNEL_TOKEN_HASH)) {
+      if (!isHashWellFormed(env.TUNNEL_TOKEN_HASH)) {
+        console.log('[gate] TUNNEL_TOKEN_HASH malformed: len=', String(env.TUNNEL_TOKEN_HASH ?? '').trim().length)
+      }
       return new Response('unauthorized', { status: 401 })
     }
 

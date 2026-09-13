@@ -660,7 +660,7 @@ failover 永远轮不到后续端点，每个请求卡满整条建连循环。�
 |---|---|
 | `deploy/vercel-gate-worker/api/ws.js` | 由 `api/index.js` 重写：首帧判定只用 `isBinary`（N1）；鉴权 fail-closed（env 缺失一律 401，对齐 vercel/api/proxy.js 基线）；路径兼容 `/ws` 与 `/api/ws`；默认导出 `http.Server`（Vercel 官方 WebSocket/Fluid 模式） |
 | `deploy/vercel-gate-worker/server.js` | standalone 模式复用默认导出实例，不再二次建 server |
-| `deploy/vercel-gate-worker/vercel.json` | `api/ws.js` maxDuration=300（Vercel 上即 WS 连接寿命上限） |
+| `deploy/vercel-gate-worker/vercel.json` | `api/ws.js` maxDuration（当时记为 300；现以实码 `vercel.json: maxDuration=120` 为准，注释已同步） |
 | `deploy/vercel-gate-worker/smoke-test.mjs` | 网关端到端冒烟工具（WS 首帧 + 隧道之上真实 TLS 握手），CF/Node/Vercel 通用 |
 | `systemd/pony-gate-node.service` | VPS 常驻部署单元（方案 A 用） |
 | `desktop/src-tauri/src/proxy/engine_tunnel.rs` | 拨号超时（N2）+ 2 条 failover 单测 |

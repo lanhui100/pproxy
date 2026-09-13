@@ -178,27 +178,55 @@ fn check_wrangler_login() -> bool {
 }
 
 /// 通过 stdin pipe 设置 wrangler secret（避免交互式提示）。
+/// wrangler 4 版本化 secret 语义：`wrangler secret put` 已被拒，须走
+/// `wrangler versions secret put`（失败必须 Err，禁止静默成功——否则
+/// “看着部署成功，CF 侧 hash 纹丝未动”，双出口 401 无解）。
 fn set_wrangler_secret(name: &str, value: &str, work_dir: &Path) -> Result<(), String> {
-    let mut child = Command::new(npx_cmd())
-        .args(["wrangler", "secret", "put", name])
+    // 先按 wrangler 4 版本化语义尝试
+    let attempt_versions = Command::new(npx_cmd())
+        .args(["wrangler", "versions", "secret", "put", name])
         .current_dir(work_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("无法启动 wrangler: {e}"))?;
-
+    let mut child = attempt_versions;
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(value.as_bytes()).map_err(|e| format!("写入 wrangler stdin: {e}"))?;
         drop(stdin);
     }
-
-    let output = child.wait_with_output().map_err(|e| format!("wrangler secret put: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("  wrangler secret put {name} 返回非零: {stderr}");
+    let output = child.wait_with_output().map_err(|e| format!("wrangler versions secret put: {e}"))?;
+    if output.status.success() {
+        return Ok(());
     }
-    Ok(())
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // 旧版 wrangler 无 versions 子命令时回落 legacy；回落失败同样必须 Err
+    let legacy_hint = stderr.contains("Unknown argument")
+        || stderr.contains("unknown command")
+        || stderr.contains("No such command");
+    if legacy_hint {
+        eprintln!("  wrangler 版本无 versions 子命令，回落 legacy secret put（请尽快升级 wrangler 4）");
+        let mut legacy = Command::new(npx_cmd())
+            .args(["wrangler", "secret", "put", name])
+            .current_dir(work_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("无法启动 wrangler: {e}"))?;
+        if let Some(mut stdin) = legacy.stdin.take() {
+            stdin.write_all(value.as_bytes()).map_err(|e| format!("写入 wrangler stdin: {e}"))?;
+            drop(stdin);
+        }
+        let legacy_out = legacy.wait_with_output().map_err(|e| format!("wrangler secret put: {e}"))?;
+        if legacy_out.status.success() {
+            return Ok(());
+        }
+        let legacy_err = String::from_utf8_lossy(&legacy_out.stderr).to_string();
+        return Err(format!("wrangler secret put {name} 失败: {legacy_err}"));
+    }
+    Err(format!("wrangler versions secret put {name} 失败: {stderr}"))
 }
 
 /// 计算 SHA-256 十六进制（公开供测试验证）。
@@ -448,12 +476,14 @@ fn deploy_gate(cfg: &PonyConfig, deploy_root: &Path) -> Result<i32, String> {
 
     if !status.success() {
         eprintln!();
-        eprintln!("┌─ 部署失败 — 手动部署步骤 ────────────────────");
+        eprintln!("┌─ 部署失败 — 手动部署步骤（wrangler 4 版本化 secret）──");
         eprintln!("│ cd {}", work_dir.display());
         eprintln!("│ npx wrangler login");
-        eprintln!("│ npx wrangler secret put TUNNEL_TOKEN_HASH");
-        eprintln!("│ npx wrangler deploy");
+        eprintln!("│ printf '%s' '<TUNNEL_TOKEN_HASH>' | npx wrangler versions secret put TUNNEL_TOKEN_HASH");
+        eprintln!("│ # 输出 version-id 后：");
+        eprintln!("│ npx wrangler versions deploy <version-id>");
         eprintln!("│");
+        eprintln!("│ 注意：Vercel 改 TUNNEL_TOKEN_HASH 后必须重新部署（改 env 不自动生效）。");
         eprintln!("│ 部署完成后在 Cloudflare Dashboard 绑定自定义域：");
         eprintln!("│   gate.example.com → 此 Worker");
         eprintln!("└─────────────────────────────────────────────────");

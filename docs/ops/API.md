@@ -88,7 +88,7 @@ Header: X-Proxy-Secret: <worker_secret>
 ANY https://vedge.example.com/api/proxy?url=<urlencoded target>
 Header: X-Proxy-Secret: <vercel secret>
 ```
-- Node fetch 转发，流式回传（maxDuration 300s）
+- Node fetch 转发，流式回传（maxDuration 120s，以 deploy/vercel/vercel.json 与 api/proxy.js 实码为准；300s 为平台上限、非本仓声明值）
 - vercel.app 域名有登录墙（ssoProtection），必须用自定义域名
 
 ## 错误语义速查

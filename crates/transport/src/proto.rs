@@ -34,7 +34,12 @@ pub fn io_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(e: E) -> Error 
 }
 
 /// 单端点 WS Upgrade（仅建立热态 WS 管道，不声明目标）：供待命池预建复用。
+/// P0：token 先 trim + 非空校验（人肉粘贴/旧文件带入的尾换行不得变成难查的 HeaderValue 错误）。
 pub async fn connect_ws(url_str: &str, token: &str) -> Result<WsPair> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(io_err("tunnel token is empty: refusing WS upgrade"));
+    }
     let mut req = url_str
         .into_client_request()
         .map_err(|e| io_err(format!("bad tunnel url: {e}")))?;

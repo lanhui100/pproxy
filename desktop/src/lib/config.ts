@@ -14,6 +14,13 @@ export interface TunnelConfig {
   hasToken: boolean
   credError?: string | null
   fingerprint?: string | null
+  /** P0/E4：分源指纹（fallback 文件 vs keyring），分叉即 H2 实锤 */
+  fpFallback?: string | null
+  fpKeyring?: string | null
+  /** P0/E4：当前有效值的来源（keyring / fallback / keyring(diverged) / none） */
+  credWinner?: string | null
+  /** P0/E7：上次写入审计（时间戳/来源/指纹） */
+  credMeta?: { last_write_ts: number; source: string; fp8: string } | null
 }
 
 /** 读取隧道配置（Rust 侧文件 + 凭据库探测，不回传令牌明文）。 */
@@ -33,6 +40,10 @@ export function mapTunnelConfig(raw: Record<string, unknown>): TunnelConfig {
     hasToken: raw.has_token === true,
     credError: raw.cred_error != null ? String(raw.cred_error) : null,
     fingerprint: raw.fingerprint != null ? String(raw.fingerprint) : null,
+    fpFallback: raw.fp_fallback != null ? String(raw.fp_fallback) : null,
+    fpKeyring: raw.fp_keyring != null ? String(raw.fp_keyring) : null,
+    credWinner: raw.cred_winner != null ? String(raw.cred_winner) : null,
+    credMeta: (raw.cred_meta as TunnelConfig['credMeta']) ?? null,
   }
 }
 
@@ -144,13 +155,19 @@ export interface GateCheckResult {
   ok: boolean
   ms?: number
   error?: string
+  /** P0/E10：错误分类（ok / auth401 / denied / timeout / closed / no_token / other） */
+  kind?: string
 }
 
 export interface TunnelSelfCheck {
   fingerprint: string | null
-  cred_ok: boolean
-  cred_error: string | null
+  credOk: boolean
+  credError: string | null
   gates: GateCheckResult[]
+  fpFallback?: string | null
+  fpKeyring?: string | null
+  credWinner?: string | null
+  credMeta?: { last_write_ts: number; source: string; fp8: string } | null
 }
 
 /** 隧道健康自检：凭据可读性 + token 指纹 + 逐 gate 实测。 */
@@ -158,15 +175,39 @@ export async function tunnelSelfCheck(): Promise<TunnelSelfCheck> {
   if (!isTauri()) {
     return {
       fingerprint: 'dev00dev',
-      cred_ok: true,
-      cred_error: null,
+      credOk: true,
+      credError: null,
       gates: [
         { name: 'cf', url: 'wss://gate.example.com/ws', ok: true, ms: 120 },
         { name: 'vercel', url: 'wss://vgate.example.com/api/ws', ok: true, ms: 210 },
       ],
     }
   }
-  return invoke<TunnelSelfCheck>('tunnel_self_check')
+  // 常态区不展示分叉，仅自检区可见为已知取舍（分叉三值只在这里暴露）
+  return mapTunnelSelfCheck(await invoke<Record<string, unknown>>('tunnel_self_check'))
+}
+
+/** 纯函数：把 Rust `tunnel_self_check` 的 snake_case 响应映射为前端 camelCase。
+ * 无此映射时分叉告警（fpFallback/fpKeyring）与写入展示（credMeta）在 UI 恒不可见。 */
+export function mapTunnelSelfCheck(raw: Record<string, unknown>): TunnelSelfCheck {
+  const meta = raw.cred_meta as Record<string, unknown> | null | undefined
+  return {
+    fingerprint: raw.fingerprint != null ? String(raw.fingerprint) : null,
+    credOk: (raw.cred_ok as boolean) === true,
+    credError: raw.cred_error != null ? String(raw.cred_error) : null,
+    gates: Array.isArray(raw.gates) ? (raw.gates as GateCheckResult[]) : [],
+    fpFallback: raw.fp_fallback != null ? String(raw.fp_fallback) : null,
+    fpKeyring: raw.fp_keyring != null ? String(raw.fp_keyring) : null,
+    credWinner: raw.cred_winner != null ? String(raw.cred_winner) : null,
+    credMeta:
+      meta && typeof meta === 'object'
+        ? {
+            last_write_ts: typeof meta.last_write_ts === 'number' ? meta.last_write_ts : 0,
+            source: typeof meta.source === 'string' ? meta.source : '',
+            fp8: typeof meta.fp8 === 'string' ? meta.fp8 : '',
+          }
+        : null,
+  }
 }
 
 // ---- auto_proxy 偏好配置：默认 true（启动即开启智能模式代理） ----

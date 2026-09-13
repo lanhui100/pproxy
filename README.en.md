@@ -115,7 +115,7 @@ Routes are managed hot in SQLite (`/api/routes` takes effect immediately). The i
 | Credential | Inject into | Notes |
 |---|---|---|
 | `PROXY_SECRET` | CF Worker `wrangler secret put PROXY_SECRET`; Vercel env `PROXY_SECRET` | shared upstream secret for edge/vedge; missing → 500 fail-closed |
-| `GATE_TUNNEL_TOKEN` → `TUNNEL_TOKEN_HASH` | CF Gate Worker `wrangler secret put TUNNEL_TOKEN_HASH`; Vercel env `TUNNEL_TOKEN_HASH`; VPS `.pony-gate.env` | tunnel Bearer auth; `TUNNEL_TOKEN_HASH = sha256(GATE_TUNNEL_TOKEN)`, **must be identical on all three**, re-sync after rotation |
+| `GATE_TUNNEL_TOKEN` → `TUNNEL_TOKEN_HASH` | CF Gate Worker `wrangler versions secret put TUNNEL_TOKEN_HASH` + `wrangler versions deploy <version-id>` (wrangler 4); Vercel env `TUNNEL_TOKEN_HASH` (redeploy required after change) | tunnel Bearer auth; `TUNNEL_TOKEN_HASH = sha256(GATE_TUNNEL_TOKEN)` (`printf '%s'`), **must be identical on both live gates (CF+Vercel)** (VPS is a legacy un-deployed fallback, excluded); rotation runbook in `docs/ops/DEPLOY.md` |
 | `VERCEL_TOKEN` / `VERCEL_ORG_ID` / `VERCEL_PROJECT_ID_EDGE` / `VERCEL_PROJECT_ID_GATE` | GitHub Actions secrets | for gitOps deploys via `.github/workflows/deploy-vercel.yml` |
 
 ### 3. Env vars overriding defaults (no code changes needed)
@@ -139,7 +139,7 @@ The desktop (Tauri) needs no source changes: paste the **access code** (a `pony-
 ### 5. Credential hygiene (open-source red lines)
 
 - Real values only in non-committed locations: `.secrets.env` (chmod 600), `config.json`, `.pproxy.env`, `*.env.local`, `.vercel/`.
-- After rotating `GATE_TUNNEL_TOKEN`, you **must re-sync `TUNNEL_TOKEN_HASH` on all three** (CF secret / Vercel env / VPS env) and re-enter the access code on desktops, or the tunnel returns 401.
+- Rotation runbook for `GATE_TUNNEL_TOKEN` lives in `docs/ops/DEPLOY.md` (dual-gate parity + version trace + evidence before distributing codes), or the tunnel returns 401.
 - This repo's git history has been credential-scrubbed (filter-repo); **never introduce any real token/secret literal in future commits**.
 
 ## Documentation index

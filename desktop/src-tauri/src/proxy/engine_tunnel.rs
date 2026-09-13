@@ -30,6 +30,35 @@ const SELF_HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3
 const SELF_HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(0);
 static LAST_SELF_HEAL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
+/// P0/E10：探针/流量错误分类（禁止把门禁 denied 误判为鉴权 401）。
+/// 返回值：auth401（Upgrade 401）/ denied（门禁 acl/colo/egress）/ timeout / closed / other
+pub fn classify_probe_error(e: &str) -> &'static str {
+    if e.contains(AUTH_401_MARKER) {
+        "auth401"
+    } else if e.contains("denied:") {
+        "denied"
+    } else if e.contains("timeout") || e.contains("timed out") {
+        "timeout"
+    } else if e.contains("closed") || e.contains("close") {
+        "closed"
+    } else if e.contains("no token") {
+        "no_token"
+    } else {
+        "other"
+    }
+}
+
+/// P0：401 是否可重试——同 token 重试 5 次必败，遇 401 直接返回（由调用方 502），不进退避循环。
+pub fn is_auth_failure(e: &std::io::Error) -> bool {
+    e.to_string().contains(AUTH_401_MARKER)
+}
+
+/// token 指纹（只打指纹禁明文）：sha256 前 8 hex，用于 401 排障回答“当次哪一枚”。
+fn token_fp8(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(&Sha256::digest(token.as_bytes())[..4])
+}
+
 const RETRY: u32 = 5; // 总尝试次数（首次 + 4 次重试）
 
 /// 建连阶段：支持多中继端点自动切换（CF 节点不可达/被拒时无缝回退备用 Vercel/Node 节点）。
@@ -56,6 +85,8 @@ async fn establish(
         .collect();
     // 按目标 host 重排端点优先级（Google/AI 目标 → Vercel 优先；其他 → CF 优先）
     let urls = order_endpoints(urls, &parsed.host);
+    // Must-fix G/E8：拨号顺序可观测（host→有序端点 + 内存 token 指纹，只打指纹禁明文）
+    log::debug!("tunnel order for {}: {:?} (mem_fp8={})", parsed.host, urls, token_fp8(&token));
 
     // 方案 A：先取池会话，bind 热态首帧
     if let Some((tx, rx, used_url)) = cfg.pool.checkout(&urls) {
@@ -84,13 +115,25 @@ async fn establish(
     }
 
     // 401 自愈：全部端点鉴权失败时，凭据可能已被外部更新（轮换）——重读凭据并刷新重试。
-    // 对抗加固：仅在成功读取到新 token 并广播 watch 后才置位冷却时间，防止旧 token 阻断自愈。
+    // Must-fix G（负缓存兑现）：成功轮换与无新值/同值统一置位冷却——持续 401 时每个 CONNECT
+    // 都读 keyring 是风暴放大器；冷却命中/重读结果一律打日志。
     if saw_401 {
         let should_check = {
             let g = LAST_SELF_HEAL.lock().unwrap_or_else(|p| p.into_inner());
             match *g {
-                Some(t) => t.elapsed() >= SELF_HEAL_COOLDOWN,
-                None => true,
+                Some(t) => {
+                    let ok = t.elapsed() >= SELF_HEAL_COOLDOWN;
+                    if !ok {
+                        log::debug!("self-heal cooldown active: skipping keyring re-read");
+                    } else {
+                        log::debug!("self-heal cooldown expired: re-reading keyring");
+                    }
+                    ok
+                }
+                None => {
+                    log::debug!("self-heal first 401: re-reading keyring");
+                    true
+                }
             }
         };
         let (fresh_url, fresh_token) = if should_check {
@@ -98,16 +141,25 @@ async fn establish(
         } else {
             (None, None)
         };
+        // 负缓存：重读无新值/同值同样置位（30s 内不再读 keyring），并打结果日志
+        let mut healed = false;
         if let (Some(u), Some(t)) = (fresh_url, fresh_token) {
             let current = cfg.tunnel.borrow().clone();
             // 严防倒灌：仅当重读出来的 token 与当前内存 token 不同、且确有值时才轮换；
             // 且必须确保 fresh_token 经过基本有效性检验（不能是空串）。
             if Some(t.clone()) != current.1 && t != token && !t.trim().is_empty() {
-                log::info!("tunnel token rotated on disk, refreshing watch and retrying once");
+                log::info!("tunnel token rotated on disk (mem_fp8={} disk_fp8={}), refreshing watch and retrying once", token_fp8(&token), token_fp8(&t));
+                // P0：自愈只广播 watch 不落盘会造成 probe/流量分叉 + 重启丢失——成功即落盘
+                //（落盘失败不阻断本次内存重试，但必须告警——内存-磁盘分裂特批口）。
+                if let Err(e) = crate::persist_healed_tunnel_token(&t, "self_heal_401") {
+                    log::warn!("self-heal persist failed (memory-only retry): {e}");
+                }
                 *LAST_SELF_HEAL.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
+                healed = true;
                 let _ = crate::ensure_tunnel_watch().send((Some(u.clone()), Some(t.clone())));
                 let urls2: Vec<&str> = u.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
                 let urls2 = order_endpoints(urls2, &parsed.host);
+                log::debug!("self-heal re-establish order for {}: {:?}", parsed.host, urls2);
                 for u2 in &urls2 {
                     match try_establish_url(u2, &t, &parsed.host, parsed.port).await {
                         Ok(pair) => return Ok((pair, (*u2).to_string())),
@@ -117,7 +169,15 @@ async fn establish(
                         }
                     }
                 }
+            } else {
+                log::debug!("self-heal re-read: no-change (mem_fp8={})", token_fp8(&token));
             }
+        } else {
+            log::debug!("self-heal re-read: no fresh credential on disk");
+        }
+        if !healed {
+            // 负缓存兑现：无新值/同值同样进 30s 冷却，防 keyring 风暴
+            *LAST_SELF_HEAL.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
         }
     }
 
@@ -162,6 +222,11 @@ pub async fn connect_and_relay(
                 return relay_bidir_ws(client, ws_tx, ws_rx, egress, stats).await;
             }
             Err(e) => {
+                // P0：401 同 token 重试必败——跳过 RETRY 退避，直接 502（省 ~1.5s 延迟与 keyring 风暴）
+                if is_auth_failure(&e) {
+                    last_err = Some(e);
+                    break;
+                }
                 last_err = Some(e);
                 if attempt + 1 < RETRY {
                     let backoff = std::time::Duration::from_millis(

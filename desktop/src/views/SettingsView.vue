@@ -415,6 +415,7 @@ async function submitGateInput(): Promise<void> {
     }
     gateInput.value = ''
     isEditingGate.value = false
+    selfCheck.value = null // 写后旧探测失效（旧 token 结果不得展示在新 token 下）
     await refreshTunnel()
   } catch (e: any) {
     toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
@@ -575,7 +576,23 @@ async function doImportSync(): Promise<void> {
       toast.success(res.message || '导入成功')
       importSyncUri.value = ''
       isImportingSync.value = false
-      currentMode.value = 'chained'
+      // Must-fix C：pony-gate:// 经 proxy_import_sync 路由到 tunnel_connect_code_import，
+      // 其返回值无 mode 字段——缺失时重读真实配置，禁止落到 'chained' 造成分叉
+      {
+        const m = (res as any).mode
+        if (m === 'direct' || m === 'chained') {
+          currentMode.value = m
+        } else {
+          try {
+            const { invoke: inv } = await import('@tauri-apps/api/core')
+            const cfg = (await inv('proxy_get_current_config')) as any
+            if (cfg.mode_type === 'direct' || cfg.mode_type === 'chained') currentMode.value = cfg.mode_type
+          } catch { /* 保持不动 */ }
+        }
+      }
+      if (res.tunnel_retained_fp8) {
+        toast.info('同步口令未携带隧道令牌', `已保留本机旧令牌（${res.tunnel_retained_fp8}），如 401 请重贴授权码`)
+      }
       const cfg = (await invoke('proxy_get_current_config')) as any
       remoteHost.value = cfg.remote_host || ''
       remoteUser.value = cfg.username || ''
@@ -833,11 +850,21 @@ onMounted(async () => {
 
             <!-- 自检结果展示 -->
             <div v-if="selfCheck" class="rounded-lg bg-background/50 px-3 py-2 space-y-1 text-[11px] font-mono">
-              <div v-if="selfCheck.cred_error" class="text-rose-500">{{ selfCheck.cred_error }}</div>
+              <div v-if="selfCheck.credError" class="text-rose-500">{{ selfCheck.credError }}</div>
               <div v-for="g in selfCheck.gates" :key="g.url" class="flex items-center justify-between">
                 <span class="text-muted-foreground">{{ g.name === 'cf' ? '出口C' : '出口V' }}</span>
                 <span v-if="g.ok" class="text-foreground">{{ typeof g.ms === 'number' ? `正常 · ${g.ms}ms` : '正常' }}</span>
                 <span v-else class="text-rose-500 truncate max-w-56" :title="g.error">失败 · {{ g.error }}</span>
+              </div>
+              <!-- P0/E4：本地凭据分叉告警（H2 实锤——fallback 与 keyring 不一致） -->
+              <div
+                v-if="selfCheck.fpFallback && selfCheck.fpKeyring && selfCheck.fpFallback !== selfCheck.fpKeyring"
+                class="text-amber-500"
+              >
+                本地凭据分叉：备份({{ selfCheck.fpFallback }})≠主({{ selfCheck.fpKeyring }})，已按主修复，重贴授权码可彻底统一
+              </div>
+              <div v-if="selfCheck.credMeta?.fp8" class="text-muted-foreground">
+                上次写入：{{ selfCheck.credMeta.source }} · {{ selfCheck.credMeta.fp8 }}
               </div>
             </div>
           </div>

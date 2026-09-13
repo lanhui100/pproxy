@@ -104,9 +104,11 @@ pub fn run_interactive(force: bool) -> Result<i32, String> {
     println!("│   openssl rand -hex 32");
     println!("│ 或使用密码管理器生成的随机密码。");
     println!("└─────────────────────────────────────────────────");
-    println!("│ 注意：此令牌的 SHA-256 哈希值需要设置为 wrangler secret：");
-    println!("│   echo -n '<your-token>' | sha256sum");
-    println!("│   npx wrangler secret put TUNNEL_TOKEN_HASH");
+    println!("│ 注意：此令牌的 SHA-256 哈希值需要设置为 wrangler 版本化 secret（wrangler 4）：");
+    println!("│   printf '%s' '<your-token>' | sha256sum   # 取 hash（禁用 echo，防尾换行）");
+    println!("│   printf '%s' '<hash>' | npx wrangler versions secret put TUNNEL_TOKEN_HASH");
+    println!("│   npx wrangler versions deploy <version-id>");
+    println!("│ 注意：Vercel 改 TUNNEL_TOKEN_HASH 后必须重新部署才生效。");
     println!("└─────────────────────────────────────────────────");
     let tunnel_token = prompt_secret("Tunnel Token (留空跳过)", "");
 

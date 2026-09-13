@@ -129,7 +129,29 @@ describe('mapTunnelConfig', () => {
       hasToken: true,
       credError: null,
       fingerprint: 'deadbeef',
+      fpFallback: null,
+      fpKeyring: null,
+      credWinner: null,
+      credMeta: null,
     })
+  })
+
+  it('映射 P0 分源指纹与写入审计（H2 实锤三值）', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelConfig({
+      url: 'wss://gate.example.com/ws',
+      has_token: true,
+      cred_error: null,
+      fingerprint: 'aaaa1111',
+      fp_fallback: 'bbbb2222',
+      fp_keyring: 'aaaa1111',
+      cred_winner: 'keyring(diverged)',
+      cred_meta: { last_write_ts: 123, source: 'tunnel_token_save', fp8: 'aaaa1111' },
+    })
+    expect(c.fpFallback).toBe('bbbb2222')
+    expect(c.fpKeyring).toBe('aaaa1111')
+    expect(c.credWinner).toBe('keyring(diverged)')
+    expect(c.credMeta).toEqual({ last_write_ts: 123, source: 'tunnel_token_save', fp8: 'aaaa1111' })
   })
 
   it('凭据损坏时透传 cred_error（曾因字段名漂移静默失效）', async () => {
@@ -152,6 +174,42 @@ describe('mapTunnelConfig', () => {
       hasToken: false,
       credError: null,
       fingerprint: null,
+      fpFallback: null,
+      fpKeyring: null,
+      credWinner: null,
+      credMeta: null,
     })
+  })
+})
+
+// ---- mapTunnelSelfCheck：snake → camel（Must-fix A 回归：无映射时 H2 告警恒不可见）----
+describe('mapTunnelSelfCheck', () => {
+  it('全 snake 输入映射为 camel（含分叉三值与审计）', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelSelfCheck({
+      fingerprint: 'aaaa1111',
+      cred_ok: true,
+      cred_error: null,
+      gates: [{ name: 'cf', url: 'wss://gate.example.com/ws', ok: true, ms: 1, kind: 'ok' }],
+      fp_fallback: 'bbbb2222',
+      fp_keyring: 'aaaa1111',
+      cred_winner: 'keyring(diverged)',
+      cred_meta: { last_write_ts: 7, source: 'tunnel_token_save', fp8: 'aaaa1111' },
+    })
+    expect(c.credOk).toBe(true)
+    expect(c.credError).toBeNull()
+    expect(c.fpFallback).toBe('bbbb2222')
+    expect(c.fpKeyring).toBe('aaaa1111')
+    expect(c.credWinner).toBe('keyring(diverged)')
+    expect(c.credMeta).toEqual({ last_write_ts: 7, source: 'tunnel_token_save', fp8: 'aaaa1111' })
+  })
+
+  it('缺字段兜底且 gates 非数组时为空数组', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelSelfCheck({})
+    expect(c.fingerprint).toBeNull()
+    expect(c.credOk).toBe(false)
+    expect(c.gates).toEqual([])
+    expect(c.credMeta).toBeNull()
   })
 })

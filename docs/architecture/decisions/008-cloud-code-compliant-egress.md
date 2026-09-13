@@ -85,6 +85,7 @@ Error ID: ab8b023b-7b45-4039-b861-450368d935ad-4
 3. **把 Cloud Code host 硬钉到 vgate 单端点**：Vercel 侧限额/函数时长上限会把
    Antigravity 直接打挂（`vercel.json` 声明 `maxDuration=120`，与 `api/ws.js` 注释的 300 不一致，
    单条 SSE 可能被截断）。改为"优先 + 兜底"两级。否决。
+   注（2026-09-13）：`deploy/vercel-gate-worker/api/ws.js` 注释已同步为 120，上述不一致为历史描述、已闭环。
 4. **在 pproxy 里对 Google 400 做应用层重试/改写**：CONNECT 是端到端 TLS 密文，
    代理看不到状态码，无法在不 MITM 的前提下识别该错误。否决。
 5. **复活 Render 兜底出口**（`31b2053` 曾以"未上线"移除）：引入第三家出口的运维与额度成本，

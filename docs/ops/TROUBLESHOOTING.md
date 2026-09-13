@@ -31,8 +31,8 @@
 - **原因**：上游瞬时抖动或客户端提前断开（日志可见 client error: Broken pipe，无害）
 - **解决**：重试；持续失败按"上游可达性"检查（DEPLOY.md 监控点）
 
-### LLM 长响应被掐断（约 300s）
-- **原因**：Vercel Hobby 函数 maxDuration 300s（Fluid compute 上限）
+### LLM 长响应被掐断（约 120s，实码声明；平台上限 300s）
+- **原因**：本仓 edge 实码声明 maxDuration=120（deploy/vercel/vercel.json:6，api/proxy.js:1），300s 仅为 Vercel Hobby/Fluid 平台上限
 - **缓解**：流式模式一般够用；超长任务等待 P2 自定义上游
 
 ### vercel.app 域名返回 Login 页面

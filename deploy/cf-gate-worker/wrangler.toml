@@ -27,4 +27,9 @@ EGRESS_GEO_STALE_MS = "1800000"
 [observability]
 enabled = true
 
-# TUNNEL_TOKEN_HASH 经 wrangler secret 注入（不入库）
+# TUNNEL_TOKEN_HASH 经 wrangler secret 注入（不入库）。
+# wrangler 4 版本化 secret 语义（P0 修复）：
+#   printf '%s' '<hash>' | npx wrangler versions secret put TUNNEL_TOKEN_HASH
+#   npx wrangler versions deploy <version-id>
+# 旧 `wrangler secret put` 在 wrangler 4 下被拒且 CLI 侧已改为 fail-fast；
+# Vercel 侧改 env 后必须重新部署（改 env 不自动对 Fluid 实例生效）。
