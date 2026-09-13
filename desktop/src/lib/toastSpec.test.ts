@@ -18,33 +18,44 @@ describe('Toast Component & UX Specification', () => {
     expect(content).toContain('pointer-events-auto')
   })
 
-  it('enforces flat minimalist style with no box shadow', () => {
+  it('enforces flat minimalist style with no box shadow and no border', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
-    // 扁平风格，严禁出现任何 shadow 阴影
+    // 扁平风格，严禁出现任何 shadow 阴影与边框
     expect(content).not.toMatch(/shadow(-\[|-[a-z0-9]+)/)
     expect(content).not.toContain('box-shadow')
+    expect(content).not.toMatch(/border( |-[a-z0-9/]+)/)
   })
 
-  it('harmonizes frosted glass backdrop and border styles', () => {
+  it('adopts white translucent frosted glass with tighter width and smaller radius', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
     // 毛玻璃特性：backdrop-blur 或 backdrop-filter
     expect(content).toMatch(/backdrop-blur|backdrop-filter/)
+    // 白色半透明毛玻璃背景
+    expect(content).toContain('rgba(255, 255, 255')
+    // 宽度收窄（原 26rem，现缩至约 18~20rem）
+    expect(content).toMatch(/w-\[min\(calc\(100vw-3rem\),(18|19|20)rem\)\]/)
+    // 圆角改小（克制小圆角 rounded 或 rounded-lg，不再是 rounded-2xl）
+    expect(content).toMatch(/rounded(-lg)?\s/)
+    expect(content).not.toContain('rounded-2xl')
   })
 
-  it('aligns text colors with toast semantic kinds instead of plain foreground', () => {
+  it('restricts semantic colors strictly to internal icons, keeping card and text neutral', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
-    // 文本颜色必须与语义统一（emerald, sky, rose），不再使用一刀切的 text-foreground
-    expect(content).not.toMatch(/<p[^>]*class="[^"]*text-foreground[^"]*"/)
-    expect(content).toMatch(/emerald/)
-    expect(content).toMatch(/sky/)
-    expect(content).toMatch(/rose/)
+    // 卡片本身与文本不再带有语义色彩（emerald/sky/rose 背景和文字色）
+    expect(content).not.toMatch(/bg-(emerald|sky|rose)/)
+    // 图标仍保留语义色
+    expect(content).toMatch(/text-emerald-/)
+    expect(content).toMatch(/text-sky-/)
+    expect(content).toMatch(/text-rose-/)
   })
 
-  it('provides minimalist center scale transition instead of bottom translation', () => {
+  it('provides subtle micro-motion center transition instead of bottom translation', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
-    // 底部上升的 translate-y-3 应当被替换为现代极简的中心缩放或淡入淡出
+    // 底部大幅位移已被移除
     expect(content).not.toContain('translate-y-3')
+    // 轻微弹出动效：极小位移与缩放 (scale-90/95 + 微微 translate-y-1)
     expect(content).toMatch(/scale-9[0-9]|scale-100/)
+    expect(content).toMatch(/duration-(150|200)/)
   })
 
   describe('useToast composable functionality', () => {

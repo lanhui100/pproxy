@@ -6,51 +6,25 @@ import { useToast, type ToastKind } from '@/composables/useToast'
 
 const { toasts, dismiss, dismissAfterCopy } = useToast()
 
-// 纯平扁平、无阴影、毛玻璃色彩与语义文字一体化配置
-const SEMANTIC: Record<
+// 语义配置：背景与文本统一采用中性白色透明毛玻璃；语义颜色仅保留在内部图标及错误操作按钮
+const SEMANTIC_ICONS: Record<
   ToastKind,
   {
     icon: typeof Info
-    containerCls: string
     iconCls: string
-    titleCls: string
-    detailCls: string
-    hintCls: string
-    dismissBtnCls: string
   }
 > = {
   success: {
     icon: CircleCheck,
-    containerCls:
-      'bg-emerald-50/85 border-emerald-500/20 text-emerald-950 dark:bg-emerald-950/75 dark:border-emerald-400/30 dark:text-emerald-50',
-    iconCls: 'text-emerald-600 dark:text-emerald-400',
-    titleCls: 'text-emerald-950 dark:text-emerald-50',
-    detailCls: 'text-emerald-800/85 dark:text-emerald-200/85',
-    hintCls: 'text-emerald-700/70 dark:text-emerald-300/70',
-    dismissBtnCls:
-      'text-emerald-700/50 hover:text-emerald-900 hover:bg-emerald-500/15 dark:text-emerald-300/50 dark:hover:text-emerald-100 dark:hover:bg-emerald-400/15',
+    iconCls: 'text-emerald-500 dark:text-emerald-400',
   },
   info: {
     icon: Info,
-    containerCls:
-      'bg-sky-50/85 border-sky-500/20 text-sky-950 dark:bg-sky-950/75 dark:border-sky-400/30 dark:text-sky-50',
-    iconCls: 'text-sky-600 dark:text-sky-400',
-    titleCls: 'text-sky-950 dark:text-sky-50',
-    detailCls: 'text-sky-800/85 dark:text-sky-200/85',
-    hintCls: 'text-sky-700/70 dark:text-sky-300/70',
-    dismissBtnCls:
-      'text-sky-700/50 hover:text-sky-900 hover:bg-sky-500/15 dark:text-sky-300/50 dark:hover:text-sky-100 dark:hover:bg-sky-400/15',
+    iconCls: 'text-sky-500 dark:text-sky-400',
   },
   error: {
     icon: CircleAlert,
-    containerCls:
-      'bg-rose-50/90 border-rose-500/25 text-rose-950 dark:bg-rose-950/80 dark:border-rose-400/30 dark:text-rose-50',
-    iconCls: 'text-rose-600 dark:text-rose-400',
-    titleCls: 'text-rose-950 dark:text-rose-50',
-    detailCls: 'text-rose-800/85 dark:text-rose-200/85',
-    hintCls: 'text-rose-700/70 dark:text-rose-300/70',
-    dismissBtnCls:
-      'text-rose-700/50 hover:text-rose-900 hover:bg-rose-500/15 dark:text-rose-300/50 dark:hover:text-rose-100 dark:hover:bg-rose-400/15',
+    iconCls: 'text-rose-500 dark:text-rose-400',
   },
 }
 
@@ -86,66 +60,62 @@ async function copyError(id: number, text: string): Promise<void> {
   <!-- 窗口中央浮层容器，背景点击全穿透 -->
   <div
     aria-live="polite"
-    class="pointer-events-none fixed inset-0 z-50 flex flex-col items-center justify-center p-4 gap-2.5"
+    class="pointer-events-none fixed inset-0 z-50 flex flex-col items-center justify-center p-4 gap-2"
   >
     <TransitionGroup
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0 scale-95"
-      enter-to-class="opacity-100 scale-100"
+      enter-active-class="transition duration-200 cubic-bezier(0.16, 1, 0.3, 1)"
+      enter-from-class="opacity-0 scale-90 translate-y-1"
+      enter-to-class="opacity-100 scale-100 translate-y-0"
       leave-active-class="transition duration-150 ease-in pointer-events-none"
-      leave-from-class="opacity-100 scale-100"
-      leave-to-class="opacity-0 scale-95"
+      leave-from-class="opacity-100 scale-100 translate-y-0"
+      leave-to-class="opacity-0 scale-95 translate-y-0.5"
     >
       <div
         v-for="t in toasts"
         :key="t.id"
-        class="toast-frosted-card pointer-events-auto flex w-[min(calc(100vw-3rem),26rem)] items-start gap-3 rounded-2xl border px-3.5 py-3 transition-all select-none"
-        :class="SEMANTIC[t.kind].containerCls"
+        class="toast-frosted-card pointer-events-auto flex w-[min(calc(100vw-3rem),19rem)] items-start gap-2.5 rounded-lg px-3 py-2.5 select-none"
       >
-        <!-- 语义图标 -->
+        <!-- 语义图标（仅此处使用语义色彩） -->
         <component
-          :is="SEMANTIC[t.kind].icon"
-          class="size-4.5 shrink-0 mt-0.5"
-          :class="SEMANTIC[t.kind].iconCls"
+          :is="SEMANTIC_ICONS[t.kind].icon"
+          class="size-4 shrink-0 mt-0.5"
+          :class="SEMANTIC_ICONS[t.kind].iconCls"
         />
 
-        <!-- 文本层级（严格与语义色彩体系一致） -->
+        <!-- 文本层级（中性克制配色，不再带有语义背景色/文本色） -->
         <div class="min-w-0 flex-1">
-          <p class="text-xs font-semibold leading-snug break-words" :class="SEMANTIC[t.kind].titleCls">
+          <p class="text-xs font-medium leading-snug break-words text-neutral-800 dark:text-neutral-100">
             {{ t.message }}
           </p>
           <p
             v-if="t.detail && t.detail !== t.message"
-            class="mt-1 text-[11px] leading-relaxed break-words line-clamp-3"
-            :class="SEMANTIC[t.kind].detailCls"
+            class="mt-0.5 text-[11px] leading-relaxed break-words line-clamp-3 text-neutral-500 dark:text-neutral-400"
           >
             {{ t.detail }}
           </p>
           <p
             v-else-if="t.kind === 'error'"
-            class="mt-1 text-[10px]"
-            :class="SEMANTIC[t.kind].hintCls"
+            class="mt-0.5 text-[10px] text-neutral-400 dark:text-neutral-500"
           >
             常驻提示 · 请点击复制反馈
           </p>
         </div>
 
         <!-- 操作区 -->
-        <div class="flex shrink-0 items-center gap-1.5 ml-1">
+        <div class="flex shrink-0 items-center gap-1 ml-0.5">
           <button
             v-if="t.kind === 'error'"
             type="button"
-            class="flex items-center gap-1 rounded-md border border-rose-500/20 bg-rose-500/15 px-2 py-0.5 text-[11px] font-medium text-rose-700 transition-colors hover:bg-rose-500/25 dark:border-rose-400/30 dark:bg-rose-400/20 dark:text-rose-200 dark:hover:bg-rose-400/30 cursor-pointer"
+            class="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-neutral-600 hover:text-neutral-900 dark:text-neutral-300 dark:hover:text-neutral-100 hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
             @click="copyError(t.id, t.detail ?? t.message)"
           >
-            <Check v-if="copiedIds.has(t.id)" class="size-3" />
+            <Check v-if="copiedIds.has(t.id)" class="size-3 text-emerald-500" />
             <Copy v-else class="size-3" />
             {{ copiedIds.has(t.id) ? '已复制' : '复制' }}
           </button>
           <button
             type="button"
-            class="rounded-md p-1 transition-colors cursor-pointer"
-            :class="SEMANTIC[t.kind].dismissBtnCls"
+            class="rounded p-0.5 text-neutral-400 hover:text-neutral-700 dark:text-neutral-500 dark:hover:text-neutral-200 hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
             title="关闭提示"
             @click="dismiss(t.id)"
           >
@@ -158,8 +128,18 @@ async function copyError(id: number, text: string): Promise<void> {
 </template>
 
 <style scoped>
+/*
+ * 白色透明毛玻璃效果，去除边框：
+ * - 亮色模式：半透明纯白底 + 强模糊 backdrop-blur
+ * - 暗色模式：高通透白/灰毛玻璃底，与暗色背景融合
+ */
 .toast-frosted-card {
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  background-color: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+:global(.dark) .toast-frosted-card {
+  background-color: rgba(255, 255, 255, 0.12);
 }
 </style>
