@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "pproxy-cli"
-version = "0.3.47"
+version = "0.3.48"
 dependencies = [
  "anyhow",
  "axum",
@@ -1187,8 +1187,10 @@ name = "pproxy-transport"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-tungstenite",

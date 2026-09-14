@@ -210,8 +210,13 @@ impl TunnelPool {
     }
 
     /// 按调用方给定的端点优先级取待命会话（合规出口专项：按目标 host 重排后传入）。
+    /// 池内会话按建连 token 指纹匹配（失配视为 miss），堵轮换竞速窗。
+    /// 注（B-P1-4 核实结论）：engine 侧 `TunnelConfig.token` 启动时装配、进程内不可变
+    ///（无轮换更新路径；轮换=重启进程重装配），故 `cfg.token` 指纹恒等于池内会话指纹。
+    /// 桌面端热轮换走 watch（独立实现，不经此包裹层）。
     pub fn checkout_ordered(&self, ordered: &[&str]) -> Option<(WsTx, WsRx)> {
-        self.inner.checkout(ordered).map(|(tx, rx, _)| (tx, rx))
+        let fp = pproxy_transport::token_fp8_of(&self.cfg.token);
+        self.inner.checkout(ordered, Some(&fp)).map(|(tx, rx, _)| (tx, rx))
     }
 }
 

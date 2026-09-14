@@ -21,6 +21,12 @@ export interface TunnelConfig {
   credWinner?: string | null
   /** P0/E7：上次写入审计（时间戳/来源/指纹） */
   credMeta?: { last_write_ts: number; source: string; fp8: string } | null
+  /** 本机数据目录绝对路径（Rust `proxy_tunnel_get.data_dir`，缺字段兜底 null） */
+  dataDir?: string | null
+  /** 数据目录是否走了 temp 回退（缺字段兜底 false） */
+  dataDirTmpFallback?: boolean
+  /** 引擎实际使用的端点串（含默认双端点回退；A-P1-8 口径统一） */
+  effectiveUrl?: string | null
 }
 
 /** 读取隧道配置（Rust 侧文件 + 凭据库探测，不回传令牌明文）。 */
@@ -44,6 +50,9 @@ export function mapTunnelConfig(raw: Record<string, unknown>): TunnelConfig {
     fpKeyring: raw.fp_keyring != null ? String(raw.fp_keyring) : null,
     credWinner: raw.cred_winner != null ? String(raw.cred_winner) : null,
     credMeta: (raw.cred_meta as TunnelConfig['credMeta']) ?? null,
+    dataDir: raw.data_dir != null ? String(raw.data_dir) : null,
+    dataDirTmpFallback: raw.data_dir_tmp_fallback === true,
+    effectiveUrl: raw.effective_url != null ? String(raw.effective_url) : null,
   }
 }
 
@@ -57,16 +66,38 @@ export function isValidTunnelUrl(url: string): boolean {
   return v.length > 0 && v.length <= 200 && !/\s/.test(v) && (v.startsWith('wss://') || v.startsWith('ws://'))
 }
 
-/** 保存端点；token 非空时一并写入凭据库（留空沿用已保存令牌）。 */
+/**
+ * 原子写入端点 + 令牌（Rust `tunnel_config_set`，一次调用同时落盘端点与令牌）。
+ * - `url === null` 表示沿用已配置端点；`secret === null` 表示沿用已保存令牌。
+ * - 两者皆 null 时：Rust 端直接 Err（与后端“至少提供一项”口径一致）；dev 分支返回现 url。
+ * - 成功返回含 `fingerprint` 的 JSON（缺字段时仅回 url）。
+ * - 非 Tauri 下写 localStorage 兼容（null 语义同样为“沿用”，不覆盖）。
+ */
+export async function tunnelConfigSet(
+  url: string | null,
+  secret: string | null,
+): Promise<{ url: string; fingerprint?: string }> {
+  if (!isTauri()) {
+    if (url !== null) localStorage.setItem('pony-tunnel-url', url)
+    if (secret !== null) localStorage.setItem('pony-dev-tunnel-token', secret)
+    return { url: url ?? localStorage.getItem('pony-tunnel-url') ?? '' }
+  }
+  const res = await invoke<Record<string, unknown>>('tunnel_config_set', { url, secret })
+  const outUrl = typeof res.url === 'string' ? res.url : (url ?? '')
+  const fp = res.fingerprint != null ? String(res.fingerprint) : undefined
+  return fp === undefined ? { url: outUrl } : { url: outUrl, fingerprint: fp }
+}
+
+/** 保存端点；token 非空时一并写入凭据库（留空沿用已保存令牌）。单次原子调用，失败直接抛错。 */
 export async function saveTunnelConfig(url: string, token: string): Promise<void> {
   const v = normalizeTunnelUrl(url)
   if (!isValidTunnelUrl(v)) throw new Error('隧道端点必须以 wss:// 或 ws:// 开头且不含空白')
+  const secret = token.trim() !== '' ? token.trim() : null
   if (isTauri()) {
-    await invoke('proxy_tunnel_set_url', { url: v })
-    if (token.trim() !== '') await invoke('tunnel_token_save', { secret: token.trim() })
+    await tunnelConfigSet(v, secret)
   } else {
     localStorage.setItem('pony-tunnel-url', v)
-    if (token.trim() !== '') localStorage.setItem('pony-dev-tunnel-token', token.trim())
+    if (secret !== null) localStorage.setItem('pony-dev-tunnel-token', secret)
   }
 }
 
@@ -81,15 +112,15 @@ export async function saveTunnelToken(secret: string): Promise<void> {
   }
 }
 
-/** 清除已保存的隧道令牌。 */
+/** 清除已保存的隧道令牌。成功返回 true；失败抛错（携带后端原文），不再静默返回 false。 */
 export async function clearTunnelToken(): Promise<boolean> {
   if (isTauri()) {
     try {
       await invoke('tunnel_token_clear')
-      return true
-    } catch {
-      return false
+    } catch (e: unknown) {
+      throw new Error(typeof e === 'string' ? e : (e as Error)?.message ?? String(e))
     }
+    return true
   }
   localStorage.removeItem('pony-dev-tunnel-token')
   return true
@@ -143,7 +174,7 @@ export async function importConnectCode(code: string): Promise<{ url: string; fi
     const parsed = parseGateInput(code)
     if (parsed?.kind !== 'code' || !parsed.url) throw new Error('连接口令格式不正确')
     localStorage.setItem('pony-tunnel-url', parsed.url)
-    localStorage.setItem('pony-dev-tunnel-token', 'dev-placeholder')
+    localStorage.setItem('pony-dev-tunnel-token', 'dev-mock-token')
     return { url: parsed.url }
   }
   return invoke('tunnel_connect_code_import', { code: code.trim() })
@@ -155,8 +186,18 @@ export interface GateCheckResult {
   ok: boolean
   ms?: number
   error?: string
-  /** P0/E10：错误分类（ok / auth401 / denied / timeout / closed / no_token / other） */
+  /** P0/E10：错误分类（ok / auth401 / denied / timeout / closed / no_token / other），保留旧 `kind` */
   kind?: string
+  /** gate 握手 Upgrade 头回显（新增 `kind_upgrade` 映射） */
+  kindUpgrade?: string
+  /** gate 首帧绑定结果（新增 `kind_bind` 映射） */
+  kindBind?: string
+  /** 双针明细（有意保留：Upgrade ok/ms/error + 首帧 ok/ms；排障时区分鉴权 vs 目标 egress） */
+  upgradeOk?: boolean
+  upgradeMs?: number
+  upgradeError?: string
+  bindOk?: boolean
+  bindMs?: number
 }
 
 export interface TunnelSelfCheck {
@@ -168,6 +209,8 @@ export interface TunnelSelfCheck {
   fpKeyring?: string | null
   credWinner?: string | null
   credMeta?: { last_write_ts: number; source: string; fp8: string } | null
+  /** dev 模拟标记：浏览器便利通道恒绿结果 */
+  mock?: boolean
 }
 
 /** 隧道健康自检：凭据可读性 + token 指纹 + 逐 gate 实测。 */
@@ -181,6 +224,7 @@ export async function tunnelSelfCheck(): Promise<TunnelSelfCheck> {
         { name: 'cf', url: 'wss://gate.example.com/ws', ok: true, ms: 120 },
         { name: 'vercel', url: 'wss://vgate.example.com/api/ws', ok: true, ms: 210 },
       ],
+      mock: true,
     }
   }
   // 常态区不展示分叉，仅自检区可见为已知取舍（分叉三值只在这里暴露）
@@ -191,11 +235,30 @@ export async function tunnelSelfCheck(): Promise<TunnelSelfCheck> {
  * 无此映射时分叉告警（fpFallback/fpKeyring）与写入展示（credMeta）在 UI 恒不可见。 */
 export function mapTunnelSelfCheck(raw: Record<string, unknown>): TunnelSelfCheck {
   const meta = raw.cred_meta as Record<string, unknown> | null | undefined
+  const gatesRaw = Array.isArray(raw.gates) ? (raw.gates as Record<string, unknown>[]) : []
   return {
     fingerprint: raw.fingerprint != null ? String(raw.fingerprint) : null,
     credOk: (raw.cred_ok as boolean) === true,
     credError: raw.cred_error != null ? String(raw.cred_error) : null,
-    gates: Array.isArray(raw.gates) ? (raw.gates as GateCheckResult[]) : [],
+    gates: gatesRaw.map((g) => {
+      const out: GateCheckResult = {
+        name: typeof g.name === 'string' ? g.name : '',
+        url: typeof g.url === 'string' ? g.url : '',
+        ok: (g.ok as boolean) === true,
+      }
+      if (typeof g.ms === 'number') out.ms = g.ms
+      if (g.error != null) out.error = String(g.error)
+      if (g.kind != null) out.kind = String(g.kind)
+      if (g.kind_upgrade != null) out.kindUpgrade = String(g.kind_upgrade)
+      if (g.kind_bind != null) out.kindBind = String(g.kind_bind)
+      // 双针明细（B-S-5：有意保留，不丢字段）
+      if (g.upgrade_ok != null) out.upgradeOk = (g.upgrade_ok as boolean) === true
+      if (typeof g.upgrade_ms === 'number') out.upgradeMs = g.upgrade_ms
+      if (g.upgrade_error != null) out.upgradeError = String(g.upgrade_error)
+      if (g.bind_ok != null) out.bindOk = (g.bind_ok as boolean) === true
+      if (typeof g.bind_ms === 'number') out.bindMs = g.bind_ms
+      return out
+    }),
     fpFallback: raw.fp_fallback != null ? String(raw.fp_fallback) : null,
     fpKeyring: raw.fp_keyring != null ? String(raw.fp_keyring) : null,
     credWinner: raw.cred_winner != null ? String(raw.cred_winner) : null,
@@ -207,7 +270,27 @@ export function mapTunnelSelfCheck(raw: Record<string, unknown>): TunnelSelfChec
             fp8: typeof meta.fp8 === 'string' ? meta.fp8 : '',
           }
         : null,
+    mock: raw.mock === true ? true : undefined,
   }
+}
+
+/** gate 错误分类中文文案（自检面板每行渲染用）。 */
+export const GATE_KIND_TEXT: Record<string, string> = {
+  auth401: '令牌无效，请重贴授权码',
+  denied: '被远端门禁拒绝，非令牌错误',
+  timeout: '网络超时',
+  closed: '连接被关闭',
+  no_token: '未配置令牌',
+  ok: '正常',
+  other: '未知错误',
+}
+
+/** 隧道配置就绪口径：分叉 > 凭据错误 > 缺端点/令牌 > 就绪。 */
+export function provisionReadiness(c: TunnelConfig): 'ready' | 'need_token' | 'cred_error' | 'diverged' {
+  if (c.fpFallback && c.fpKeyring && c.fpFallback !== c.fpKeyring) return 'diverged'
+  if (c.credError) return 'cred_error'
+  if (!c.url || !c.hasToken) return 'need_token'
+  return 'ready'
 }
 
 // ---- auto_proxy 偏好配置：默认 true（启动即开启智能模式代理） ----

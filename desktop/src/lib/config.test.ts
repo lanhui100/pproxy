@@ -50,10 +50,10 @@ describe('dev 便利通道（浏览器 localStorage）隧道配置往返', () =>
     expect(cfg.hasToken).toBe(true)
   })
 
-  it('clearTunnelToken 后 hasToken 归 false', async () => {
+  it('clearTunnelToken 后 hasToken 归 false（成功返回 true）', async () => {
     const mod = await loadConfig()
     await mod.saveTunnelConfig('wss://gate.example/ws', 'tok-1')
-    expect(await mod.clearTunnelToken()).toBe(true)
+    await expect(mod.clearTunnelToken()).resolves.toBe(true)
     const cfg = await mod.loadTunnelConfig()
     expect(cfg.hasToken).toBe(false)
     expect(cfg.url).toBe('wss://gate.example/ws') // 端点保留
@@ -116,7 +116,7 @@ describe('parseGateInput', () => {
 
 // ---- mapTunnelConfig：Rust snake_case → 前端 camelCase（review B P1-1 回归）----
 describe('mapTunnelConfig', () => {
-  it('映射正常凭据与指纹', async () => {
+  it('映射正常凭据与指纹（含 data_dir 缺字段兜底）', async () => {
     const mod = await loadConfig()
     const c = mod.mapTunnelConfig({
       url: 'wss://gate.example.com/ws',
@@ -133,7 +133,32 @@ describe('mapTunnelConfig', () => {
       fpKeyring: null,
       credWinner: null,
       credMeta: null,
+      dataDir: null,
+      dataDirTmpFallback: false,
+      effectiveUrl: null,
     })
+  })
+
+  it('映射 effective_url（引擎实际端点串）', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelConfig({
+      url: '',
+      has_token: true,
+      effective_url: 'wss://vgate.example.com/api/ws,wss://gate.example.com/ws',
+    })
+    expect(c.effectiveUrl).toBe('wss://vgate.example.com/api/ws,wss://gate.example.com/ws')
+  })
+
+  it('映射 data_dir 与 temp 回退标记', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelConfig({
+      url: 'wss://gate.example.com/ws',
+      has_token: true,
+      data_dir: 'C:\\Users\\x\\AppData\\Roaming\\pony',
+      data_dir_tmp_fallback: true,
+    })
+    expect(c.dataDir).toBe('C:\\Users\\x\\AppData\\Roaming\\pony')
+    expect(c.dataDirTmpFallback).toBe(true)
   })
 
   it('映射 P0 分源指纹与写入审计（H2 实锤三值）', async () => {
@@ -178,6 +203,9 @@ describe('mapTunnelConfig', () => {
       fpKeyring: null,
       credWinner: null,
       credMeta: null,
+      dataDir: null,
+      dataDirTmpFallback: false,
+      effectiveUrl: null,
     })
   })
 })
@@ -211,5 +239,169 @@ describe('mapTunnelSelfCheck', () => {
     expect(c.credOk).toBe(false)
     expect(c.gates).toEqual([])
     expect(c.credMeta).toBeNull()
+  })
+
+  it('映射 kind_upgrade/kind_bind 双针（保留旧 kind）', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelSelfCheck({
+      fingerprint: 'f',
+      cred_ok: false,
+      cred_error: null,
+      gates: [
+        { name: 'cf', url: 'wss://gate.example.com/ws', ok: false, kind: 'auth401', kind_upgrade: 'websocket', kind_bind: 'bad_frame' },
+      ],
+    })
+    expect(c.gates[0]?.kind).toBe('auth401')
+    expect(c.gates[0]?.kindUpgrade).toBe('websocket')
+    expect(c.gates[0]?.kindBind).toBe('bad_frame')
+  })
+
+  it('缺 kind_upgrade/kind_bind 时为 undefined（兜底）', async () => {
+    const mod = await loadConfig()
+    const c = mod.mapTunnelSelfCheck({
+      fingerprint: 'f',
+      cred_ok: true,
+      cred_error: null,
+      gates: [{ name: 'cf', url: 'wss://gate.example.com/ws', ok: true, ms: 1, kind: 'ok' }],
+    })
+    expect(c.gates[0]?.kindUpgrade).toBeUndefined()
+    expect(c.gates[0]?.kindBind).toBeUndefined()
+  })
+})
+
+// ---- GATE_KIND_TEXT：gate 错误分类中文文案 ----
+describe('GATE_KIND_TEXT', () => {
+  it('七类 kind 均有中文映射', async () => {
+    const mod = await loadConfig()
+    expect(mod.GATE_KIND_TEXT).toEqual({
+      auth401: '令牌无效，请重贴授权码',
+      denied: '被远端门禁拒绝，非令牌错误',
+      timeout: '网络超时',
+      closed: '连接被关闭',
+      no_token: '未配置令牌',
+      ok: '正常',
+      other: '未知错误',
+    })
+  })
+})
+
+// ---- provisionReadiness：ready / need_token / cred_error / diverged ----
+describe('provisionReadiness', () => {
+  it('端点+令牌齐备 → ready', async () => {
+    const mod = await loadConfig()
+    expect(mod.provisionReadiness({ url: 'wss://gate.example.com/ws', hasToken: true })).toBe('ready')
+  })
+
+  it('缺端点或令牌 → need_token', async () => {
+    const mod = await loadConfig()
+    expect(mod.provisionReadiness({ url: '', hasToken: true })).toBe('need_token')
+    expect(mod.provisionReadiness({ url: 'wss://gate.example.com/ws', hasToken: false })).toBe('need_token')
+  })
+
+  it('有 credError → cred_error', async () => {
+    const mod = await loadConfig()
+    expect(
+      mod.provisionReadiness({ url: 'wss://gate.example.com/ws', hasToken: true, credError: '凭据损坏' }),
+    ).toBe('cred_error')
+  })
+
+  it('fpFallback 与 fpKeyring 不一致 → diverged（优先于 credError）', async () => {
+    const mod = await loadConfig()
+    expect(
+      mod.provisionReadiness({
+        url: 'wss://gate.example.com/ws',
+        hasToken: true,
+        credError: 'x',
+        fpFallback: 'bbbb2222',
+        fpKeyring: 'aaaa1111',
+      }),
+    ).toBe('diverged')
+  })
+
+  it('fp 一致时不判分叉', async () => {
+    const mod = await loadConfig()
+    expect(
+      mod.provisionReadiness({
+        url: 'wss://gate.example.com/ws',
+        hasToken: true,
+        fpFallback: 'aaaa1111',
+        fpKeyring: 'aaaa1111',
+      }),
+    ).toBe('ready')
+  })
+})
+
+// ---- clearTunnelToken（Tauri 抛错语义：失败抛错带后端原文，不再返回 false）----
+describe('clearTunnelToken（Tauri 抛错语义）', () => {
+  it('invoke 失败时抛错并携带后端原文', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} })
+    vi.doMock('@tauri-apps/api/core', () => ({
+      invoke: () => Promise.reject(new Error('keyring locked')),
+    }))
+    try {
+      const mod = await loadConfig()
+      await expect(mod.clearTunnelToken()).rejects.toThrow('keyring locked')
+    } finally {
+      vi.doUnmock('@tauri-apps/api/core')
+    }
+  })
+
+  it('invoke 以字符串抛错时同样透出原文', async () => {
+    vi.stubGlobal('window', { __TAURI_INTERNALS__: {} })
+    vi.doMock('@tauri-apps/api/core', () => ({
+      // eslint-disable-next-line @typescript-eslint/no-base-to-string
+      invoke: () => Promise.reject('凭据库不可写'),
+    }))
+    try {
+      const mod = await loadConfig()
+      await expect(mod.clearTunnelToken()).rejects.toThrow('凭据库不可写')
+    } finally {
+      vi.doUnmock('@tauri-apps/api/core')
+    }
+  })
+})
+
+// ---- tunnelConfigSet dev 分支：localStorage 兼容 + null 沿用语义 ----
+describe('tunnelConfigSet（dev 分支）', () => {
+  it('写入端点与令牌并回显 url', async () => {
+    const mod = await loadConfig()
+    const res = await mod.tunnelConfigSet('wss://gate.example.com/ws', 'tok-1')
+    expect(res.url).toBe('wss://gate.example.com/ws')
+    const cfg = await mod.loadTunnelConfig()
+    expect(cfg.url).toBe('wss://gate.example.com/ws')
+    expect(cfg.hasToken).toBe(true)
+  })
+
+  it('null 表示沿用，不覆盖已存值', async () => {
+    const mod = await loadConfig({ 'pony-tunnel-url': 'wss://old.example/ws', 'pony-dev-tunnel-token': 'old-tok' })
+    const res = await mod.tunnelConfigSet(null, null)
+    expect(res.url).toBe('wss://old.example/ws')
+    const cfg = await mod.loadTunnelConfig()
+    expect(cfg.url).toBe('wss://old.example/ws')
+    expect(cfg.hasToken).toBe(true)
+  })
+})
+
+// ---- importConnectCode dev 分支：token 改为 dev-mock-token ----
+describe('importConnectCode（dev 分支）', () => {
+  it('写入可识别的 dev-mock-token', async () => {
+    const mod = await loadConfig()
+    const json = JSON.stringify({ v: 1, u: 'wss://gate.example.com/ws', t: 'tok' })
+    const code = `pony-gate://${Buffer.from(json, 'utf8').toString('base64url')}`
+    const res = await mod.importConnectCode(code)
+    expect(res.url).toBe('wss://gate.example.com/ws')
+    const cfg = await mod.loadTunnelConfig()
+    expect(cfg.hasToken).toBe(true)
+  })
+})
+
+// ---- tunnelSelfCheck dev 分支：恒绿结果带 mock 标记 ----
+describe('tunnelSelfCheck（dev 分支）', () => {
+  it('返回 mock: true', async () => {
+    const mod = await loadConfig()
+    const c = await mod.tunnelSelfCheck()
+    expect(c.mock).toBe(true)
+    expect(c.credOk).toBe(true)
+    expect(c.gates.length).toBe(2)
   })
 })

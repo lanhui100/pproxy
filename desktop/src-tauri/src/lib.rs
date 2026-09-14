@@ -196,7 +196,7 @@ pub fn run() {
       proxy_whitelist_get, proxy_whitelist_set, proxy_mode_get, proxy_mode_set,
       proxy_enable, proxy_disable, proxy_pac, proxy_status, proxy_test_sites,
       proxy_tunnel_get, proxy_tunnel_set_url, tunnel_token_save, tunnel_token_clear,
-      tunnel_connect_code_import, tunnel_self_check,
+      tunnel_connect_code_import, tunnel_self_check, tunnel_config_set,
       proxy_auto_config_get, proxy_auto_config_set, app_config_get, app_config_set,
       proxy_bypass_hosts,
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
@@ -284,6 +284,93 @@ fn cred_fingerprint_of(s: &str) -> String {
   use sha2::{Digest, Sha256};
   hex::encode(&Sha256::digest(s.as_bytes())[..4])
 }
+/// 时间戳备份裁剪：只保留最近 5 个 `.dat.bak.<millis>_<pid>`（按文件名排序删旧；最新 `.bak` 不在此列）。
+fn cred_prune_timestamped_backups(fb_path: &std::path::Path) {
+  let prefix = format!("{}.bak.", fb_path.display());
+  let dir = match fb_path.parent() {
+    Some(d) => d,
+    None => return,
+  };
+  let mut olds: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+    .ok()
+    .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.display().to_string().starts_with(&prefix)).collect())
+    .unwrap_or_default();
+  olds.sort();
+  while olds.len() > 5 {
+    let victim = olds.remove(0);
+    let _ = std::fs::remove_file(victim);
+  }
+}
+
+/// 时间戳备份全删（显式清除路径：.dat.bak + 全部时间戳副本，不留活密钥）。
+fn cred_remove_timestamped_backups(fb_path: &std::path::Path) {
+  let prefix = format!("{}.bak.", fb_path.display());
+  let dir = match fb_path.parent() {
+    Some(d) => d,
+    None => return,
+  };
+  if let Ok(rd) = std::fs::read_dir(dir) {
+    for e in rd.filter_map(|e| e.ok()) {
+      let p = e.path();
+      if p.display().to_string().starts_with(&prefix) {
+        let _ = std::fs::remove_file(p);
+      }
+    }
+  }
+}
+
+/// 新时间戳备份名（毫秒 + pid：秒级同名在高频分叉下会覆盖丢代）。
+fn cred_timestamped_bak_path(fb_path: &std::path::Path) -> std::path::PathBuf {
+  let ms = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_millis())
+    .unwrap_or(0);
+  std::path::PathBuf::from(format!("{}.bak.{ms}_{}", fb_path.display(), std::process::id()))
+}
+
+/// Unix 显式 0600（fallback 存明文密钥；Windows 走 ACL，不动）。
+#[cfg(unix)]
+fn cred_restrict_permissions(p: &std::path::Path) {
+  use std::os::unix::fs::PermissionsExt;
+  let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+}
+
+/// 分叉自修复写段（锁内串行）：重读 fallback，仍分叉才备份 + tmp/rename 覆盖 + 审计。
+/// 调用方 `cred_detail_impl` 不持锁（keyring IPC 已在锁外完成），此处只锁文件读改写，
+/// 与 `cred_set` / `cred_delete` 互斥，并发“读-改-写自愈 × 写”不撕裂。
+/// 返回 winner；重读已一致（并发 set 抢先）则无需覆盖，返回 `"keyring"`。
+fn cred_self_heal_locked(user: &str, keyring_val: &str) -> &'static str {
+  let _guard = CRED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+  let fb_path = cred_fallback_file(user);
+  let cur_fb = std::fs::read_to_string(&fb_path)
+    .ok()
+    .as_deref()
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .map(|s| s.to_string());
+  match cur_fb {
+    Some(f) if f != keyring_val => {
+      let bak_path = fb_path.with_extension("dat.bak");
+      let _ = std::fs::copy(&fb_path, &bak_path);
+      let ts_bak = cred_timestamped_bak_path(&fb_path);
+      let _ = std::fs::copy(&fb_path, &ts_bak);
+      cred_prune_timestamped_backups(&fb_path);
+      let tmp = fb_path.with_extension("dat.tmp");
+      if std::fs::write(&tmp, keyring_val.as_bytes()).is_ok()
+        && std::fs::rename(&tmp, &fb_path).is_ok()
+      {
+        #[cfg(unix)]
+        cred_restrict_permissions(&fb_path);
+        cred_meta_record(user, "self_heal_diverged", keyring_val);
+        log::warn!("credential divergence for {user}: keyring wins, fallback self-healed (old kept at .bak)");
+      } else {
+        log::warn!("credential divergence for {user}: keyring wins in memory, fallback heal failed");
+      }
+      "keyring(diverged)"
+    }
+    _ => "keyring",
+  }
+}
 fn cred_detail_impl(user: &str) -> Result<CredDetail, String> {
   #[cfg(debug_assertions)]
   if let Some(p) = cred_dev_file(user) {
@@ -309,18 +396,27 @@ fn cred_detail_impl(user: &str) -> Result<CredDetail, String> {
   // P0-3 降级方向：keyring（系统凭据库）> fallback（本地备份）。
   // 旧 fallback 残留曾永久屏蔽 keyring 新值；现分叉时以 keyring 为准并自修复 fallback，同时上报。
   // Must-fix D：自修复前先备份旧 fallback（.bak），成功后补审计——keyring 被污染时不销毁唯一正确副本。
+  // 新鲜度仲裁：meta 证明 fallback 是人工写入来源的最新值（meta.fp8 == fallback 且 != keyring）
+  // → 疑似 keyring 被外部污染，不覆盖 fallback，只反向告警，等人工裁决。
+  let meta = cred_meta_load(user);
+  // 权威 store 决策（产品裁决：分叉永不静默覆盖，以“最后一次人工写入”为准）：
+  // - meta.fp8 == fallback 且 != keyring → keyring 疑似被外部污染，有效值取 fallback，
+  //   winner=`fallback(diverged-unhealed)`，只告警，等用户显式重贴统一（不自动覆盖）。
+  // - 其余分叉 → keyring 为准并自修复 fallback（旧副本留 .bak + 时间戳多代），winner=`keyring(diverged)`。
+  // meta 仅为 advisory（本地可写文件，不做信任假设；缺失/损坏即回退 keyring-wins）。
   let (value, winner) = match (&keyring_val, &fallback_val) {
     (Some(k), Some(f)) if k != f => {
-      let fb_path = cred_fallback_file(user);
-      let bak_path = fb_path.with_extension("dat.bak");
-      let _ = std::fs::copy(&fb_path, &bak_path);
-      if std::fs::write(&fb_path, k.as_bytes()).is_ok() {
-        cred_meta_record(user, "self_heal_diverged", k);
-        log::warn!("credential divergence for {user}: keyring wins, fallback self-healed (old kept at .bak)");
+      let fp_f = fp_fallback.as_deref().unwrap_or("");
+      let fp_k = fp_keyring.as_deref().unwrap_or("");
+      let manual = matches!(meta.source.as_str(), "tunnel_token_save" | "connect_code_import" | "configure_direct_tunnel" | "tunnel_config_set");
+      if manual && !meta.fp8.is_empty() && meta.fp8 == fp_f && meta.fp8 != fp_k {
+        log::warn!("credential divergence for {user}: fallback matches last manual write fp8={fp_f} (source={}), keyring fp8={fp_k} suspect — effective value is fallback, awaiting explicit re-paste", meta.source);
+        (Some(f.clone()), "fallback(diverged-unhealed)")
       } else {
-        log::warn!("credential divergence for {user}: keyring wins in memory, fallback heal failed");
+        // 锁内串行读改写（与 cred_set / cred_delete 互斥），重读仍分叉才覆盖
+        let winner = cred_self_heal_locked(user, k);
+        (Some(k.clone()), winner)
       }
-      (Some(k.clone()), "keyring(diverged)")
     }
     (Some(k), _) => (Some(k.clone()), "keyring"),
     (None, Some(f)) => (Some(f.clone()), "fallback"),
@@ -333,8 +429,15 @@ fn cred_set_impl(user: &str, secret: String) -> Result<(), String> {
   cred_set_impl_with_source(user, secret, "unknown")
 }
 
+/// 凭据文件互斥：所有触碰 fallback/.bak/meta 的读改写必须经此锁串行
+///（`cred_set` 全段、`cred_self_heal_locked` 写段、`cred_delete` 全段；
+/// `cred_detail_impl` 的 keyring IPC 在锁外，重读-覆盖收敛到 `cred_self_heal_locked` 内）。
+/// meta 写只发生在上述三处锁内，不存在独立调用方。禁止在 async 上下文持锁（均为同步命令路径）。
+static CRED_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// 带来源审计的凭据写入（P0）：双写任一失败即 Err（禁止“内存先行、磁盘静默失败”导致的内存-磁盘分裂）。
 fn cred_set_impl_with_source(user: &str, secret: String, source: &str) -> Result<(), String> {
+  let _guard = CRED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
   #[cfg(debug_assertions)]
   if let Some(p) = cred_dev_file(user) {
     std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -347,10 +450,14 @@ fn cred_set_impl_with_source(user: &str, secret: String, source: &str) -> Result
   let ent = cred_entry(user)?;
   ent.set_password(&secret).map_err(|e| format!("credential set failed: {e}"))?;
 
-  // 2. 再写本地私有目录备份。失败同样整体失败（调用方必须向用户报错，而非内存先行）。
-  let fallback = cred_fallback_file(user);
-  std::fs::create_dir_all(fallback.parent().unwrap()).map_err(|e| format!("fallback dir failed: {e}"))?;
-  std::fs::write(&fallback, secret.as_bytes()).map_err(|e| format!("fallback write failed: {e}"))?;
+  // 2. 再写本地私有目录备份（与 meta 同目录顺序写：先 fallback tmp+rename，再审计）。
+  // 失败同样整体失败，但 keyring 已成功 → 返回半写分类错误，调用方必须向用户报错重贴。
+  let dir = data_dir();
+  let fallback = dir.join(format!(".{user}.dat"));
+  std::fs::create_dir_all(&dir).map_err(|e| format!("half-written:keyring-ok,fallback-dir-{e}"))?;
+  let tmp = dir.join(format!(".{user}.dat.tmp"));
+  std::fs::write(&tmp, secret.as_bytes()).map_err(|e| format!("half-written:keyring-ok,fallback-{e}"))?;
+  std::fs::rename(&tmp, &fallback).map_err(|e| format!("half-written:keyring-ok,fallback-{e}"))?;
 
   cred_meta_record(user, source, &secret);
   Ok(())
@@ -398,17 +505,32 @@ fn cred_delete_impl(user: &str) -> Result<(), String> {
   cred_delete_impl_with_source(user, "unknown")
 }
 
-fn cred_delete_impl_with_source(user: &str, source: &str) -> Result<(), String> {
-  #[cfg(debug_assertions)]
-  if let Some(p) = cred_dev_file(user) { let _=std::fs::remove_file(p); return Ok(()); }
-
+/// fallback 全件套删除（显式清除路径：.dat + .dat.bak + 全部时间戳副本，不留活密钥；
+/// 与自愈“保留 .bak”严格区分）。纯文件操作，不碰 keyring，可独立单测。
+fn cred_remove_fallback_all(user: &str) {
   let fallback = cred_fallback_file(user);
   let _ = std::fs::remove_file(&fallback);
   let _ = std::fs::remove_file(fallback.with_extension("dat.bak"));
+  cred_remove_timestamped_backups(&fallback);
+}
 
+fn cred_delete_impl_with_source(user: &str, source: &str) -> Result<(), String> {
+  let _guard = CRED_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+  #[cfg(debug_assertions)]
+  if let Some(p) = cred_dev_file(user) { let _=std::fs::remove_file(p); return Ok(()); }
+
+  // 顺序：keyring 先删（失败即整体失败，fallback 完好可续命，不分裂）；
+  // 再删 fallback 全件套（.dat + .bak + 时间戳多代——显式清除不留活密钥，
+  // 与自愈“保留 .bak”严格区分）；最后 tombstone 审计。
   if let Ok(ent) = cred_entry(user) {
-    let _ = ent.delete_credential();
+    match ent.delete_credential() {
+      Ok(()) => {}
+      // NoEntry 视为成功（本来就无值）；其他 Err 上抛，禁止吞掉
+      Err(keyring::Error::NoEntry) => {}
+      Err(e) => return Err(format!("credential delete failed: {e}")),
+    }
   }
+  cred_remove_fallback_all(user);
   // Must-fix F：删除保留审计 tombstone（禁止审计归零——何时/何因清除是 H2 关键时间线）
   cred_meta_record_tombstone(user, source);
   Ok(())
@@ -443,8 +565,56 @@ fn seed() -> Vec<String> {
 }
 const ALWAYS_TUNNEL: &[&str] = &["github.com", "githubusercontent.com"];
 fn data_dir() -> std::path::PathBuf {
-    #[cfg(windows)] { std::env::var("APPDATA").map(std::path::PathBuf::from).unwrap_or(std::env::temp_dir()).join("pony-desktop") }
-    #[cfg(not(windows))] { std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".pony-desktop")).unwrap_or(std::env::temp_dir()) }
+    static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+    #[cfg(windows)]
+    let (dir, via_temp) = match std::env::var("APPDATA") {
+        Ok(v) => (std::path::PathBuf::from(v).join("pony-desktop"), false),
+        Err(_) => (std::env::temp_dir().join("pony-desktop"), true),
+    };
+    #[cfg(not(windows))]
+    let (dir, via_temp): (std::path::PathBuf, bool) = match std::env::var("HOME") {
+        Ok(h) => (std::path::PathBuf::from(h).join(".pony-desktop"), false),
+        Err(_) => (std::env::temp_dir(), true),
+    };
+    LOG_ONCE.call_once(|| {
+        log::info!("data_dir resolved: {}", dir.display());
+    });
+    // via_temp 时每次 warn 会刷日志（data_dir 调用频繁）——限频：进程内只告警一次
+    if via_temp {
+        static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+        WARN_ONCE.call_once(|| {
+            log::warn!("data_dir: 环境变量缺失，已回退到系统临时目录: {}", dir.display());
+        });
+    }
+    dir
+}
+/// 双源回读校验（A-P0-2）：禁止 value-first 单源通过——要求 fallback 与 keyring
+/// 双指纹都等于期望 secret 指纹。任一源缺失/分叉即 Err（half-written 可证伪），
+/// 防止 keyring-ok+fallback-fail 或 keyring 瞬时错读被误判为落盘成功。
+fn cred_verify_dual_source(user: &str, secret: &str) -> Result<(), String> {
+  let want = cred_fingerprint_of(secret.trim());
+  let d = cred_detail_impl(user).map_err(|e| format!("隧道凭据落盘校验失败：{e}"))?;
+  let ok_fb = d.fp_fallback.as_deref() == Some(want.as_str());
+  let ok_kr = d.fp_keyring.as_deref() == Some(want.as_str());
+  if ok_fb && ok_kr {
+    return Ok(());
+  }
+  Err(format!(
+    "隧道凭据落盘校验失败（双源不一致：fallback={} keyring={}，期望 fp8={want}）：请重试或检查系统凭据库权限",
+    if ok_fb { "ok" } else { "mismatch" },
+    if ok_kr { "ok" } else { "mismatch" },
+  ))
+}
+/// 数据目录是否走了临时回退（供前端展示重启丢失风险警告；与 `data_dir()` 同口径，不读盘）。
+fn data_dir_tmp_fallback() -> bool {
+    #[cfg(windows)]
+    {
+        std::env::var("APPDATA").is_err()
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("HOME").is_err()
+    }
 }
 fn app_config_path() -> std::path::PathBuf { data_dir().join("app_config.json") }
 fn whitelist_file_path() -> std::path::PathBuf { data_dir().join("whitelist.json") }
@@ -655,7 +825,9 @@ fn validate_tunnel_url(url: &str) -> Result<(), String> {
 }
 #[tauri::command]
 fn proxy_tunnel_get() -> serde_json::Value {
-  let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(migrate_tunnel_url)).unwrap_or_default();
+  // 口径统一（A-P1-8）：与 tunnel_config_load / tunnel_self_check 同走 migrate，
+  // UI 空端点与引擎默认双端点回退不再分叉（get 展示 migrate 后值）。
+  let url = tunnel_url_load().unwrap_or_default();
   let detail = cred_detail_impl(CREDENTIAL_USER_TUNNEL).unwrap_or_default();
   let (has_token, cred_error) = match (&detail.value, &detail.keyring_error) {
     (Some(t), _) if !t.is_empty() => (
@@ -667,8 +839,11 @@ fn proxy_tunnel_get() -> serde_json::Value {
   };
   // P0/E4：分源指纹全暴露（H2 实锤前提）；P0/E7：上次写入审计
   let meta = cred_meta_load(CREDENTIAL_USER_TUNNEL);
+  // effective_url：引擎实际使用的端点串（含默认双端点回退），UI 与引擎不再分叉
+  let (eff_url, _) = tunnel_config_load();
   serde_json::json!({
     "url": url,
+    "effective_url": eff_url.unwrap_or_default(),
     "has_token": has_token,
     "cred_error": cred_error,
     "fingerprint": detail.value.as_deref().map(cred_fingerprint_of),
@@ -676,6 +851,8 @@ fn proxy_tunnel_get() -> serde_json::Value {
     "fp_keyring": detail.fp_keyring,
     "cred_winner": detail.winner,
     "cred_meta": { "last_write_ts": meta.last_write_ts, "source": meta.source, "fp8": meta.fp8 },
+    "data_dir": data_dir().display().to_string(),
+    "data_dir_tmp_fallback": data_dir_tmp_fallback(),
   })
 }
 #[tauri::command]
@@ -688,7 +865,7 @@ fn proxy_tunnel_set_url(url: String) -> Result<(), String> {
   let target = dir.join(TUNNEL_FILE);
   std::fs::write(&tmp, serde_json::to_string(&serde_json::json!({ "url": url })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
   std::fs::rename(&tmp, target).map_err(|e| e.to_string())?;
-  let _ = ensure_tunnel_watch().send(tunnel_config_load());
+  tunnel_watch_send_fresh();
   Ok(())
 }
 #[tauri::command]
@@ -697,13 +874,25 @@ fn tunnel_token_save(secret: String) -> Result<(), String> {
   let secret = secret.trim().to_string();
   // P0：双写任一失败即整体失败（cred_set 双写 Err 化），禁止内存先行造成分裂
   cred_set_impl_with_source(CREDENTIAL_USER_TUNNEL, secret.clone(), "tunnel_token_save")?;
+  // 双源回读校验（A-P0-2：禁止 value-first 单源通过）：失败禁止广播 watch
+  cred_verify_dual_source(CREDENTIAL_USER_TUNNEL, &secret)?;
   // 直发用户输入的 secret（不回读凭据），与 configure_direct_tunnel 同口径：
   // 凭据回读失败（如外部工具以非 keyring 编码写入）不影响本次保存即时生效。
+  // 单次广播（A-P1-10）：补默认端点时直写文件不广播，避免中间态被引擎/池观察到。
   let (url, _) = tunnel_config_load();
   let url = match url {
     Some(u) => u,
     // 无合法端点配置时补齐默认双 gate（裸 token 粘贴即完成全部配置）
-    None => { proxy_tunnel_set_url(DEFAULT_TUNNEL_URLS.to_string())?; DEFAULT_TUNNEL_URLS.to_string() }
+    None => {
+      let dir = data_dir();
+      std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+      let tmp = dir.join("tunnel.json.tmp");
+      let target = dir.join(TUNNEL_FILE);
+      let body = serde_json::to_string(&serde_json::json!({ "url": DEFAULT_TUNNEL_URLS })).map_err(|e| e.to_string())?;
+      std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
+      std::fs::rename(&tmp, target).map_err(|e| e.to_string())?;
+      DEFAULT_TUNNEL_URLS.to_string()
+    }
   };
   let _ = ensure_tunnel_watch().send((Some(url), Some(secret)));
   Ok(())
@@ -785,21 +974,15 @@ fn parse_connect_code(code: &str) -> Result<(String, String), String> {
   Ok((url.to_string(), token.to_string()))
 }
 
-/// 一键导入 pony-gate:// 连接口令：写端点 + 写凭据 + 直发 watch，即时生效（无需重启）。
+/// 一键导入 pony-gate:// 连接口令：经原子命令写端点 + 写凭据 + 单次广播，即时生效（无需重启）。
 #[tauri::command]
 fn tunnel_connect_code_import(code: String) -> Result<serde_json::Value, String> {
   let (url, token) = parse_connect_code(&code)?;
-  proxy_tunnel_set_url(url.clone())?;
-  cred_set_impl_with_source(CREDENTIAL_USER_TUNNEL, token.clone(), "connect_code_import")?;
-  let _ = ensure_tunnel_watch().send((Some(url.clone()), Some(token)));
-  let _ = app_config_set(serde_json::json!({
-    "mode_type": "direct",
-    "configured": true
-  }));
+  let set_res = tunnel_config_set(Some(url.clone()), Some(token))?;
   Ok(serde_json::json!({
     "success": true,
     "url": url,
-    "fingerprint": tunnel_token_fingerprint(),
+    "fingerprint": set_res.get("fingerprint").cloned().unwrap_or(serde_json::Value::Null),
     "message": "连接口令已导入，端点与令牌即时生效",
   }))
 }
@@ -828,11 +1011,28 @@ async fn tunnel_self_check() -> Result<serde_json::Value, String> {
   for u in urls {
     let name = if u.contains("vercel") || u.contains("vgate") { "vercel" } else { "cf" };
     let item = match &token {
-      Some(t) => match proxy::engine_tunnel::probe_gate_rtt(&u, t).await {
-        Ok(ms) => serde_json::json!({ "name": name, "url": u, "ok": true, "ms": ms, "kind": "ok" }),
-        Err(e) => serde_json::json!({ "name": name, "url": u, "ok": false, "error": e, "kind": proxy::engine_tunnel::classify_probe_error(&e) }),
-      },
-      None => serde_json::json!({ "name": name, "url": u, "ok": false, "error": "no token", "kind": "no_token" }),
+      Some(t) => {
+        // Upgrade 探针与 bind 探针并发跑；旧 kind 取 bind 分类（无 token 仍为 no_token）
+        let (up_res, bind_res) = tokio::join!(
+          proxy::engine_tunnel::probe_gate_rtt(&u, t),
+          proxy::engine_tunnel::probe_via_gate(&u, t, "www.google.com", 443)
+        );
+        let (up_ok, up_ms, up_kind, up_err) = match up_res {
+          Ok(ms) => (true, serde_json::json!(ms), "ok".to_string(), serde_json::Value::Null),
+          Err(e) => (false, serde_json::json!(0), proxy::engine_tunnel::classify_probe_error(&e).to_string(), serde_json::json!(e)),
+        };
+        let (bind_ok, bind_ms, bind_kind, bind_err) = match bind_res {
+          Ok(ms) => (true, serde_json::json!(ms), "ok".to_string(), serde_json::Value::Null),
+          Err(e) => (false, serde_json::json!(0), proxy::engine_tunnel::classify_probe_error(&e).to_string(), serde_json::json!(e)),
+        };
+        serde_json::json!({
+          "name": name, "url": u,
+          "ok": bind_ok, "ms": bind_ms, "error": bind_err, "kind": bind_kind,
+          "kind_upgrade": up_kind, "upgrade_ok": up_ok, "upgrade_ms": up_ms, "upgrade_error": up_err,
+          "kind_bind": bind_kind, "bind_ok": bind_ok, "bind_ms": bind_ms,
+        })
+      }
+      None => serde_json::json!({ "name": name, "url": u, "ok": false, "error": "no token", "kind": "no_token", "kind_upgrade": "no_token", "kind_bind": "no_token" }),
     };
     gates.push(item);
   }
@@ -848,13 +1048,94 @@ async fn tunnel_self_check() -> Result<serde_json::Value, String> {
     "fp_keyring": detail.fp_keyring,
     "cred_winner": detail.winner,
     "cred_meta": { "last_write_ts": meta.last_write_ts, "source": meta.source, "fp8": meta.fp8 },
+    "data_dir": data_dir().display().to_string(),
+    "data_dir_tmp_fallback": data_dir_tmp_fallback(),
   }))
 }
 #[tauri::command]
 fn tunnel_token_clear() -> Result<(), String> {
   cred_delete_impl_with_source(CREDENTIAL_USER_TUNNEL, "tunnel_token_clear")?;
+  // A-P1-12：显式清除直发广播，绕过防毒化守卫——清除是用户安全意图，
+  // 即使 keyring 瞬时故障也不得让旧凭据在引擎续命（与瞬时故障的旧值续命严格区分）
   let _ = ensure_tunnel_watch().send(tunnel_config_load());
   Ok(())
+}
+/// 端点+凭据原子设置：url/secret 均为 Option（None=沿用）；任一失败即 Err 且不广播。
+/// 成功后回读校验凭据（有 secret 时）再单次广播，最后切 direct/configured。
+#[tauri::command]
+fn tunnel_config_set(url: Option<String>, secret: Option<String>) -> Result<serde_json::Value, String> {
+  if url.is_none() && secret.is_none() {
+    return Err("隧道端点与令牌均为空：请至少提供其中一项".into());
+  }
+  let norm_url: Option<String> = match url {
+    Some(u) => {
+      let t = u.trim().to_string();
+      validate_tunnel_url(&t)?;
+      if !t.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).all(|x| x.starts_with("wss://") || x.starts_with("ws://")) {
+        return Err("tunnel url must start with wss:// or ws://".into());
+      }
+      Some(t)
+    }
+    None => None,
+  };
+  let norm_secret: Option<String> = match secret {
+    Some(s) => {
+      let t = s.trim().to_string();
+      if t.is_empty() { return Err("隧道令牌为空：已保留旧令牌，未覆盖".into()); }
+      Some(t)
+    }
+    None => None,
+  };
+  // 先写端点（有 url 时）再双写凭据（有 secret 时）；任一失败即 Err，
+  // 且回滚已落盘的端点（真原子：失败即“什么都没变”，调用方可安全重试）。
+  // 注意：端点此处直写文件而不调用 proxy_tunnel_set_url，避免中途广播破坏原子性。
+  let prev_url_raw = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok();
+  let rollback_url = |prev: &Option<String>| {
+    let target = data_dir().join(TUNNEL_FILE);
+    match prev {
+      Some(prev) => {
+        let tmp = data_dir().join("tunnel.json.tmp");
+        if std::fs::write(&tmp, prev).is_ok() {
+          let _ = std::fs::rename(&tmp, target);
+        }
+      }
+      None => {
+        let _ = std::fs::remove_file(target);
+      }
+    }
+  };
+  if let Some(ref u) = norm_url {
+    let dir = data_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let tmp = dir.join("tunnel.json.tmp");
+    let target = dir.join(TUNNEL_FILE);
+    std::fs::write(&tmp, serde_json::to_string(&serde_json::json!({ "url": u })).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, target).map_err(|e| e.to_string())?;
+  }
+  if let Some(ref s) = norm_secret {
+    if let Err(e) = cred_set_impl_with_source(CREDENTIAL_USER_TUNNEL, s.clone(), "tunnel_config_set") {
+      rollback_url(&prev_url_raw);
+      return Err(e);
+    }
+  }
+  // 成功后双源回读校验凭据（有 secret 时：双指纹一致才算落盘成功），再单次广播；
+  // 校验失败回滚端点（真原子：失败即“什么都没变”）
+  if let Some(ref s) = norm_secret {
+    if let Err(e) = cred_verify_dual_source(CREDENTIAL_USER_TUNNEL, s) {
+      rollback_url(&prev_url_raw);
+      return Err(e);
+    }
+  }
+  let _ = ensure_tunnel_watch().send(tunnel_config_load());
+  // 配置标记落盘失败必须上抛（A-P0-3：禁止 `configured=true` 虚报）
+  app_config_set(serde_json::json!({ "mode_type": "direct", "configured": true }))?;
+  let echo_url = tunnel_url_load().unwrap_or_default();
+  Ok(serde_json::json!({
+    "success": true,
+    "url": echo_url,
+    "fingerprint": tunnel_token_fingerprint(),
+    "message": "隧道配置已更新并即时生效",
+  }))
 }
 /// P0：401 自愈成功后的落盘（禁止只广播 watch 不落盘——否则 probe/流量分叉 + 重启丢失）。
 /// 与 cred_set 同口径（keyring 主 + fallback 备 + 审计），失败返回 Err 由调用方告警。
@@ -862,10 +1143,46 @@ pub(crate) fn persist_healed_tunnel_token(secret: &str, source: &str) -> Result<
     cred_set_impl_with_source(CREDENTIAL_USER_TUNNEL, secret.trim().to_string(), source)
 }
 
+/// 隧道端点加载：读 tunnel.json + migrate + validate，失败返回 None（不碰凭据）。
+fn tunnel_url_load() -> Option<String> {
+  std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok()
+    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    .and_then(|v| v.get("url").and_then(|u| u.as_str()).map(migrate_tunnel_url))
+    .filter(|u| validate_tunnel_url(u).is_ok())
+}
+/// 隧道令牌加载状态：Ok=值或无；Err=keyring 瞬时错（调用方决定是否毒化下游）。
+fn tunnel_token_load_status() -> Result<Option<String>, String> {
+  cred_get_impl(CREDENTIAL_USER_TUNNEL).map(|v| v.filter(|t| !t.is_empty()))
+}
+/// 防毒化广播：fresh 全空而旧 watch 非空且 keyring 当前报错 → 跳过发送（旧值续命），否则发送。
+fn tunnel_watch_send_fresh() {
+  let fresh = tunnel_config_load();
+  if fresh == (None, None) {
+    let stale = {
+      let g = ensure_tunnel_watch().borrow();
+      g.clone()
+    };
+    if stale != (None, None) {
+      if let Ok(d) = cred_detail_impl(CREDENTIAL_USER_TUNNEL) {
+        if d.keyring_error.is_some() {
+          log::warn!("tunnel_watch_send_fresh: keyring 瞬时故障，跳过空值广播以防毒化引擎（旧值续命中）");
+          return;
+        }
+      }
+    }
+  }
+  let _ = ensure_tunnel_watch().send(fresh);
+}
+
 fn tunnel_config_load() -> (Option<String>, Option<String>) {
-  let url = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v.get("url").and_then(|u| u.as_str()).map(migrate_tunnel_url)).filter(|u| validate_tunnel_url(u).is_ok());
-  let token = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().filter(|t| !t.is_empty());
-  match (url, token) { (Some(u), Some(t)) => (Some(u), Some(t)), _ => (None, None) }
+  let url = tunnel_url_load();
+  let token = tunnel_token_load_status().ok().flatten();
+  match (url, token) {
+    (Some(u), Some(t)) => (Some(u), Some(t)),
+    // url 缺失但 token 存在 → 回退默认双端点（token 存在才回退，避免无 token 时引擎空转）
+    (None, Some(t)) => (Some(DEFAULT_TUNNEL_URLS.to_string()), Some(t)),
+    _ => (None, None),
+  }
 }
 static ENGINE_ON: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT: std::sync::Mutex<Option<proxy::sysproxy::Snapshot>> = std::sync::Mutex::new(None);
@@ -929,7 +1246,8 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
             }
             return Err("隧道未配置：白名单流量无法出网。请先在「设置 → 方案 A」填写授权码，或在首页粘贴同步口令，再开启总开关".into());
         }
-        let _ = ensure_tunnel_watch().send((tunnel_url, tunnel_token));
+        // 防毒化：fresh 全空而旧值非空且 keyring 瞬时错时跳过覆盖（旧值续命）
+        tunnel_watch_send_fresh();
     }
     {
         let tx = ensure_watch();
@@ -1374,7 +1692,8 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
         }
     };
     if let Some(ref tok) = token {
-        match proxy::engine_tunnel::probe_gate_rtt(&gate, tok).await {
+        // 全口径：Upgrade + 首帧 bind 一次测通（到 www.google.com:443），消除 Upgrade 假绿
+        match proxy::engine_tunnel::probe_via_gate(&gate, tok, "www.google.com", 443).await {
             Ok(ms) => {
                 return Ok(serde_json::json!({
                     "iface": iface,
@@ -1571,7 +1890,10 @@ fn app_config_set(patch: serde_json::Value) -> Result<(), String> {
     if let (Some(map_cur), Some(map_patch)) = (cur.as_object_mut(), patch.as_object()) {
         for (k,v) in map_patch { map_cur.insert(k.clone(), v.clone()); }
     } else { cur = patch; }
-    std::fs::write(app_config_path(), serde_json::to_string_pretty(&cur).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    // 与 whitelist 同口径：tmp+rename 防半截写
+    let tmp = dir.join("app_config.json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&cur).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, app_config_path()).map_err(|e| e.to_string())?;
     Ok(())
 }
 #[tauri::command]
@@ -1945,11 +2267,8 @@ fn configure_direct_tunnel(_worker_url: &str, secret: &str) -> Result<(), String
     // P0：落盘 + 直发同一 secret（禁止内存-磁盘分裂）；审计来源
     cred_set_impl_with_source(CREDENTIAL_USER_TUNNEL, secret.trim().to_string(), "configure_direct_tunnel")?;
     // Must-fix F：watch 广播必须在回读校验成功之后——校验失败 Err 时内存不得先行
-    // 落盘后回读校验（防 keyring 静默失败导致的重启后 401）
-    let back = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten().unwrap_or_default();
-    if back.trim() != secret.trim() {
-        return Err("隧道凭据落盘校验失败：请重试或检查系统凭据库权限".into());
-    }
+    // 落盘后双源回读校验（防 keyring 静默失败导致的重启后 401）
+    cred_verify_dual_source(CREDENTIAL_USER_TUNNEL, secret)?;
     let _ = ensure_tunnel_watch().send((Some(ws_url), Some(secret.trim().to_string())));
     Ok(())
 }
@@ -2452,5 +2771,52 @@ mod tests {
         // 401 判定与 RETRY 跳过同源
         assert!(proxy::engine_tunnel::is_auth_failure(&std::io::Error::other("tunnel: HTTP error: 401 Unauthorized")));
         assert!(!proxy::engine_tunnel::is_auth_failure(&std::io::Error::other("tunnel: denied: acl denied")));
+        // B-P2-4：401 marker 不得是 "401" 裸子串（否则 denied 文案夹带 401 即误判）
+        assert!(pproxy_transport::proto::AUTH_401_MARKER.contains("401"));
+    }
+
+    // ---- 双评审回改门禁（B-P0-1 / A-P0-3 / B-S-4）----
+
+    #[test]
+    fn review_explicit_clear_removes_all_backups() {
+        // B-P0-1：显式清除的文件侧全清（.dat/.bak/时间戳多代，不留活密钥）。
+        // 直接测 `cred_remove_fallback_all`（纯文件，不碰 keyring——CI/开发机真凭据不受影响）；
+        // keyring 删除分支由 `cred_delete_impl_with_source` 的 NoEntry/Err 口径覆盖。
+        let _g = CRED_FILE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = data_dir();
+        let fb = dir.join(".tunnel_token.dat");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&fb, b"tok-clear-all");
+        let _ = std::fs::copy(&fb, fb.with_extension("dat.bak"));
+        let ts_bak = dir.join(".tunnel_token.dat.bak.123_456");
+        let _ = std::fs::copy(&fb, &ts_bak);
+        cred_remove_fallback_all(CREDENTIAL_USER_TUNNEL);
+        assert!(!fb.exists(), ".dat 必须删除");
+        assert!(!fb.with_extension("dat.bak").exists(), ".bak 必须删除（显式清除不留活密钥）");
+        assert!(!ts_bak.exists(), "时间戳备份必须删除");
+    }
+
+    #[test]
+    fn review_atomic_set_rolls_back_url_on_cred_failure() {
+        // A-P0-3：tunnel_config_set 凭据失败时端点必须回滚（真原子）
+        let _g = CRED_FILE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("PONY_DESKTOP_DEV_FILE_KEYRING", "1");
+        let url_before = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok();
+        // 空 secret 触发凭据拒绝（先写端点、后凭据失败路径）
+        let res = tunnel_config_set(
+            Some("wss://rollback-check.example.com/ws".into()),
+            Some("   ".into()),
+        );
+        assert!(res.is_err(), "空 secret 必须 Err，实际: {res:?}");
+        let url_after = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok();
+        assert_eq!(url_after, url_before, "失败必须回滚端点（什么都没变）");
+        std::env::remove_var("PONY_DESKTOP_DEV_FILE_KEYRING");
+    }
+
+    #[test]
+    fn review_config_set_rejects_both_none() {
+        // B-S-4：双 None 与 Rust“至少提供一项”口径一致（直接 Err）
+        let res = tunnel_config_set(None, None);
+        assert!(res.is_err(), "双 None 必须 Err，实际: {res:?}");
     }
 }

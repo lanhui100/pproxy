@@ -12,8 +12,8 @@ use tokio::net::TcpStream;
 #[allow(unused_imports)]
 pub use pproxy_transport::{
     bind_target, classify_egress, is_google_or_ai_host, order_endpoints, probe_gate_rtt,
-    probe_via_gate, relay_bidir_ws, try_establish_url, AUTH_401_MARKER, Egress, TunnelPool,
-    WsPair,
+    probe_via_gate, relay_bidir_ws, token_fp8_of, try_establish_url, AUTH_401_MARKER, Egress,
+    TunnelPool, WsPair,
 };
 
 use super::engine::{EngineConfig, EngineStats, Kind, ReqHead};
@@ -29,6 +29,14 @@ const SELF_HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(3
 #[cfg(test)]
 const SELF_HEAL_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(0);
 static LAST_SELF_HEAL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// 内存 token 缺失时的磁盘重读冷却（watch 播种被瞬时 keyring 故障毒化时，
+/// 建连侧主动重读一次而非直接 502；冷却防每个 CONNECT 都读 keyring）。
+#[cfg(not(test))]
+const MISSING_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const MISSING_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(0);
+static LAST_MISSING_REFRESH: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
 /// P0/E10：探针/流量错误分类（禁止把门禁 denied 误判为鉴权 401）。
 /// 返回值：auth401（Upgrade 401）/ denied（门禁 acl/colo/egress）/ timeout / closed / other
@@ -54,9 +62,9 @@ pub fn is_auth_failure(e: &std::io::Error) -> bool {
 }
 
 /// token 指纹（只打指纹禁明文）：sha256 前 8 hex，用于 401 排障回答“当次哪一枚”。
+/// 口径统一走 `pproxy_transport::token_fp8_of`（B-S-2：桌面端三处指纹实现收敛）。
 fn token_fp8(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(&Sha256::digest(token.as_bytes())[..4])
+    token_fp8_of(token)
 }
 
 const RETRY: u32 = 5; // 总尝试次数（首次 + 4 次重试）
@@ -72,10 +80,38 @@ async fn establish(
 ) -> Result<(WsPair, String), std::io::Error> {
     let (url_raw, token) = {
         let (u, t) = cfg.tunnel.borrow().clone();
-        (
-            u.ok_or_else(|| io("tunnel_url not configured"))?,
-            t.ok_or_else(|| io("tunnel token missing"))?,
-        )
+        match (u, t) {
+            (Some(u), Some(t)) => (u, t),
+            // 内存缺失：watch 可能被瞬时 keyring 故障毒化——冷却外主动重读一次磁盘
+            _ => {
+                let should_refresh = {
+                    let g = LAST_MISSING_REFRESH.lock().unwrap_or_else(|p| p.into_inner());
+                    match *g {
+                        Some(t) => t.elapsed() >= MISSING_REFRESH_COOLDOWN,
+                        None => true,
+                    }
+                };
+                if should_refresh {
+                    *LAST_MISSING_REFRESH.lock().unwrap_or_else(|p| p.into_inner()) =
+                        Some(std::time::Instant::now());
+                    let fresh =
+                        tokio::task::spawn_blocking(crate::tunnel_config_load).await.unwrap_or((None, None));
+                    if let (Some(u), Some(t)) = fresh {
+                        if !t.trim().is_empty() {
+                            log::info!("tunnel watch missing: refreshed from disk (disk_fp8={}), resuming establish", token_fp8(&t));
+                            let _ = crate::ensure_tunnel_watch().send((Some(u.clone()), Some(t.clone())));
+                            (u, t)
+                        } else {
+                            return Err(io("tunnel token missing"));
+                        }
+                    } else {
+                        return Err(io("tunnel token missing"));
+                    }
+                } else {
+                    return Err(io("tunnel token missing"));
+                }
+            }
+        }
     };
 
     let urls: Vec<&str> = url_raw
@@ -88,8 +124,9 @@ async fn establish(
     // Must-fix G/E8：拨号顺序可观测（host→有序端点 + 内存 token 指纹，只打指纹禁明文）
     log::debug!("tunnel order for {}: {:?} (mem_fp8={})", parsed.host, urls, token_fp8(&token));
 
-    // 方案 A：先取池会话，bind 热态首帧
-    if let Some((tx, rx, used_url)) = cfg.pool.checkout(&urls) {
+    // 方案 A：先取池会话，bind 热态首帧（按当次内存 token 指纹匹配，失配即 miss）
+    let mem_fp8 = token_fp8(&token);
+    if let Some((tx, rx, used_url)) = cfg.pool.checkout(&urls, Some(&mem_fp8)) {
         match bind_target(tx, rx, &parsed.host, parsed.port).await {
             Ok(pair) => {
                 log::debug!("tunnel established from pool via {used_url} for {}", parsed.host);
@@ -101,14 +138,21 @@ async fn establish(
         }
     }
 
+    let mut first_err: Option<std::io::Error> = None;
+    let mut first_401: Option<std::io::Error> = None;
     let mut last_err = None;
     let mut saw_401 = false;
     for u in &urls {
         match try_establish_url(u, &token, &parsed.host, parsed.port).await {
             Ok(pair) => return Ok((pair, (*u).to_string())),
             Err(e) => {
-                if e.to_string().contains(AUTH_401_MARKER) { saw_401 = true; }
-                log::warn!("tunnel establish on {u} for {} failed: {e}", parsed.host);
+                let egress = classify_egress(u);
+                if e.to_string().contains(AUTH_401_MARKER) {
+                    saw_401 = true;
+                    if first_401.is_none() { first_401 = Some(io(e.to_string())); }
+                }
+                if first_err.is_none() { first_err = Some(io(e.to_string())); }
+                log::warn!("tunnel establish on {u} for {} failed (egress={egress:?}, mem_fp8={mem_fp8}): {e}", parsed.host);
                 last_err = Some(e);
             }
         }
@@ -156,6 +200,9 @@ async fn establish(
                 }
                 *LAST_SELF_HEAL.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
                 healed = true;
+                // 调序（B-P2-3）：先排空旧池再广播 watch——否则 maintain 可能在中间按新 token
+                // 预建又被清空，多余 churn 一次
+                cfg.pool.invalidate();
                 let _ = crate::ensure_tunnel_watch().send((Some(u.clone()), Some(t.clone())));
                 let urls2: Vec<&str> = u.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
                 let urls2 = order_endpoints(urls2, &parsed.host);
@@ -164,7 +211,8 @@ async fn establish(
                     match try_establish_url(u2, &t, &parsed.host, parsed.port).await {
                         Ok(pair) => return Ok((pair, (*u2).to_string())),
                         Err(e) => {
-                            log::warn!("tunnel re-establish on {u2} for {} failed: {e}", parsed.host);
+                            let egress = classify_egress(u2);
+                            log::warn!("tunnel re-establish on {u2} for {} failed (egress={egress:?}, disk_fp8={}): {e}", parsed.host, token_fp8(&t));
                             last_err = Some(e);
                         }
                     }
@@ -178,6 +226,19 @@ async fn establish(
         if !healed {
             // 负缓存兑现：无新值/同值同样进 30s 冷却，防 keyring 风暴
             *LAST_SELF_HEAL.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::time::Instant::now());
+        }
+    }
+
+    // 无新值可 heal：磁盘==内存==旧值（服务端已轮换）→ 明确 needs-reinput，
+    // 保留首错 + 首个 401，不静默成普通 502。
+    // 消费点（A-P1-9）：`connect_and_relay` 识别此前缀并映射为 502 响应体文案
+    //（含重贴指引，不含明文）；日志侧保留 mem_fp8/egress 取证行。
+    if saw_401 {
+        if let Some(e401) = first_401 {
+            let first = first_err.map(|e| e.to_string()).unwrap_or_default();
+            return Err(io(format!(
+                "needs-reinput: tunnel token rejected by gate (mem_fp8={mem_fp8}): {e401}; first_error: {first} —— 请在「设置 → 隧道中继」重贴授权码"
+            )));
         }
     }
 
@@ -238,11 +299,18 @@ pub async fn connect_and_relay(
         }
     }
     let err = last_err.unwrap_or_else(|| io("tunnel establish failed"));
-    let msg = format!("502 Bad Gateway: tunnel failed for {}: {}", parsed.host, err);
+    // A-P1-9 消费点：needs-reinput 前缀映射为面向用户的 502 文案（含重贴指引）；
+    // 内部取证行（mem_fp8/egress/逐端点）只进日志，不进响应体（禁指纹外泄到客户端）。
+    let err_s = err.to_string();
+    let user_msg = if err_s.starts_with("needs-reinput:") {
+        format!("502 Bad Gateway: tunnel token rejected for {} —— 请在「设置 → 隧道中继」重贴授权码", parsed.host)
+    } else {
+        format!("502 Bad Gateway: tunnel failed for {}: {}", parsed.host, err)
+    };
     let resp = format!(
         "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        msg.len(),
-        msg
+        user_msg.len(),
+        user_msg
     );
     let _ = client.write_all(resp.as_bytes()).await;
     Err(err)
@@ -503,7 +571,8 @@ pub(crate) mod tests {
         TunnelPool::with_timing(
             rx,
             size,
-            std::time::Duration::from_millis(300),
+            // 30s TTL：指纹 miss 用例里失配会话必须留存（短 TTL 会让过期与 miss 混淆成 flake）
+            std::time::Duration::from_secs(30),
             std::time::Duration::from_millis(80),
             std::time::Duration::from_millis(150),
         )
@@ -544,9 +613,36 @@ pub(crate) mod tests {
         }
 
         let ordered_b = order_endpoints(vec![&a_url, &b_url], "github.com");
-        let item = pool.checkout(&ordered_b);
+        let item = pool.checkout(&ordered_b, None);
         assert!(item.is_some());
         assert_eq!(item.unwrap().2, b_url);
+    }
+
+    #[tokio::test]
+    async fn tunnel_pool_checkout_rejects_stale_fingerprint() {
+        let a_addr = spawn_counting_gate(true, Arc::new(std::sync::atomic::AtomicUsize::new(0))).await.unwrap();
+        let a_url = format!("ws://{a_addr}/ws");
+        let urls = a_url.clone();
+        let (_tx, rx) = watch::channel((Some(urls), Some("mock-token".into())));
+        let pool = test_pool(rx, 1);
+        pool.start_maintain();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pool.idle_total() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池未预建会话");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        // 旧指纹会话在期望指纹变化后 checkout 为 miss，且会话不被消耗
+        let miss = pool.checkout(&[&a_url], Some("deadbeef"));
+        assert!(miss.is_none(), "指纹失配必须 miss");
+        assert_eq!(pool.idle_total(), 1, "失配会话不得被消耗");
+        // invalidate 后排空
+        pool.invalidate();
+        assert_eq!(pool.idle_total(), 0, "invalidate 必须排空");
+        let stats = pool.pool_stats();
+        assert_eq!(stats.idle, 0);
+        assert!(stats.misses >= 1, "miss 计数必须递增");
     }
 
     #[tokio::test]
@@ -622,7 +718,14 @@ pub(crate) mod tests {
         let addr = spawn_counting_gate(true, Arc::clone(&conns)).await.unwrap();
         let urls = format!("ws://{addr}");
         let (_tx, rx) = watch::channel((Some(urls.clone()), Some("mock-token".into())));
-        let pool = test_pool(rx, 1);
+        // 本用例专测过期补建，用短 TTL 池（公共 test_pool 为 30s，防指纹 miss 用例 flake）
+        let pool = TunnelPool::with_timing(
+            rx,
+            1,
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_millis(80),
+            std::time::Duration::from_millis(150),
+        );
         pool.start_maintain();
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);

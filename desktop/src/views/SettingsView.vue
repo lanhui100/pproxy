@@ -31,6 +31,7 @@ import {
   initCurrentVersion,
 } from '@/composables/useUpdater'
 import {
+  GATE_KIND_TEXT,
   clearTunnelToken,
   importConnectCode,
   isTauri,
@@ -325,6 +326,17 @@ const tunnelHasToken = ref(false)
 const tunnelCredError = ref<string | null>(null)
 const tunnelFingerprint = ref<string | null>(null)
 const tunnelSaving = ref(false)
+// P0：常态隧道行扩展展示（分叉徽标 / 数据目录 / cleared 时间线）
+const tunnelFpFallback = ref<string | null>(null)
+const tunnelFpKeyring = ref<string | null>(null)
+const tunnelCredWinner = ref<string | null>(null)
+const tunnelDataDir = ref<string | null>(null)
+const tunnelDataDirTmpFallback = ref(false)
+const tunnelCredSource = ref<string | null>(null)
+const tunnelCredWriteTs = ref<number | null>(null)
+
+const tunnelDiverged = () =>
+  Boolean(tunnelFpFallback.value && tunnelFpKeyring.value && tunnelFpFallback.value !== tunnelFpKeyring.value)
 
 async function refreshTunnel(): Promise<void> {
   try {
@@ -334,7 +346,24 @@ async function refreshTunnel(): Promise<void> {
     tunnelHasToken.value = c.hasToken
     tunnelCredError.value = c.credError ?? null
     tunnelFingerprint.value = c.fingerprint ?? null
+    tunnelFpFallback.value = c.fpFallback ?? null
+    tunnelFpKeyring.value = c.fpKeyring ?? null
+    tunnelCredWinner.value = c.credWinner ?? null
+    tunnelDataDir.value = c.dataDir ?? null
+    tunnelDataDirTmpFallback.value = c.dataDirTmpFallback === true
+    tunnelCredSource.value = c.credMeta?.source ?? null
+    tunnelCredWriteTs.value = typeof c.credMeta?.last_write_ts === 'number' ? c.credMeta.last_write_ts : null
   } catch { /* 首次启动无配置 */ }
+}
+
+function formatClearedTime(ts: number | null): string {
+  if (ts === null || ts === undefined) return ''
+  try {
+    const d = new Date(ts > 1e12 ? ts : ts * 1000)
+    return d.toLocaleString()
+  } catch {
+    return String(ts)
+  }
 }
 
 function startEditTunnelUrl(): void {
@@ -362,7 +391,7 @@ async function saveTunnel(): Promise<void> {
     tunnelUrlInput.value = val
     isEditingTunnelUrl.value = false
     await refreshTunnel()
-    toast.success('隧道端点已保存，重新开启代理后生效')
+    toast.success('隧道端点已保存，重新开启代理后生效，建议跑一次通道自检')
   } catch (e: any) {
     toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message))
   } finally {
@@ -441,18 +470,19 @@ async function runSelfCheck(): Promise<void> {
 }
 
 async function clearTunnelTokenAction(): Promise<void> {
-  const cleared = await clearTunnelToken()
-  if (cleared) {
+  try {
+    await clearTunnelToken()
     gateInput.value = ''
     isEditingGate.value = false
     tunnelHasToken.value = false
     tunnelFingerprint.value = null
     confirmingClearTunnel.value = false
     toast.success('已清除隧道令牌')
-    return
+    await refreshTunnel()
+  } catch (e: any) {
+    confirmingClearTunnel.value = false
+    toast.error('清除失败: ' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
   }
-  confirmingClearTunnel.value = false
-  toast.error('清除失败：请在系统凭据管理器中删除「pony-desktop / tunnel_token」')
 }
 
 // ---- 加速模式与远端代理 ----
@@ -736,6 +766,10 @@ onMounted(async () => {
 
         <!-- 专属加速通道配置 -->
         <div v-if="currentMode === 'direct'" class="space-y-3 pt-1">
+          <!-- dev 水印：浏览器便利通道恒绿提示 -->
+          <div v-if="!isTauri()" class="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+            开发模拟·自检恒绿
+          </div>
           <!-- 隧道令牌 -->
           <div class="space-y-2">
             <!-- 常态展示：非输入态 -->
@@ -745,11 +779,23 @@ onMounted(async () => {
                   隧道令牌
                   <InfoTip :text="GATE_INPUT_TIP" />
                 </div>
-                <div class="text-[11px] text-muted-foreground flex items-center gap-2">
+                <div class="text-[11px] text-muted-foreground flex items-center gap-2 flex-wrap">
                   <span v-if="tunnelCredError" class="text-rose-500 font-mono">{{ tunnelCredError }}</span>
                   <span v-else-if="tunnelFingerprint" class="font-mono">指纹 sha256:{{ tunnelFingerprint }}…</span>
                   <span v-else-if="tunnelHasToken">已配置</span>
                   <span v-else class="text-muted-foreground/80">未配置</span>
+                  <span v-if="tunnelDiverged()" class="rounded bg-amber-500/15 border border-amber-500/30 px-1.5 py-px text-amber-600 dark:text-amber-400 font-mono">
+                    {{ tunnelCredWinner === 'fallback(diverged-unhealed)' ? '备份≠主，需人工裁决（未自动覆盖）' : '备份≠主，已按主修复' }}{{ tunnelCredWinner ? ` · ${tunnelCredWinner}` : '' }}
+                  </span>
+                  <span v-if="tunnelCredSource && tunnelCredSource.includes('cleared')" class="font-mono">
+                    已清除{{ tunnelCredWriteTs !== null ? `（${formatClearedTime(tunnelCredWriteTs)}）` : '' }}
+                  </span>
+                </div>
+                <div v-if="tunnelDataDir" class="text-[11px] text-muted-foreground/80 font-mono truncate">
+                  {{ tunnelDataDir }}
+                </div>
+                <div v-if="tunnelDataDirTmpFallback" class="text-[11px] text-rose-500">
+                  数据目录走了临时回退，重启可能丢失，请检查 APPDATA
                 </div>
               </div>
               <div class="flex items-center gap-1 shrink-0">
@@ -851,8 +897,10 @@ onMounted(async () => {
             <!-- 自检结果展示 -->
             <div v-if="selfCheck" class="rounded-lg bg-background/50 px-3 py-2 space-y-1 text-[11px] font-mono">
               <div v-if="selfCheck.credError" class="text-rose-500">{{ selfCheck.credError }}</div>
-              <div v-for="g in selfCheck.gates" :key="g.url" class="flex items-center justify-between">
+              <div v-for="g in selfCheck.gates" :key="g.url" class="flex items-center justify-between gap-2">
                 <span class="text-muted-foreground">{{ g.name === 'cf' ? '出口C' : '出口V' }}</span>
+                <span class="text-muted-foreground">{{ g.kind ? (GATE_KIND_TEXT[g.kind] ?? GATE_KIND_TEXT.other) : '' }}</span>
+                <span v-if="g.kindUpgrade || g.kindBind" class="text-muted-foreground">Upgrade:{{ g.kindUpgrade ?? '-' }} / 首帧:{{ g.kindBind ?? '-' }}</span>
                 <span v-if="g.ok" class="text-foreground">{{ typeof g.ms === 'number' ? `正常 · ${g.ms}ms` : '正常' }}</span>
                 <span v-else class="text-rose-500 truncate max-w-56" :title="g.error">失败 · {{ g.error }}</span>
               </div>
@@ -861,7 +909,7 @@ onMounted(async () => {
                 v-if="selfCheck.fpFallback && selfCheck.fpKeyring && selfCheck.fpFallback !== selfCheck.fpKeyring"
                 class="text-amber-500"
               >
-                本地凭据分叉：备份({{ selfCheck.fpFallback }})≠主({{ selfCheck.fpKeyring }})，已按主修复，重贴授权码可彻底统一
+                本地凭据分叉：备份({{ selfCheck.fpFallback }})≠主({{ selfCheck.fpKeyring }})，{{ selfCheck.credWinner === 'fallback(diverged-unhealed)' ? '需人工裁决，未自动覆盖，重贴授权码可彻底统一' : '已按主修复，重贴授权码可彻底统一' }}
               </div>
               <div v-if="selfCheck.credMeta?.fp8" class="text-muted-foreground">
                 上次写入：{{ selfCheck.credMeta.source }} · {{ selfCheck.credMeta.fp8 }}

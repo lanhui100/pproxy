@@ -13,7 +13,7 @@ pub mod proto;
 pub mod relay;
 pub mod route;
 
-pub use pool::{IdleSession, TunnelPool};
+pub use pool::{IdleSession, PoolStats, TunnelPool, token_fp8_of};
 pub use probe::{probe_gate_rtt, probe_via_gate};
 pub use proto::{
     bind_target, connect_ws, io_err, try_establish_url, AUTH_401_MARKER, DIAL_TIMEOUT,
@@ -96,8 +96,8 @@ mod tests {
 
         assert_eq!(conns.load(Ordering::SeqCst), 2);
 
-        // checkout
-        let item = pool.checkout(&[&url]);
+        // checkout（同指纹命中）
+        let item = pool.checkout(&[&url], Some(&token_fp8_of("token")));
         assert!(item.is_some());
         let (tx, rx, used_url) = item.unwrap();
         assert_eq!(used_url, url);
@@ -122,7 +122,7 @@ mod tests {
 
         assert_eq!(pool.idle_total(), 0, "size=0 不得预建待命会话");
         assert_eq!(conns.load(Ordering::SeqCst), 0, "size=0 不得发起任何 WS 连接");
-        assert!(pool.checkout(&[&url]).is_none(), "size=0 时 checkout 必须为空");
+        assert!(pool.checkout(&[&url], None).is_none(), "size=0 时 checkout 必须为空");
     }
 
     #[tokio::test]
