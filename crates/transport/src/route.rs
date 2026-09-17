@@ -115,16 +115,17 @@ pub fn requires_compliant_egress(host: &str) -> bool {
 
 /// 端点优先级重排：Google/AI host → Vercel 合规出口优先；其他 host → CF 低延迟优先。
 ///
-/// 额度保护机制（2026-09 专项）：当设置环境变量 `PPROXY_CONSERVE_VERCEL=1` 时，
+/// 额度保护机制（2026-09 专项）：默认开启节能模式（conserve_vercel = true），
 /// 仅针对被 CF 平台严格拉黑的 AI 目标（`is_strict_ai_host`）优先分配 Vercel 出口；
 /// 泛 Google 与常规大流量默认走 CF gate（CF 免费版无出站带宽上限且具备智能 Colo 守卫），
 /// 避免普通网页/日常大流量刷爆 Vercel 10GB 出口流量与 CPU 配额。
+/// 若显式设置环境变量 `PPROXY_CONSERVE_VERCEL=0`，则回退为宽松模式（所有 Google/AI 均优先 Vercel）。
 ///
 /// **例外（2026-09-08，地区限制专项）**：`requires_compliant_egress` 的 host
-/// 无视 `PPROXY_CONSERVE_VERCEL`，始终优先非 CF 出口——省额度不能以牺牲可用性为代价，
+/// 始终优先非 CF 出口——省额度不能以牺牲可用性为代价，
 /// 且该例外只覆盖 3 个 Cloud Code host，Vercel 流量开销可控。
 pub fn order_endpoints<'a>(urls: Vec<&'a str>, host: &str) -> Vec<&'a str> {
-    let conserve_vercel = std::env::var("PPROXY_CONSERVE_VERCEL").ok().as_deref() == Some("1");
+    let conserve_vercel = std::env::var("PPROXY_CONSERVE_VERCEL").ok().as_deref() != Some("0");
     order_endpoints_with(urls, host, conserve_vercel)
 }
 
@@ -134,6 +135,16 @@ pub fn order_endpoints_with<'a>(
     host: &str,
     conserve_vercel: bool,
 ) -> Vec<&'a str> {
+    order_endpoints_with_offset(urls, host, conserve_vercel, 0)
+}
+
+/// 支持外部传入偏移量以支持单测确定性或多端点轮询
+pub fn order_endpoints_with_offset<'a>(
+    urls: Vec<&'a str>,
+    host: &str,
+    conserve_vercel: bool,
+    offset: usize,
+) -> Vec<&'a str> {
     let vercel_preferred = if requires_compliant_egress(host) {
         true
     } else if conserve_vercel {
@@ -141,18 +152,40 @@ pub fn order_endpoints_with<'a>(
     } else {
         is_google_or_ai_host(host)
     };
-    let mut list = urls;
-    list.sort_by_key(|u| {
+
+    let mut vercel_list = Vec::new();
+    let mut other_list = Vec::new();
+    for u in urls {
         let is_vercel = u.contains("vercel") || u.contains("vgate") || u.contains("/api/ws");
-        match (vercel_preferred, is_vercel) {
-            (true, true) => 0,   // 首选目标 + Vercel 最优先
-            (true, false) => 1,  // 首选目标 + CF 兜底
-            (false, true) => 1,  // 其他 + Vercel 兜底
-            (false, false) => 0, // 其他 + CF 最优先
+        if is_vercel {
+            vercel_list.push(u);
+        } else {
+            other_list.push(u);
         }
-    });
+    }
+
+    // 对同一类别的多个端点应用轮询偏移（Round-Robin 负载均衡），避免多账号倾斜
+    if vercel_list.len() > 1 && offset > 0 {
+        let rot = offset % vercel_list.len();
+        vercel_list.rotate_left(rot);
+    }
+    if other_list.len() > 1 && offset > 0 {
+        let rot = offset % other_list.len();
+        other_list.rotate_left(rot);
+    }
+
+    let mut list = Vec::new();
+    if vercel_preferred {
+        list.extend(vercel_list);
+        list.extend(other_list);
+    } else {
+        list.extend(other_list);
+        list.extend(vercel_list);
+    }
     list
 }
+
+static GATE_URL_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// 把逗号分隔的 gate 端点串按目标 host 重排为有序列表（数据面装配入口）。
 ///
@@ -165,7 +198,9 @@ pub fn ordered_gate_urls(gate_url: &str, host: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .collect();
-    order_endpoints(urls, host)
+    let offset = GATE_URL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let conserve_vercel = std::env::var("PPROXY_CONSERVE_VERCEL").ok().as_deref() != Some("0");
+    order_endpoints_with_offset(urls, host, conserve_vercel, offset)
         .into_iter()
         .map(str::to_string)
         .collect()
@@ -318,15 +353,39 @@ mod tests {
     }
 
     #[test]
+    fn test_order_endpoints_round_robin_offset() {
+        let urls = vec![
+            "wss://vgate1.example.com/api/ws",
+            "wss://vgate2.example.com/api/ws",
+            "wss://cf-gate.example.com/ws",
+        ];
+        // offset 0: vgate1 优先
+        let ord0 = order_endpoints_with_offset(urls.clone(), "api.openai.com", true, 0);
+        assert_eq!(ord0[0], "wss://vgate1.example.com/api/ws");
+        assert_eq!(ord0[1], "wss://vgate2.example.com/api/ws");
+        assert_eq!(ord0[2], "wss://cf-gate.example.com/ws");
+
+        // offset 1: vgate2 优先（轮询）
+        let ord1 = order_endpoints_with_offset(urls.clone(), "api.openai.com", true, 1);
+        assert_eq!(ord1[0], "wss://vgate2.example.com/api/ws");
+        assert_eq!(ord1[1], "wss://vgate1.example.com/api/ws");
+        assert_eq!(ord1[2], "wss://cf-gate.example.com/ws");
+    }
+
+    #[test]
     fn test_order_endpoints_reads_env_boundary() {
-        // 环境变量边界：只验证读取路径本身，其余用例走纯函数内核避免并发竞争
-        std::env::set_var("PPROXY_CONSERVE_VERCEL", "1");
+        // 默认情况下（未设置环境变量）应为节能模式
         let urls = vec![
             "wss://gate.example.com/ws",
             "wss://vgate.example.com/api/ws",
         ];
-        let ordered = order_endpoints(urls, "daily-cloudcode-pa.googleapis.com");
-        assert_eq!(ordered[0], "wss://vgate.example.com/api/ws");
+        let ordered_default = order_endpoints(urls.clone(), "google.com.hk");
+        assert_eq!(ordered_default[0], "wss://gate.example.com/ws");
+
+        // 显式设为 0 时回退为宽松模式
+        std::env::set_var("PPROXY_CONSERVE_VERCEL", "0");
+        let ordered_loose = order_endpoints(urls.clone(), "google.com.hk");
+        assert_eq!(ordered_loose[0], "wss://vgate.example.com/api/ws");
         std::env::remove_var("PPROXY_CONSERVE_VERCEL");
     }
 }

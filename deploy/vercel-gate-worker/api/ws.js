@@ -94,8 +94,23 @@ export function createGateServer() {
   wss.on('connection', (ws) => {
     let established = false
     let tcpSocket = null
+    // 空闲超时防护（对齐 Fluid compute 计费优化）：
+    // 若连接建立后或数据交互后超过 30 秒无任何上下行活动，主动释放连接，
+    // 防止客户端失联或长挂导致持续消耗 Fluid Provisioned Memory。
+    const IDLE_TIMEOUT_MS = 30_000
+    let idleTimer = setTimeout(() => {
+      ws.close(1000, 'idle timeout')
+    }, IDLE_TIMEOUT_MS)
+
+    function resetIdleTimer() {
+      if (idleTimer) clearTimeout(idleTimer)
+      idleTimer = setTimeout(() => {
+        ws.close(1000, 'idle timeout')
+      }, IDLE_TIMEOUT_MS)
+    }
 
     ws.on('message', (data, isBinary) => {
+      resetIdleTimer()
       // ws v8：文本帧与二进制帧的 data 都是 Buffer，只能靠 isBinary 区分
       if (isBinary) {
         if (tcpSocket && !tcpSocket.destroyed) {
@@ -131,6 +146,7 @@ export function createGateServer() {
       })
 
       sock.on('data', (chunk) => {
+        resetIdleTimer()
         if (ws.readyState === ws.OPEN) {
           ws.send(chunk)
         }
@@ -149,6 +165,10 @@ export function createGateServer() {
     })
 
     ws.on('close', () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer)
+        idleTimer = null
+      }
       if (tcpSocket) {
         tcpSocket.destroy()
       }

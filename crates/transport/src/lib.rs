@@ -180,4 +180,22 @@ mod tests {
         let res = tokio::time::timeout(Duration::from_secs(3), handle).await;
         assert!(res.is_ok(), "maintain 任务未在 pool drop 后及时退出");
     }
+
+    #[tokio::test]
+    async fn test_pool_skips_vercel_endpoints() {
+        let conns = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock_gate(true, Arc::clone(&conns)).await;
+        // 端点 URL 中包含 /api/ws 或 vercel，代表 Vercel 出口
+        let vercel_url = format!("ws://{addr}/api/ws");
+        let (_tx, rx) = watch::channel((Some(vercel_url.clone()), Some("token".into())));
+
+        let pool = TunnelPool::with_size(rx, 2);
+        pool.start_maintain();
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(pool.idle_total(), 0, "Vercel 端点不得预建待命连接");
+        assert_eq!(conns.load(Ordering::SeqCst), 0, "Vercel 端点不得发起预连接");
+        assert!(pool.checkout(&[&vercel_url], None).is_none());
+    }
 }

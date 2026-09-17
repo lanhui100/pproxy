@@ -12,6 +12,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::proto::{connect_ws, WsSink, WsStream};
+use crate::route::{classify_egress, Egress};
 
 // 默认生产连接生命周期与补给频率
 const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(30);
@@ -257,12 +258,17 @@ impl TunnelPool {
                         consec_401 = 0;
                     }
 
-                    // 逐端点补足到 size
+                    // 逐端点补足到 target_size（Vercel 出口强制为 0，防止 Fluid compute 持续计费）
                     let mut healthy = true;
                     for ep in &endpoints {
+                        let target_size = if classify_egress(ep) == Egress::Vercel {
+                            0
+                        } else {
+                            pool.size
+                        };
                         let need = {
                             let g = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
-                            pool.size.saturating_sub(g.get(ep).map(|v| v.len()).unwrap_or(0))
+                            target_size.saturating_sub(g.get(ep).map(|v| v.len()).unwrap_or(0))
                         };
                         for _ in 0..need {
                             match connect_ws(ep, &token).await {
