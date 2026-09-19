@@ -857,7 +857,11 @@ mod tests {
 
         let result = establish_with_endpoints(&cfg, &vercel_only, "daily-cloudcode-pa.googleapis.com", 443).await;
         assert!(result.is_ok(), "经 vgate 建连应成功: {result:?}");
-        assert_eq!(vgate.conns.load(Ordering::SeqCst) + 0, vgate.conns.load(Ordering::SeqCst));
+        assert_eq!(
+            vgate.conns.load(Ordering::SeqCst),
+            1,
+            "合规 host 必须实际建连到 vgate"
+        );
         assert_eq!(cf.conns.load(Ordering::SeqCst), 0, "合规 host 不得触碰 CF 端点");
     }
 
