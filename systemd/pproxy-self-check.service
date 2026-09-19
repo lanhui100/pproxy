@@ -1,0 +1,14 @@
+# pproxy 复发自检 service（由 pproxy-self-check.timer 触发）
+
+[Unit]
+Description=pproxy recurrence self-check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dm
+WorkingDirectory=/home/dm/pproxy
+ExecStart=/home/dm/pproxy/scripts/self-check-pproxy.sh
+# 自检失败时：journald 记录 FAIL 行（systemctl --user 环境下可用 on-failure
+# 通知；系统级可扩展为 systemd-email / webhook）。
+# 依赖：journalctl 读取 pproxy.service 日志需属 systemd-journal 组（dm 已具备）。

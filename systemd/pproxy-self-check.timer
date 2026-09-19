@@ -1,0 +1,17 @@
+# pproxy 复发自检 timer（2026-09-19 加固）
+#
+# 每 10 分钟跑一次 scripts/self-check-pproxy.sh；失败时经 on-failure 邮件/
+# 日志标记。配合 systemd journald 审计使用；替换为真实告警通道（如
+# PPROXY_ALERT_WEBHOOK_URL 或 systemd-email）时只改本 unit。
+
+[Unit]
+Description=pproxy recurrence self-check (port ownership / compliant-egress count / journal sentinels)
+After=network-online.target
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
