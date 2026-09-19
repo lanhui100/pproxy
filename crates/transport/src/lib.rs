@@ -21,8 +21,9 @@ pub use proto::{
 };
 pub use relay::{relay_bidir_ws, AtomicTrafficStats, NoopTrafficCounter, TrafficCounter};
 pub use route::{
-    classify_egress, is_google_host, is_google_or_ai_host, is_strict_ai_host, order_endpoints,
-    order_endpoints_with, ordered_gate_urls, requires_compliant_egress, Egress,
+    classify_egress, compliant_egress_endpoints, is_google_host, is_google_or_ai_host,
+    is_strict_ai_host, is_vercel_endpoint, order_endpoints, order_endpoints_with,
+    ordered_gate_urls, requires_compliant_egress, Egress,
 };
 
 #[cfg(test)]

@@ -121,6 +121,25 @@ async fn establish(
         .collect();
     // 按目标 host 重排端点优先级（Google/AI 目标 → Vercel 优先；其他 → CF 优先）
     let urls = order_endpoints(urls, &parsed.host);
+    // 合规出口专项（2026-09-19，与 server/engine connect.rs 同源修复）：Cloud Code 系
+    // host 必须经 Vercel 物理出口，两道防线：
+    // 1. 跳过池化——conserve 模式下池里只有 CF 会话，checkout 会在 vgate 无会话时
+    //    降级命中 CF 会话；
+    // 2. 端点列表过滤为仅 Vercel；无 Vercel 端点时 fail-closed 拒绝（不降级 CF——
+    //    CF 是轮换 anycast，降级回去仍被 Google 400，与故障现场不可区分）。
+    let urls = if pproxy_transport::requires_compliant_egress(&parsed.host) {
+        let vercel_only = pproxy_transport::compliant_egress_endpoints(&urls);
+        if vercel_only.is_empty() {
+            log::warn!(
+                "compliant-egress host {} but no Vercel gate endpoint configured; refusing (CF egress is geo-rejected by Google)",
+                parsed.host
+            );
+            return Err(io("compliant-egress host requires a Vercel gate endpoint; none configured"));
+        }
+        vercel_only
+    } else {
+        urls
+    };
     // Must-fix G/E8：拨号顺序可观测（host→有序端点 + 内存 token 指纹，只打指纹禁明文）
     log::debug!("tunnel order for {}: {:?} (mem_fp8={})", parsed.host, urls, token_fp8(&token));
 
@@ -206,6 +225,12 @@ async fn establish(
                 let _ = crate::ensure_tunnel_watch().send((Some(u.clone()), Some(t.clone())));
                 let urls2: Vec<&str> = u.split([',', ';', '\n']).map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
                 let urls2 = order_endpoints(urls2, &parsed.host);
+                // 合规出口：自愈重试同样过滤为仅 Vercel（与主路径一致，见上方注释）
+                let urls2 = if pproxy_transport::requires_compliant_egress(&parsed.host) {
+                    pproxy_transport::compliant_egress_endpoints(&urls2)
+                } else {
+                    urls2
+                };
                 log::debug!("self-heal re-establish order for {}: {:?}", parsed.host, urls2);
                 for u2 in &urls2 {
                     match try_establish_url(u2, &t, &parsed.host, parsed.port).await {

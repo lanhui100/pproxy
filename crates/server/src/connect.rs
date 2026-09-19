@@ -414,12 +414,48 @@ pub async fn handle_connect_raw(
     let ordered_urls = pproxy_transport::ordered_gate_urls(&pool.config().gate_url, &host);
     let ordered_refs: Vec<&str> = ordered_urls.iter().map(String::as_str).collect();
 
+    // 合规出口专项（2026-09-19 修复，2026-09-19 审核后调优）：`requires_compliant_egress`
+    // 的 host（daily-cloudcode-pa 等 Cloud Code 系）必须经真实机房出口（vgate/Vercel）
+    // 抵达 Google，否则 Google 按来源 IP 判地区返回 400 FAILED_PRECONDITION。
+    // 两道防线（判定统一走 transport::route，server/engine/desktop 三处共用）：
+    // 1. 池化路径此前按 ordered 列表 checkout 待命会话——但 conserve 模式下
+    //    Vercel 端点 target_size=0 从不预建池会话，池里只有 CF 会话，checkout
+    //    会在 vgate 无会话时**降级命中 CF 会话**，绕过 ordered 的 vgate 优先
+    //    排序，使 Cloud Code 系请求固定落 CF 轮换出口而被拒。故合规出口 host
+    //    一律跳过池化。
+    // 2. 冷建连 establish_with_endpoints 按 ordered 尝试端点，vgate 失败仍会
+    //    降级 CF——CF 出口是轮换 anycast，降级回去仍被 Google 拒（失败窗口
+    //    第二条 pooled=false 正是此路径）。故合规出口 host 的端点列表**过滤为
+    //    仅 Vercel 端点**。
+    // 审核采纳（fail-closed）：配置里没有任何 Vercel 端点时**直接 502**，不再
+    // 回退全量——降级回 CF 后客户端仍收到 Google 400，与故障现场不可区分，
+    // 只会掩盖配置错误（审核意见 P1）。
+    let compliant_egress = pproxy_transport::requires_compliant_egress(&host);
+    let ordered_refs: Vec<&str> = if compliant_egress {
+        let vercel_only = pproxy_transport::compliant_egress_endpoints(&ordered_refs);
+        if vercel_only.is_empty() {
+            tracing::warn!(
+                host = %host,
+                "compliant-egress host but no Vercel gate endpoint configured; refusing (CF egress is geo-rejected by Google)"
+            );
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nx-pproxy-reason: no_compliant_egress\r\ncontent-type: application/json\r\ncontent-length: 25\r\n\r\n{\"error\":\"tunnel_failed\"}",
+                )
+                .await;
+            return;
+        }
+        vercel_only
+    } else {
+        ordered_refs
+    };
+
     // 先 establish（R4）：写 200 前可重试；denied 不重试；绝不静默回落直连
     // 池化（性能专项）：第一次尝试优先取待命会话（省 TCP+TLS+Upgrade ~4 RTT），
     // 待命会话 bind 失败（静默死亡）按 Network 重试，第二次尝试全新建连兜底。
     let establish_started = tokio::time::Instant::now();
     for attempt in 0..MAX_ATTEMPTS {
-        let pooled_session = if attempt == 0 {
+        let pooled_session = if attempt == 0 && !compliant_egress {
             pool.checkout_ordered(&ordered_refs)
         } else {
             None
@@ -1137,11 +1173,176 @@ mod tests {
         );
     }
 
+    /// 回归（2026-09-19）：池中已有 CF 待命会话时，合规出口 host（Cloud Code 系）
+    /// 不得 checkout 命中 CF 会话——必须跳过池化冷建连 vgate（Vercel 物理出口）。
+    /// 修复前 `checkout_ordered` 在 vgate 无池会话（conserve 模式 target_size=0）
+    /// 时降级命中 CF 会话，绕过 ordered 的 vgate 优先排序，使 Cloud Code 系请求
+    /// 落 CF 轮换出口，被 Google 以 400 FAILED_PRECONDITION 拒绝。
+    #[tokio::test]
+    async fn compliant_host_skips_cf_pool_and_establishes_vgate() {
+        let cf = spawn_stub_worker(&[]).await;
+        let vgate = spawn_stub_worker_at(&[], "/api/ws").await;
+        let cfg = TunnelConfig {
+            gate_url: format!("{},{}", cf.url, vgate.url),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let pool = TunnelPool::new(cfg);
+        // 等池化预建 CF 待命会话（conserve 模式：vgate target_size=0 不预建）
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_len() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池化未预建 CF 会话");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut state = gw_state(None, "compliant-pool");
+        state.tunnel = Some(pool);
+        let addr = start_gateway(state).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT daily-cloudcode-pa.googleapis.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, _head, _) = read_response(&mut c).await;
+        assert_eq!(status, 200, "合规 host 应经 vgate 建连成功");
+        assert_eq!(
+            vgate.conns.load(Ordering::SeqCst),
+            1,
+            "合规 host 必须冷建连 vgate，不得 checkout CF 池会话"
+        );
+    }
+
+    /// 回归（2026-09-19）：合规出口 host 冷建连时，vgate（Vercel）拒绝也不得
+    /// 降级 CF——CF 出口是轮换 anycast，降级回去仍被 Google 400 拒绝，且把
+    /// "出口地理不合规"伪装成上游错误。端点列表已过滤为仅 Vercel，vgate
+    /// 拒绝 → 直接 502，CF 端点零接触。
+    #[tokio::test]
+    async fn compliant_host_vgate_denied_does_not_fallback_to_cf() {
+        let cf = spawn_stub_worker(&[]).await;
+        // vgate 端 deny 该 host：模拟 Vercel 侧不可用/拒绝
+        let vgate = spawn_stub_worker_at(&["daily-cloudcode-pa.googleapis.com"], "/api/ws").await;
+        let cfg = TunnelConfig {
+            gate_url: format!("{},{}", cf.url, vgate.url),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let addr = start_gateway(gw_state(Some(cfg), "compliant-no-fallback")).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT daily-cloudcode-pa.googleapis.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, head, _) = read_response(&mut c).await;
+        assert_eq!(status, 502, "vgate 拒绝时合规 host 应 502，不得静默降级 CF");
+        assert!(
+            head.contains("x-pproxy-reason: tunnel_failed"),
+            "head: {head}"
+        );
+        assert_eq!(
+            cf.conns.load(Ordering::SeqCst),
+            0,
+            "合规 host 不得在 vgate 拒绝后降级触碰 CF"
+        );
+    }
+
+    /// 回归（2026-09-19 审核后）：合规出口 host 但配置里完全没有 Vercel 端点时
+    /// 必须 fail-closed（502 no_compliant_egress），不得回退 CF——降级回去客户端
+    /// 仍收到 Google 400，与故障现场不可区分，只会掩盖配置错误。
+    #[tokio::test]
+    async fn compliant_host_no_vercel_endpoint_refused() {
+        let cf = spawn_stub_worker(&[]).await;
+        let cfg = TunnelConfig {
+            gate_url: cf.url.clone(),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let addr = start_gateway(gw_state(Some(cfg), "compliant-no-vercel")).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT daily-cloudcode-pa.googleapis.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, head, _) = read_response(&mut c).await;
+        assert_eq!(status, 502, "无 Vercel 端点时合规 host 应 502");
+        assert!(
+            head.contains("x-pproxy-reason: no_compliant_egress"),
+            "head: {head}"
+        );
+        assert_eq!(
+            cf.conns.load(Ordering::SeqCst),
+            0,
+            "fail-closed 不得触碰 CF 端点"
+        );
+    }
+
+    /// 回归（2026-09-19 审核后）：合规出口 host 且 vgate 网络不可达（非 denied）
+    /// 时同样不得降级 CF——故障窗口第二条 pooled=false 正是此路径（vgate 失败后
+    /// 冷建连落 CF 被 Google 拒）。端点列表已过滤为仅 Vercel，vgate 不可达即 502。
+    #[tokio::test]
+    async fn compliant_host_vgate_unreachable_does_not_fallback_to_cf() {
+        let cf = spawn_stub_worker(&[]).await;
+        // 占一个必然拒绝连接的端口（无监听服务）作为 vgate 端点
+        let dead_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+        let vgate_url = format!("ws://{dead_addr}/api/ws");
+        let cfg = TunnelConfig {
+            gate_url: format!("{},{}", vgate_url, cf.url),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let addr = start_gateway(gw_state(Some(cfg), "compliant-vgate-dead")).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT daily-cloudcode-pa.googleapis.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, _head, _) = read_response(&mut c).await;
+        assert_eq!(status, 502, "vgate 不可达时合规 host 应 502");
+        assert_eq!(
+            cf.conns.load(Ordering::SeqCst),
+            0,
+            "合规 host 不得在 vgate 不可达后降级触碰 CF"
+        );
+    }
+
+    /// 对照（2026-09-19）：非合规出口 host（OAuth 等）在 conserve 模式下仍走 CF
+    /// 池化——修复不得误伤池化性能路径。
+    #[tokio::test]
+    async fn non_compliant_host_still_uses_cf_pool() {
+        let cf = spawn_stub_worker(&[]).await;
+        let vgate = spawn_stub_worker_at(&[], "/api/ws").await;
+        let cfg = TunnelConfig {
+            gate_url: format!("{},{}", cf.url, vgate.url),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+        let pool = TunnelPool::new(cfg);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_len() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "池化未预建 CF 会话");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut state = gw_state(None, "oauth-pool");
+        state.tunnel = Some(pool);
+        let addr = start_gateway(state).await;
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT oauth2.googleapis.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, _head, _) = read_response(&mut c).await;
+        assert_eq!(status, 200, "非合规 host 建连成功");
+        assert_eq!(
+            vgate.conns.load(Ordering::SeqCst),
+            0,
+            "非合规 host 不得走 vgate"
+        );
+    }
+
     /// 对照组：认证类 host 不受合规出口例外影响，仍按配置顺序 CF 优先。
     #[tokio::test]
     async fn connect_auth_host_keeps_configured_order() {
         let cf = spawn_stub_worker(&[]).await;
-        let vgate = spawn_stub_worker(&[]).await;
+        // 用 /api/ws 构造真正的 Vercel 端点：若与 CF 同为 /ws，两者都会被
+        // classify 为 Cf 类，`ordered_gate_urls` 的同类 round-robin（全局
+        // GATE_URL_COUNTER 奇偶）会使端点顺序在并行测试中翻转，导致断言
+        // 偶发失败（2026-09-19 修）。
+        let vgate = spawn_stub_worker_at(&[], "/api/ws").await;
         let cfg = TunnelConfig {
             gate_url: format!("{},{}", cf.url, vgate.url),
             token: "tok".into(),

@@ -206,6 +206,28 @@ pub fn ordered_gate_urls(gate_url: &str, host: &str) -> Vec<String> {
         .collect()
 }
 
+/// 端点是否属于 Vercel 类出口（与 [`classify_egress`] 同判据，供
+/// 合规出口过滤复用——三处数据面实现（server/engine/desktop）必须共用
+/// 同一个判定，避免再分叉出第四种 URL 匹配语义）。
+pub fn is_vercel_endpoint(url: &str) -> bool {
+    url.contains("vercel") || url.contains("vgate") || url.contains("/api/ws")
+}
+
+/// 合规出口 host（`requires_compliant_egress` 为真）可用的端点列表：
+/// **仅 Vercel 类**，过滤掉 CF（CF 出口是轮换 anycast，地理归属不稳定，
+/// 被 Google 按来源 IP 判区后返回 `400 FAILED_PRECONDITION`）。
+///
+/// 返回空列表 = 配置里没有任何 Vercel 端点。调用方应 fail-closed
+/// （直接 502 并告警），**不得**降级回 CF——降级回去客户端仍收到
+/// Google 400，与故障现场不可区分，只会掩盖配置错误。
+pub fn compliant_egress_endpoints<'a>(ordered: &[&'a str]) -> Vec<&'a str> {
+    ordered
+        .iter()
+        .copied()
+        .filter(|u| is_vercel_endpoint(u))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +409,34 @@ mod tests {
         let ordered_loose = order_endpoints(urls.clone(), "google.com.hk");
         assert_eq!(ordered_loose[0], "wss://vgate.example.com/api/ws");
         std::env::remove_var("PPROXY_CONSERVE_VERCEL");
+    }
+
+    #[test]
+    fn test_is_vercel_endpoint() {
+        assert!(is_vercel_endpoint("wss://vgate.ponyjob.top/api/ws"));
+        assert!(is_vercel_endpoint("wss://vercel.example.com/ws"));
+        assert!(is_vercel_endpoint("ws://127.0.0.1:9000/api/ws"));
+        assert!(!is_vercel_endpoint("wss://gate.ponyjob.top/ws"));
+        // vedge（openai 数据面上游）不含 vercel/vgate//api/ws → 按 classify_egress 口径为 Cf
+        assert!(!is_vercel_endpoint("wss://vedge.ponyjob.top/api/proxy"));
+        assert!(!is_vercel_endpoint("ws://127.0.0.1:9000/ws"));
+    }
+
+    #[test]
+    fn test_compliant_egress_endpoints_filters_to_vercel_only() {
+        let ordered = [
+            "wss://gate.ponyjob.top/ws",
+            "wss://vgate.ponyjob.top/api/ws",
+        ];
+        let only = compliant_egress_endpoints(&ordered);
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0], "wss://vgate.ponyjob.top/api/ws");
+
+        // 无 Vercel 端点 → 空列表（调用方应 fail-closed）
+        let cf_only = ["wss://gate.ponyjob.top/ws"];
+        assert!(compliant_egress_endpoints(&cf_only).is_empty());
+
+        // 空输入 → 空
+        assert!(compliant_egress_endpoints(&[]).is_empty());
     }
 }

@@ -341,9 +341,35 @@ pub async fn handle_connect_raw(
     let ordered_urls = pproxy_transport::ordered_gate_urls(&pool.config().gate_url, &host);
     let ordered_refs: Vec<&str> = ordered_urls.iter().map(String::as_str).collect();
 
+    // 合规出口专项（2026-09-19，与 server/src/connect.rs 同源修复）：Cloud Code 系
+    // host 必须经 Vercel 物理出口，两道防线判定统一走 transport::route：
+    // 1. 跳过池化——conserve 模式下池里只有 CF 会话，checkout 会在 vgate 无会话时
+    //    降级命中 CF 会话；
+    // 2. 端点列表过滤为仅 Vercel；无 Vercel 端点时 fail-closed 直接 502，不降级 CF
+    //    （CF 是轮换 anycast，降级回去仍被 Google 400，与故障现场不可区分）。
+    let compliant_egress = pproxy_transport::requires_compliant_egress(&host);
+    let ordered_refs: Vec<&str> = if compliant_egress {
+        let vercel_only = pproxy_transport::compliant_egress_endpoints(&ordered_refs);
+        if vercel_only.is_empty() {
+            tracing::warn!(
+                host = %host,
+                "compliant-egress host but no Vercel gate endpoint configured; refusing (CF egress is geo-rejected by Google)"
+            );
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nx-pproxy-reason: no_compliant_egress\r\ncontent-type: application/json\r\ncontent-length: 25\r\n\r\n{\"error\":\"tunnel_failed\"}",
+                )
+                .await;
+            return;
+        }
+        vercel_only
+    } else {
+        ordered_refs
+    };
+
     // 4. Establish WebSocket Tunnel (优先池化 checkout，失败或重试走全新建连)
     for attempt in 0..MAX_ATTEMPTS {
-        let pooled_session = if attempt == 0 {
+        let pooled_session = if attempt == 0 && !compliant_egress {
             pool.checkout_ordered(&ordered_refs)
         } else {
             None
@@ -808,5 +834,46 @@ mod tests {
             matches!(err, Err(EstablishError::Network(_))),
             "死会话 bind 必须归类 Network 错误以触发无缝重试, got {err:?}"
         );
+    }
+
+    /// 回归（2026-09-19，与 server 同源）：合规出口 host（Cloud Code 系）的端点
+    /// 过滤为仅 Vercel 类——vgate 可用时走 vgate，CF 端点零接触。
+    #[tokio::test]
+    async fn compliant_host_uses_vercel_only_endpoints() {
+        let cf = spawn_stub_gate(true, None).await;
+        // 用 /api/ws 构造真正的 Vercel 端点（Egress 分类按 URL 串含 /api/ws）
+        let vgate = spawn_stub_gate(true, None).await;
+        let vgate_url = vgate.url.replace("/ws", "/api/ws");
+        let cfg = TunnelConfig {
+            gate_url: format!("{},{}", vgate_url, cf.url),
+            token: "tok".into(),
+            allowlist: vec!["googleapis.com".into()],
+        };
+        let ordered_urls = pproxy_transport::ordered_gate_urls(&cfg.gate_url, "daily-cloudcode-pa.googleapis.com");
+        let ordered_refs: Vec<&str> = ordered_urls.iter().map(String::as_str).collect();
+        let vercel_only = pproxy_transport::compliant_egress_endpoints(&ordered_refs);
+        assert_eq!(vercel_only.len(), 1, "合规 host 端点列表应仅含 Vercel 端点");
+        assert!(vercel_only[0].contains("/api/ws"), "应为 vgate 端点, got {}", vercel_only[0]);
+
+        let result = establish_with_endpoints(&cfg, &vercel_only, "daily-cloudcode-pa.googleapis.com", 443).await;
+        assert!(result.is_ok(), "经 vgate 建连应成功: {result:?}");
+        assert_eq!(vgate.conns.load(Ordering::SeqCst) + 0, vgate.conns.load(Ordering::SeqCst));
+        assert_eq!(cf.conns.load(Ordering::SeqCst), 0, "合规 host 不得触碰 CF 端点");
+    }
+
+    /// 回归（2026-09-19，与 server 同源）：合规出口 host 但配置无任何 Vercel 端点
+    /// 时，过滤结果为空——调用方应 fail-closed，不得降级 CF。
+    #[tokio::test]
+    async fn compliant_host_no_vercel_endpoint_yields_empty() {
+        let cf = spawn_stub_gate(true, None).await;
+        let cfg = TunnelConfig {
+            gate_url: cf.url.clone(),
+            token: "tok".into(),
+            allowlist: vec!["googleapis.com".into()],
+        };
+        let ordered_urls = pproxy_transport::ordered_gate_urls(&cfg.gate_url, "daily-cloudcode-pa.googleapis.com");
+        let ordered_refs: Vec<&str> = ordered_urls.iter().map(String::as_str).collect();
+        let vercel_only = pproxy_transport::compliant_egress_endpoints(&ordered_refs);
+        assert!(vercel_only.is_empty(), "无 Vercel 端点时应过滤为空");
     }
 }
