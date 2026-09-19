@@ -21,7 +21,8 @@ FAIL=0
 
 # ---- 1. 端口归属 ----
 for port in 8899 8900; do
-    pid=$(ss -ltnp 2>/dev/null | awk -v p=":$port " '$4 ~ p { match($0, /pid=([0-9]+)/, m); print m[1]; exit }')
+    # 匹配 ":$port" 且后随非数字或行尾（避免 :88990 之类误命中 IPv6）
+    pid=$(ss -ltnp 2>/dev/null | awk -v p=":$port([^0-9]|\$)" '$4 ~ p { match($0, /pid=([0-9]+)/, m); print m[1]; exit }')
     if [ -n "${pid:-}" ]; then
         cgroup=$(cat "/proc/$pid/cgroup" 2>/dev/null | tr '\n' ' ')
         case "$cgroup" in
