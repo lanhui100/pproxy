@@ -331,10 +331,10 @@ pub async fn handle_connect_raw(
         return;
     }
 
-    if !allowlist_match(&host, &pool.config().allowlist) {
-        tracing::info!(host = %host, "connect denied: no tunnel route");
-        let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: no_tunnel_route\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
-        return;
+    // 2026-09-20：on 即走隧道——allowlist 不再做拦截门，仅记日志 tag。
+    {
+        let listed = allowlist_match(&host, &pool.config().allowlist);
+        tracing::info!(host = %host, allowlisted = listed, "tunnel establish (allowlist advisory only)");
     }
 
     // 端点顺序按目标 host 决定（Cloud Code 系必须优先合规物理出口，见 transport::route）。

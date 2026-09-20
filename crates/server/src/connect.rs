@@ -402,10 +402,11 @@ pub async fn handle_connect_raw(
         let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: port_not_allowed\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
         return;
     }
-    if !allowlist_match(&host, &pool.config().allowlist) {
-        tracing::info!(host = %host, "connect denied: no tunnel route");
-        let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nx-pproxy-reason: no_tunnel_route\r\ncontent-type: application/json\r\ncontent-length: 29\r\n\r\n{\"error\":\"connect_forbidden\"}").await;
-        return;
+    // 2026-09-20：on 即走隧道——allowlist 不再做拦截门，仅记日志 tag。
+    // 未命中也直接建连（CF 优先 / Vercel 合规由 ordered_gate_urls 保障）。
+    {
+        let listed = allowlist_match(&host, &pool.config().allowlist);
+        tracing::info!(host = %host, allowlisted = listed, "tunnel establish (allowlist advisory only)");
     }
 
     // 端点顺序按目标 host 决定（Cloud Code 系必须优先合规物理出口，见 route.rs）。
@@ -946,17 +947,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_not_allowlisted_denied() {
+    async fn connect_not_allowlisted_now_tunnels() {
+        // 2026-09-20：allowlist 改为 advisory，不再拦截——未命中也建连。
         let stub = spawn_stub_worker(&[]).await;
         let cfg = TunnelConfig { gate_url: stub.url.clone(), token: "tok".into(), allowlist: entries(&["googleapis.com"]) };
         let addr = start_gateway(gw_state(Some(cfg), "not-in-list")).await;
         let mut c = TcpStream::connect(addr).await.unwrap();
         c.write_all(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n").await.unwrap();
-        let (status, head, body) = read_response(&mut c).await;
-        assert_eq!(status, 403);
-        assert!(head.contains("x-pproxy-reason: no_tunnel_route"), "head: {head}");
-        assert_eq!(body, r#"{"error":"connect_forbidden"}"#);
-        assert_eq!(stub.conns.load(Ordering::SeqCst), 0, "未命中 allowlist 不得建 WS");
+        let (status, _head, _) = read_response(&mut c).await;
+        assert_eq!(status, 200, "未命中 allowlist 也应建连（advisory）");
+        assert_eq!(stub.conns.load(Ordering::SeqCst), 1, "未命中 allowlist 也应建 WS");
     }
 
     #[tokio::test]
