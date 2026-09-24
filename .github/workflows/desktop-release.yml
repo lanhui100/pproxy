@@ -53,6 +53,7 @@ jobs:
             const src = (process.env.UPDATER_ENDPOINTS || "")
               .split(",").map(s => s.trim()).filter(Boolean);
             const def = [
+              "https://github.com/lanhui100/pproxy/releases/latest/download/latest.json",
               "https://dl.example.com/latest.json",
               "https://access.example.com/dsk/latest.json",
             ];

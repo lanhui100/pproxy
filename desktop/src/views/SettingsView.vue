@@ -926,7 +926,7 @@ onMounted(async () => {
                   <InfoTip :text="TUNNEL_URL_TIP" />
                 </div>
                 <div class="text-[11px] text-muted-foreground font-mono truncate">
-                  {{ tunnelUrlInput && !tunnelUrlInput.includes('searchxai') ? tunnelUrlInput : '系统内置加速通道集群 (出口R / 出口C / 出口V 动态容灾)' }}
+                  {{ tunnelUrlInput && !tunnelUrlInput.includes('example.com') && !tunnelUrlInput.includes('searchxai') ? tunnelUrlInput : '系统内置加速通道集群 (出口R / 出口C / 出口V 动态容灾)' }}
                 </div>
               </div>
               <div class="flex items-center gap-1 shrink-0">
