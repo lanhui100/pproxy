@@ -934,33 +934,6 @@ async function submitImportOrChained() {
           </div>
 
           <p class="mt-3 text-xs text-muted-foreground text-center">{{ statusText }}</p>
-
-          <!-- 出口R (VPS 专属节点) 流量监控面板卡片 -->
-          <div class="mt-4 w-72 rounded-xl bg-card border border-border/40 p-3 shadow-xs space-y-2">
-            <div class="flex items-center justify-between text-xs font-medium">
-              <span class="inline-flex items-center gap-1.5 text-foreground">
-                <span class="h-2 w-2 rounded-full bg-emerald-500"></span>出口R (VPS)
-              </span>
-              <span class="text-[11px] font-mono text-muted-foreground">
-                今日: {{ formatBytes(vpsUsage.todayBytes) }} · {{ vpsUsage.todayReqs }}次
-              </span>
-            </div>
-            <!-- 进度条与月限额 (500GB) -->
-            <div class="space-y-1">
-              <div class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-                <div
-                  class="h-full rounded-full bg-primary transition-all duration-500"
-                  :style="{ width: `${Math.max(1, Number(vpsUsage.percent))}%` }"
-                ></div>
-              </div>
-              <div class="flex items-center justify-between text-[10px] text-muted-foreground font-mono">
-                <span>月累计: {{ formatBytes(vpsUsage.monthBytes) }} / 500GB</span>
-                <span :class="Number(vpsUsage.percent) > 80 ? 'text-amber-500 font-medium' : ''">
-                  {{ vpsUsage.percent }}%
-                </span>
-              </div>
-            </div>
-          </div>
         </section>
 
         <!-- 用量统计：极简合并单图（左上角请求/累计，右上角定宽高精实时速率） -->
@@ -1089,6 +1062,25 @@ async function submitImportOrChained() {
               <span class="inline-flex items-center gap-1.5">
                 <span class="inline-block h-0.5 w-3.5 rounded-full bg-primary/70"></span>实时网速
               </span>
+            </div>
+          </div>
+
+          <!-- VPS 月度用量指示（无卡片背景，直接置于图例下方） -->
+          <div class="pt-1.5 space-y-1 text-xs">
+            <div class="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>VPS月度用量</span>
+              <span class="font-mono tabular-nums">
+                {{ formatBytes(vpsUsage.monthBytes) }} / 500GB
+                <span :class="['ml-1', Number(vpsUsage.percent) > 80 ? 'text-amber-500 font-medium' : 'text-foreground font-medium']">
+                  ({{ vpsUsage.percent }}%)
+                </span>
+              </span>
+            </div>
+            <div class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                class="h-full rounded-full bg-primary transition-all duration-500"
+                :style="{ width: `${Math.max(1, Number(vpsUsage.percent))}%` }"
+              ></div>
             </div>
           </div>
         </section>
