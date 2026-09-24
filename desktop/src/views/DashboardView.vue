@@ -1066,7 +1066,7 @@ async function submitImportOrChained() {
           </div>
 
           <!-- VPS 月度用量指示（无卡片背景，直接置于图例下方） -->
-          <div class="pt-1.5 space-y-1 text-xs">
+          <div class="pt-3.5 space-y-1.5 text-xs">
             <div class="flex items-center justify-between text-[11px] text-muted-foreground">
               <span>VPS月度用量</span>
               <span class="font-mono tabular-nums">
