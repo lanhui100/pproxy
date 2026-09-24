@@ -30,6 +30,7 @@ fs2.workspace = true
 qrcode = { version = "0.14", default-features = false }
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+pproxy-gate-server = { path = "../gate-server" }
 
 [dev-dependencies]
 tempfile.workspace = true

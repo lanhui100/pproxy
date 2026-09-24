@@ -181,6 +181,21 @@ enum Command {
         #[command(subcommand)]
         cmd: MigrateCmd,
     },
+    /// 运行轻量原生出海 Gate 节点服务 (WS↔TCP 隧道桥与 HTTP/SSE 代理)
+    GateServer {
+        /// 监听端口 (默认 3101)
+        #[arg(long, default_value_t = 3101)]
+        port: u16,
+        /// 监听地址 (默认 0.0.0.0)
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+        /// 隧道令牌 sha256 哈希值 (留空则从 TUNNEL_TOKEN_HASH 环境变量读取)
+        #[arg(long)]
+        token_hash: Option<String>,
+        /// 反向代理鉴权密钥 (留空则从 PROXY_SECRET 环境变量读取)
+        #[arg(long)]
+        proxy_secret: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -518,6 +533,31 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Start => return cmd::service::start().map_err(RunError::Msg),
         Command::Stop => return cmd::service::stop().map_err(RunError::Msg),
         Command::Restart => return cmd::service::restart().map_err(RunError::Msg),
+        Command::GateServer { port, host, token_hash, proxy_secret } => {
+            let addr: std::net::SocketAddr = format!("{}:{}", host, port)
+                .parse()
+                .map_err(|e| RunError::Msg(format!("Invalid socket address: {e}")))?;
+            let hash = token_hash
+                .clone()
+                .or_else(|| std::env::var("TUNNEL_TOKEN_HASH").ok())
+                .unwrap_or_default();
+            let secret = proxy_secret
+                .clone()
+                .or_else(|| std::env::var("PROXY_SECRET").ok())
+                .unwrap_or_default();
+            
+            println!("🚀 Starting pproxy native Gate Server on {addr}...");
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| RunError::Msg(format!("Runtime build error: {e}")))?
+                .block_on(async {
+                    pproxy_gate_server::run_server(addr, hash, secret)
+                        .await
+                        .map_err(|e| RunError::Msg(format!("Gate server error: {e}")))
+                })?;
+            return Ok(0);
+        }
         _ => {}
     }
 
@@ -657,6 +697,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         | Command::Off { .. }
         | Command::Env { .. }
         | Command::Upgrade { .. }
+        | Command::GateServer { .. }
         | Command::Migrate { .. } => {
             unreachable!("handled above")
         }

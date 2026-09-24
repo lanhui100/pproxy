@@ -1,0 +1,21 @@
+[package]
+name = "pproxy-gate-server"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance, minimal-footprint native WS-to-TCP tunnel bridge and HTTP proxy for pproxy egress"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+futures-util = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+url = { workspace = true }

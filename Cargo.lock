@@ -114,6 +114,7 @@ checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
  "axum-core",
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -132,8 +133,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1099,6 +1102,7 @@ dependencies = [
  "libc",
  "pproxy-core",
  "pproxy-engine",
+ "pproxy-gate-server",
  "pproxy-server",
  "qrcode",
  "rand 0.8.7",
@@ -1156,6 +1160,26 @@ dependencies = [
  "tokio-tungstenite",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "pproxy-gate-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
