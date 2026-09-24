@@ -152,7 +152,7 @@ curl http://127.0.0.1:8900/api/health -H "Authorization: Bearer <admin_token>"
 | [docs/product/TECH_DESIGN.md](docs/product/TECH_DESIGN.md) | 目标态技术方案 |
 | [docs/product/ROADMAP.md](docs/product/ROADMAP.md) | 里程碑 M1-M6 |
 | [docs/architecture/CURRENT.md](docs/architecture/CURRENT.md) | 当前运行系统架构（双模拓扑与隧道） |
-| [docs/architecture/decisions/](docs/architecture/decisions/) | 架构决策记录（ADR） |
+| [docs/architecture/decisions/](docs/architecture/decisions/) | 历史架构决策记录（001~008 归档参考；当前活动决策收敛至 [.agents/notes/](.agents/notes/)） |
 | [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md) | 部署、更新、回滚 |
 | [docs/ops/API.md](docs/ops/API.md) | 数据面/管理面协议 |
 | [docs/ops/TROUBLESHOOTING.md](docs/ops/TROUBLESHOOTING.md) | 故障排查手册 |

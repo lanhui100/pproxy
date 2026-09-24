@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit - 本地秒级快速门禁
+set -euo pipefail
+
+# 1. 检查 ADR 规范
+if [ -d .agents/notes ]; then
+  bash .meta/gates/check-adr.sh
+fi
+
+# 2. 检查暂存区 Rust 语法与快速格式 (仅对暂存文件)
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
+if [ -n "$staged_rs" ]; then
+  cargo check --tests --quiet --workspace
+fi
+
+# 3. [doc-freshness WARN] 启发式提醒 (非硬阻断)
+staged_src=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '\.(rs|ts|tsx)$' || true)
+staged_doc=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '(\.md$|AGENTS\.md$)' | grep -v '^\.agents/notes/' || true)
+if [ -n "$staged_src" ] && [ -z "$staged_doc" ]; then
+  echo "=== [doc-freshness WARN] 暂存区有源码变更但无（非-notes）文档更新 ===" >&2
+  echo "  改了用户可见行为/契约请同步对应文档的家（same-commit）；纯重构忽略。" >&2
+fi
+
+exit 0
