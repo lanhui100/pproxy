@@ -112,3 +112,24 @@ jobs:
           mkdir -p dist-assets
           gh release download "${{ github.ref_name }}" --dir dist-assets
           scripts/publish-desktop-dist.sh dist-assets dist-assets/latest.json
+
+      - name: Sync desktop assets to general release tag (e.g. vX.Y.Z)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        run: |
+          GEN_TAG="${GITHUB_REF_NAME#desktop-}"
+          if [ "$GEN_TAG" != "$GITHUB_REF_NAME" ]; then
+            echo "Checking if general release $GEN_TAG exists..."
+            for i in {1..12}; do
+              if gh release view "$GEN_TAG" >/dev/null 2>&1; then
+                echo "Release $GEN_TAG found, uploading desktop artifacts and latest.json..."
+                mkdir -p sync-assets
+                gh release download "$GITHUB_REF_NAME" --dir sync-assets
+                gh release upload "$GEN_TAG" sync-assets/* --clobber
+                break
+              fi
+              echo "Waiting for $GEN_TAG to be created ($i/12)..."
+              sleep 10
+            done
+          fi
