@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "pproxy-cli"
-version = "0.3.49"
+version = "0.3.50"
 dependencies = [
  "anyhow",
  "axum",
