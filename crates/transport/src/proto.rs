@@ -14,11 +14,11 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 /// 401 鉴权失败稳定标记（供自愈状态机捕获）
 pub const AUTH_401_MARKER: &str = "HTTP error: 401 Unauthorized";
 
-// 超时预算：生产环境下收敛超时预算，防止单端点故障拖跨整条链路
+// 超时预算：生产环境下为应对跨国网络/Cloudflare Anycast 偶发路由抖动，放宽至 8000ms
 #[cfg(not(test))]
-pub const DIAL_TIMEOUT: Duration = Duration::from_millis(4000);
+pub const DIAL_TIMEOUT: Duration = Duration::from_millis(8000);
 #[cfg(not(test))]
-pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(3500);
+pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(5000);
 
 #[cfg(test)]
 pub const DIAL_TIMEOUT: Duration = Duration::from_millis(800);

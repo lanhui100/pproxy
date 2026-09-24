@@ -1723,11 +1723,12 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
 
     // 未配置授权码时，按 TCP 握手 RTT 测试节点连通性
     let host_port = extract_host_port_from_url(&gate).unwrap_or_else(|| match iface.as_str() {
-        "vercel" => "vgate.example.com:443".to_string(),
-        _ => "gate.example.com:443".to_string(),
+        "rn" => "rn.searchxai.cn:443".to_string(),
+        "vercel" => "vgate.ponyjob.top:443".to_string(),
+        _ => "gate.ponyjob.top:443".to_string(),
     });
     let started = std::time::Instant::now();
-    let dial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let dial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
     match tokio::time::timeout_at(dial_deadline, tokio::net::TcpStream::connect(host_port)).await {
         Ok(Ok(_)) => Ok(serde_json::json!({
             "iface": iface,
