@@ -196,7 +196,7 @@ async fn handle_ws_socket(socket: WebSocket) {
     // 4. Bi-directional relay between WS binary frames and raw TCP stream
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
-    let mut ws_to_tcp = tokio::spawn(async move {
+    let ws_to_tcp = async move {
         while let Some(msg) = ws_receiver.next().await {
             match msg {
                 Ok(Message::Binary(bin)) => {
@@ -204,21 +204,20 @@ async fn handle_ws_socket(socket: WebSocket) {
                         break;
                     }
                 }
-                Ok(Message::Ping(_)) => {
-                    // Handled automatically by axum ws, but counts as activity
-                }
+                Ok(Message::Ping(_)) => {}
                 Ok(Message::Close(_)) | Err(_) => break,
                 _ => {}
             }
         }
+        // 半关闭：客户端写完后向上游发送 FIN，但绝不终止下行接收响应
         let _ = tcp_write.shutdown().await;
-    });
+    };
 
-    let mut tcp_to_ws = tokio::spawn(async move {
+    let tcp_to_ws = async move {
         let mut buf = vec![0u8; 16384];
         loop {
             match tcp_read.read(&mut buf).await {
-                Ok(0) => break, // EOF
+                Ok(0) => break, // 上游 EOF
                 Ok(n) => {
                     if ws_sender.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
                         break;
@@ -228,13 +227,10 @@ async fn handle_ws_socket(socket: WebSocket) {
             }
         }
         let _ = ws_sender.close().await;
-    });
+    };
 
-    // Wait until either direction finishes
-    tokio::select! {
-        _ = &mut ws_to_tcp => {},
-        _ = &mut tcp_to_ws => {},
-    }
+    // 智能体 C 审查修复（P0）：双向等待完全结束（join），杜绝客户端单向传完请求导致服务端响应被截断掐死
+    tokio::join!(ws_to_tcp, tcp_to_ws);
 }
 
 #[derive(Deserialize)]
