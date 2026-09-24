@@ -258,7 +258,7 @@ impl TunnelPool {
                         consec_401 = 0;
                     }
 
-                    // 逐端点补足到 target_size（Vercel 出口强制为 0，防止 Fluid compute 持续计费）
+                    // 逐端点补足到 target_size（仅 Vercel 出口强制为 0 以防 Fluid compute 持续计费，NativeVps/CF 全力预热）
                     let mut healthy = true;
                     for ep in &endpoints {
                         let target_size = if classify_egress(ep) == Egress::Vercel {

@@ -1,18 +1,26 @@
 //! 目标域名感知与端点智能排序策略。
 
-/// 出口归账口径：gate 端点域名含 vercel/vgate → Vercel 出口，其余（gate.example.com 等）→ CF。
+/// 出口归账口径：gate 端点域名含 vercel/vgate → Vercel 出口，含 searchxai/rn. → NativeVps，其余（gate.example.com 等）→ CF。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Egress {
     Cf,
     Vercel,
+    NativeVps,
 }
 
 pub fn classify_egress(url: &str) -> Egress {
-    if url.contains("vercel") || url.contains("vgate") || url.contains("/api/ws") {
+    if is_native_vps_endpoint(url) {
+        Egress::NativeVps
+    } else if is_vercel_endpoint(url) {
         Egress::Vercel
     } else {
         Egress::Cf
     }
+}
+
+/// 端点是否属于原生独立 VPS 类出口（如 RackNerd VPS，拥有原生独立美区 IP 且无时长/配额约束）。
+pub fn is_native_vps_endpoint(url: &str) -> bool {
+    url.contains("searchxai") || url.contains("rn.") || url.contains("rn.example.com") || url.contains("192.210.231.8")
 }
 
 /// Google 核心 API 与基础子域
@@ -153,33 +161,44 @@ pub fn order_endpoints_with_offset<'a>(
         is_google_or_ai_host(host)
     };
 
+    let mut vps_list = Vec::new();
     let mut vercel_list = Vec::new();
-    let mut other_list = Vec::new();
+    let mut cf_list = Vec::new();
+
     for u in urls {
-        let is_vercel = u.contains("vercel") || u.contains("vgate") || u.contains("/api/ws");
-        if is_vercel {
+        if is_native_vps_endpoint(u) {
+            vps_list.push(u);
+        } else if is_vercel_endpoint(u) {
             vercel_list.push(u);
         } else {
-            other_list.push(u);
+            cf_list.push(u);
         }
     }
 
-    // 对同一类别的多个端点应用轮询偏移（Round-Robin 负载均衡），避免多账号倾斜
+    // 负载均衡轮询偏移
+    if vps_list.len() > 1 && offset > 0 {
+        let rot = offset % vps_list.len();
+        vps_list.rotate_left(rot);
+    }
     if vercel_list.len() > 1 && offset > 0 {
         let rot = offset % vercel_list.len();
         vercel_list.rotate_left(rot);
     }
-    if other_list.len() > 1 && offset > 0 {
-        let rot = offset % other_list.len();
-        other_list.rotate_left(rot);
+    if cf_list.len() > 1 && offset > 0 {
+        let rot = offset % cf_list.len();
+        cf_list.rotate_left(rot);
     }
 
     let mut list = Vec::new();
+    // 核心提速原则：只要配置了原生 VPS（出口R），其为拥有独立美区原生 IP、无冷启动、无时长限制的最佳出海口，
+    // 始终占据绝对最高优先级（Top 1）！
+    list.extend(vps_list);
+
     if vercel_preferred {
         list.extend(vercel_list);
-        list.extend(other_list);
+        list.extend(cf_list);
     } else {
-        list.extend(other_list);
+        list.extend(cf_list);
         list.extend(vercel_list);
     }
     list
@@ -224,7 +243,7 @@ pub fn compliant_egress_endpoints<'a>(ordered: &[&'a str]) -> Vec<&'a str> {
     ordered
         .iter()
         .copied()
-        .filter(|u| is_vercel_endpoint(u))
+        .filter(|u| is_native_vps_endpoint(u) || is_vercel_endpoint(u))
         .collect()
 }
 

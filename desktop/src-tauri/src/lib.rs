@@ -908,6 +908,10 @@ fn tunnel_token_fingerprint() -> Option<String> {
   Some(hex::encode(&h[..4]))
 }
 
+fn is_native_vps(u: &str) -> bool {
+    u.contains("searchxai") || u.contains("rn.") || u.contains("rn.example.com") || u.contains("192.210.231.8")
+}
+
 /// 从配置或默认端点中解析指定接口 (rn / cf / vercel) 的 gate URL。
 fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
     let url_raw = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok()
@@ -917,9 +921,9 @@ fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
     let urls: Vec<String> = url_raw.split([',', ';', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     match iface {
-        "rn" => urls.into_iter().find(|u| u.contains("searchxai") || u.contains("rn.") || u.contains("rn.example.com") || u.contains("192.210.231.8")).or_else(|| Some(RN_GATE_URL.to_string())),
+        "rn" => urls.into_iter().find(|u| is_native_vps(u)).or_else(|| Some(RN_GATE_URL.to_string())),
         "vercel" => urls.into_iter().find(|u| u.contains("vercel") || u.contains("vgate")).or_else(|| Some("wss://vgate.example.com/api/ws".to_string())),
-        "cf" => urls.into_iter().find(|u| !u.contains("vercel") && !u.contains("vgate") && !u.contains("searchxai") && !u.contains("rn.") && !u.contains("rn.example.com") && !u.contains("192.210.231.8")).or_else(|| Some(GATE_WS_URL.to_string())),
+        "cf" => urls.into_iter().find(|u| !u.contains("vercel") && !u.contains("vgate") && !is_native_vps(u)).or_else(|| Some(GATE_WS_URL.to_string())),
         _ => None,
     }
 }
@@ -951,6 +955,9 @@ fn extract_host_port_from_url(raw: &str) -> Option<String> {
 /// 解析 pony-gate:// 连接口令：base64url(JSON {"u": url, "t": token})。
 /// 长期有效、无加密（机密性与 token 等同）；与一次性迁移用的 pproxy-sync:// 定位不同。
 fn parse_connect_code(code: &str) -> Result<(String, String), String> {
+  if code.len() > 4096 {
+    return Err("连接口令长度超出限制（最大 4096 字符）".into());
+  }
   use base64::Engine as _;
   let encoded = code
     .trim()
@@ -1723,9 +1730,9 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
 
     // 未配置授权码时，按 TCP 握手 RTT 测试节点连通性
     let host_port = extract_host_port_from_url(&gate).unwrap_or_else(|| match iface.as_str() {
-        "rn" => "rn.searchxai.cn:443".to_string(),
-        "vercel" => "vgate.ponyjob.top:443".to_string(),
-        _ => "gate.ponyjob.top:443".to_string(),
+        "rn" => "rn.example.com:443".to_string(),
+        "vercel" => "vgate.example.com:443".to_string(),
+        _ => "gate.example.com:443".to_string(),
     });
     let started = std::time::Instant::now();
     let dial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);

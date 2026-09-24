@@ -95,7 +95,7 @@ pub struct EngineStats {
 impl pproxy_transport::TrafficCounter for EngineStats {
     fn record_up(&self, egress: pproxy_transport::Egress, bytes: u64) {
         match egress {
-            pproxy_transport::Egress::Cf => &self.cf_up,
+            pproxy_transport::Egress::Cf | pproxy_transport::Egress::NativeVps => &self.cf_up,
             pproxy_transport::Egress::Vercel => &self.vercel_up,
         }
         .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
@@ -103,7 +103,7 @@ impl pproxy_transport::TrafficCounter for EngineStats {
 
     fn record_down(&self, egress: pproxy_transport::Egress, bytes: u64) {
         match egress {
-            pproxy_transport::Egress::Cf => &self.cf_down,
+            pproxy_transport::Egress::Cf | pproxy_transport::Egress::NativeVps => &self.cf_down,
             pproxy_transport::Egress::Vercel => &self.vercel_down,
         }
         .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);

@@ -36,6 +36,8 @@ pub struct AtomicTrafficStats {
     pub cf_down: AtomicU64,
     pub vercel_up: AtomicU64,
     pub vercel_down: AtomicU64,
+    pub rn_up: AtomicU64,
+    pub rn_down: AtomicU64,
 }
 
 impl TrafficCounter for AtomicTrafficStats {
@@ -43,6 +45,7 @@ impl TrafficCounter for AtomicTrafficStats {
         match egress {
             Egress::Cf => &self.cf_up,
             Egress::Vercel => &self.vercel_up,
+            Egress::NativeVps => &self.rn_up,
         }
         .fetch_add(bytes, Ordering::Relaxed);
     }
@@ -51,6 +54,7 @@ impl TrafficCounter for AtomicTrafficStats {
         match egress {
             Egress::Cf => &self.cf_down,
             Egress::Vercel => &self.vercel_down,
+            Egress::NativeVps => &self.rn_down,
         }
         .fetch_add(bytes, Ordering::Relaxed);
     }
