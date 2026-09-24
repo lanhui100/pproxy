@@ -148,7 +148,18 @@ jobs:
             echo "Release $TAG exists, uploading assets..."
             gh release upload "$TAG" release-assets/* --clobber
           else
-            echo "Release $TAG does not exist, creating release..."
-            gh release create "$TAG" release-assets/* --title "Pony Proxy $TAG" --notes "CLI (Linux amd64/arm64 musl, macOS arm64/amd64, Windows x64) 三平台发版"
+            echo "Release $TAG does not exist, generating changelog and creating release..."
+            PREV_TAG=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || echo "")
+            if [ -n "$PREV_TAG" ]; then
+              CHANGES=$(git log --pretty=format:"- %s (%h)" "$PREV_TAG..$TAG")
+            else
+              CHANGES=$(git log -n 10 --pretty=format:"- %s (%h)")
+            fi
+            BODY="### 🚀 本次更新内容 (Release Highlights)
+$CHANGES
+
+---
+CLI (Linux amd64/arm64 musl, macOS arm64/amd64, Windows x64) 三平台发版"
+            gh release create "$TAG" release-assets/* --title "Pony Proxy $TAG" --notes "$BODY"
           fi
 
