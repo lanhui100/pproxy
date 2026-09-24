@@ -793,8 +793,10 @@ const TUNNEL_FILE: &str = "tunnel.json";
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.example.com/ws（见 deploy/cf-gate-worker/wrangler.toml）。
 /// 注意：与 HTTP 数据面网关（edge.example.com，cf-worker）不是同一域名，切勿混用。
 const GATE_WS_URL: &str = "wss://gate.example.com/ws";
-/// 默认双 gate 端点（主备 failover）：裸 token 保存且无端点配置时自动补齐。
-const DEFAULT_TUNNEL_URLS: &str = "wss://vgate.example.com/api/ws,wss://gate.example.com/ws";
+/// 内置私有首要出海节点（出口R，写死内置保护基础设施）
+const RN_GATE_URL: &str = "wss://rn.searchxai.cn/ws";
+/// 默认多 gate 端点（主出口R + 备用Vercel + 备用CF failover）
+const DEFAULT_TUNNEL_URLS: &str = "wss://rn.searchxai.cn/ws,wss://vgate.example.com/api/ws,wss://gate.example.com/ws";
 
 /// 旧配置迁移：早期版本把 HTTP 网关域名（edge.example.com）误当作 WS gate 端点，
 /// 且曾缺 /ws 路径。读到这类值一律映射到正确的 gate 端点（防止拨测超时/隧道连接失败）。
@@ -806,10 +808,10 @@ fn migrate_tunnel_url(url: &str) -> String {
         return GATE_WS_URL.to_string();
     }
     if t == "wss://gate.example.com/ws,wss://vgate.example.com/api/ws" {
-        return DEFAULT_TUNNEL_URLS.to_string();
+        return "wss://vgate.example.com/api/ws,wss://gate.example.com/ws".to_string();
     }
     if t == GATE_WS_URL {
-        return DEFAULT_TUNNEL_URLS.to_string();
+        return "wss://vgate.example.com/api/ws,wss://gate.example.com/ws".to_string();
     }
     t.to_string()
 }
@@ -906,7 +908,7 @@ fn tunnel_token_fingerprint() -> Option<String> {
   Some(hex::encode(&h[..4]))
 }
 
-/// 从配置或默认端点中解析指定接口 (cf / vercel) 的 gate URL。
+/// 从配置或默认端点中解析指定接口 (rn / cf / vercel) 的 gate URL。
 fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
     let url_raw = std::fs::read_to_string(data_dir().join(TUNNEL_FILE)).ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -915,8 +917,9 @@ fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
     let urls: Vec<String> = url_raw.split([',', ';', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     match iface {
-        "vercel" => urls.into_iter().find(|u| u.contains("vercel") || u.contains("vgate")).or_else(|| Some(DEFAULT_TUNNEL_URLS.split(',').next().unwrap_or("").to_string())),
-        "cf" => urls.into_iter().find(|u| !u.contains("vercel") && !u.contains("vgate")).or_else(|| Some(DEFAULT_TUNNEL_URLS.split(',').nth(1).unwrap_or(GATE_WS_URL).to_string())),
+        "rn" => urls.into_iter().find(|u| u.contains("searchxai") || u.contains("rn.") || u.contains("192.210.231.8")).or_else(|| Some(RN_GATE_URL.to_string())),
+        "vercel" => urls.into_iter().find(|u| u.contains("vercel") || u.contains("vgate")).or_else(|| Some("wss://vgate.example.com/api/ws".to_string())),
+        "cf" => urls.into_iter().find(|u| !u.contains("vercel") && !u.contains("vgate") && !u.contains("searchxai") && !u.contains("rn.") && !u.contains("192.210.231.8")).or_else(|| Some(GATE_WS_URL.to_string())),
         _ => None,
     }
 }
@@ -1009,7 +1012,13 @@ async fn tunnel_self_check() -> Result<serde_json::Value, String> {
   let urls: Vec<String> = url_raw.split([',', ';', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
   let mut gates = Vec::new();
   for u in urls {
-    let name = if u.contains("vercel") || u.contains("vgate") { "vercel" } else { "cf" };
+    let name = if u.contains("searchxai") || u.contains("rn.") || u.contains("192.210.231.8") {
+        "rn"
+    } else if u.contains("vercel") || u.contains("vgate") {
+        "vercel"
+    } else {
+        "cf"
+    };
     let item = match &token {
       Some(t) => {
         // Upgrade 探针与 bind 探针并发跑；旧 kind 取 bind 分类（无 token 仍为 no_token）
@@ -1675,9 +1684,9 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
         }
     }
 
-    // 方案 A：Direct 独立中继隧道模式（cf / vercel）
+    // 方案 A：Direct 独立中继隧道模式（rn / cf / vercel）
     let gate = resolve_gate_url_for_iface(&iface)
-        .ok_or_else(|| "未知接口：仅支持 cf / vercel / chained".to_string())?;
+        .ok_or_else(|| "未知接口：仅支持 rn / cf / vercel / chained".to_string())?;
 
     let token = match cred_get_impl(CREDENTIAL_USER_TUNNEL) {
         Ok(t) => t,
@@ -1799,9 +1808,9 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
         }
     }
 
-    // 方案 A：Direct 独立中继隧道模式（cf / vercel）
+    // 方案 A：Direct 独立中继隧道模式（rn / cf / vercel）
     let gate = resolve_gate_url_for_iface(&iface)
-        .ok_or_else(|| "未知接口：仅支持 cf / vercel / chained".to_string())?;
+        .ok_or_else(|| "未知接口：仅支持 rn / cf / vercel / chained".to_string())?;
     let token = cred_get_impl(CREDENTIAL_USER_TUNNEL)
         .ok()
         .flatten()
@@ -2702,6 +2711,7 @@ mod tests {
         assert_eq!(extract_host_port_from_url("invalid url"), Some("invalid url:443".to_string()));
 
         // 默认无配置时 fallback 到默认端点
+        assert!(resolve_gate_url_for_iface("rn").unwrap().contains("searchxai"));
         assert!(resolve_gate_url_for_iface("cf").unwrap().contains("gate.example.com"));
         assert!(resolve_gate_url_for_iface("vercel").unwrap().contains("vgate.example.com"));
         assert_eq!(resolve_gate_url_for_iface("unknown"), None);

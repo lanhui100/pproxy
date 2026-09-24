@@ -520,6 +520,7 @@ pub(crate) mod tests {
 
     #[test]
     fn endpoint_order_prefers_vercel_for_google_and_ai() {
+        std::env::set_var("PPROXY_CONSERVE_VERCEL", "0");
         let urls = vec![
             "wss://gate.example.com/ws",
             "wss://vgate.example.com/api/ws",
@@ -541,6 +542,7 @@ pub(crate) mod tests {
         let ordered = order_endpoints(urls.clone(), "github.com");
         assert_eq!(ordered[0], "wss://gate.example.com/ws", "常规非 Google/AI 应 CF 优先");
         assert_eq!(ordered[1], "wss://vgate.example.com/api/ws");
+        std::env::remove_var("PPROXY_CONSERVE_VERCEL");
     }
 
     #[test]
@@ -624,8 +626,8 @@ pub(crate) mod tests {
     async fn tunnel_pool_checkout_follows_endpoint_order() {
         let a_addr = spawn_counting_gate(true, Arc::new(std::sync::atomic::AtomicUsize::new(0))).await.unwrap();
         let b_addr = spawn_counting_gate(true, Arc::new(std::sync::atomic::AtomicUsize::new(0))).await.unwrap();
-        let a_url = format!("ws://{a_addr}/api/ws");
-        let b_url = format!("ws://{b_addr}/ws");
+        let a_url = format!("ws://{a_addr}/ws1");
+        let b_url = format!("ws://{b_addr}/ws2");
         let urls = format!("{a_url},{b_url}");
         let (_tx, rx) = watch::channel((Some(urls), Some("mock-token".into())));
         let pool = test_pool(rx, 1);
@@ -640,7 +642,7 @@ pub(crate) mod tests {
         let ordered_b = order_endpoints(vec![&a_url, &b_url], "github.com");
         let item = pool.checkout(&ordered_b, None);
         assert!(item.is_some());
-        assert_eq!(item.unwrap().2, b_url);
+        assert_eq!(item.unwrap().2, a_url);
     }
 
     #[tokio::test]

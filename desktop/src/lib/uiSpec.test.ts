@@ -11,8 +11,9 @@ describe('UI/UX Specification Checks', () => {
     expect(content).toContain("const usageDimension = ref<'7d' | '24h'>('24h')")
   })
 
-  it('DashboardView standardizes egress names to 出口C and 出口V', () => {
+  it('DashboardView standardizes egress names to 出口R, 出口C and 出口V', () => {
     const content = readFileSync(dashboardPath, 'utf-8')
+    expect(content).toContain("name: '出口R'")
     expect(content).toContain("name: '出口C'")
     expect(content).toContain("name: '出口V'")
     expect(content).not.toContain("name: 'C出口'")

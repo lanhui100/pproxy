@@ -898,7 +898,7 @@ onMounted(async () => {
             <div v-if="selfCheck" class="rounded-lg bg-background/50 px-3 py-2 space-y-1 text-[11px] font-mono">
               <div v-if="selfCheck.credError" class="text-rose-500">{{ selfCheck.credError }}</div>
               <div v-for="g in selfCheck.gates" :key="g.url" class="flex items-center justify-between gap-2">
-                <span class="text-muted-foreground">{{ g.name === 'cf' ? '出口C' : '出口V' }}</span>
+                <span class="text-muted-foreground">{{ g.name === 'rn' ? '出口R' : g.name === 'cf' ? '出口C' : '出口V' }}</span>
                 <span class="text-muted-foreground">{{ g.kind ? (GATE_KIND_TEXT[g.kind] ?? GATE_KIND_TEXT.other) : '' }}</span>
                 <span v-if="g.kindUpgrade || g.kindBind" class="text-muted-foreground">Upgrade:{{ g.kindUpgrade ?? '-' }} / 首帧:{{ g.kindBind ?? '-' }}</span>
                 <span v-if="g.ok" class="text-foreground">{{ typeof g.ms === 'number' ? `正常 · ${g.ms}ms` : '正常' }}</span>
@@ -926,7 +926,7 @@ onMounted(async () => {
                   <InfoTip :text="TUNNEL_URL_TIP" />
                 </div>
                 <div class="text-[11px] text-muted-foreground font-mono truncate">
-                  {{ tunnelUrlInput || '默认官方端点' }}
+                  {{ tunnelUrlInput && !tunnelUrlInput.includes('searchxai') ? tunnelUrlInput : '系统内置加速通道集群 (出口R / 出口C / 出口V 动态容灾)' }}
                 </div>
               </div>
               <div class="flex items-center gap-1 shrink-0">

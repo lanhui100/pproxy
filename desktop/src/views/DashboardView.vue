@@ -287,7 +287,7 @@ async function refreshTraffic(): Promise<void> {
 }
 
 // ---- 连接状态（接口 + 常用站点；10 分钟轮询，仅显示近 2 小时时序）----
-type Iface = 'cf' | 'vercel'
+type Iface = 'rn' | 'cf' | 'vercel'
 
 interface IfaceRow {
   id: Iface
@@ -305,6 +305,7 @@ interface SiteRow {
 }
 
 const ifaceRows = ref<IfaceRow[]>([
+  { id: 'rn', name: '出口R', endpoint: '', history: [], testing: false },
   { id: 'cf', name: '出口C', endpoint: '', history: [], testing: false },
   { id: 'vercel', name: '出口V', endpoint: '', history: [], testing: false },
 ])
