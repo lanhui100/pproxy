@@ -1423,9 +1423,11 @@ struct TrafficPersist {
     date: String,
     today_cf: EgressBucket,
     today_vercel: EgressBucket,
+    today_rn: EgressBucket,
     today_upstream: EgressBucket,
     total_cf: EgressBucket,
     total_vercel: EgressBucket,
+    total_rn: EgressBucket,
     total_upstream: EgressBucket,
     /// 已结束的最近若干天（不含今天），最多 6 条；展示时与今日拼成 7 天柱状图
     history: Vec<DayEntry>,
@@ -1439,6 +1441,7 @@ struct DayEntry {
     date: String,
     cf: EgressBucket,
     vercel: EgressBucket,
+    rn: EgressBucket,
     upstream: EgressBucket,
 }
 
@@ -1448,13 +1451,13 @@ struct HourEntry {
     hour: String,
     cf: EgressBucket,
     vercel: EgressBucket,
+    rn: EgressBucket,
     upstream: EgressBucket,
 }
 
 static TRAFFIC_STATE: std::sync::Mutex<Option<TrafficPersist>> = std::sync::Mutex::new(None);
-/// 已并入 TRAFFIC_STATE 的引擎原子读数基线（仅进程内存，绝不持久化——
-/// 重启后引擎原子归零，若把旧基线落盘会把新一轮计数全部吞掉）。
-type TrafficRawCounters = (u64, u64, u64, u64, u64, u64, u64, u64, u64);
+/// 已并入 TRAFFIC_STATE 的引擎原子读数基线
+type TrafficRawCounters = (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
 static TRAFFIC_BASE: std::sync::Mutex<Option<TrafficRawCounters>> = std::sync::Mutex::new(None);
 
 fn traffic_path() -> std::path::PathBuf { data_dir().join("traffic.json") }
@@ -1475,6 +1478,9 @@ fn traffic_snapshot() -> TrafficPersist {
             s.vercel_up.load(Relaxed),
             s.vercel_down.load(Relaxed),
             s.vercel_reqs.load(Relaxed),
+            s.rn_up.load(Relaxed),
+            s.rn_down.load(Relaxed),
+            s.rn_reqs.load(Relaxed),
             s.upstream_up.load(Relaxed),
             s.upstream_down.load(Relaxed),
             s.upstream_reqs.load(Relaxed),
@@ -1493,12 +1499,14 @@ fn traffic_snapshot() -> TrafficPersist {
         if !st.date.is_empty()
             && (st.today_cf.reqs > 0 || st.today_cf.up > 0 || st.today_cf.down > 0
                 || st.today_vercel.reqs > 0 || st.today_vercel.up > 0 || st.today_vercel.down > 0
+                || st.today_rn.reqs > 0 || st.today_rn.up > 0 || st.today_rn.down > 0
                 || st.today_upstream.reqs > 0 || st.today_upstream.up > 0 || st.today_upstream.down > 0)
         {
             st.history.push(DayEntry {
                 date: st.date.clone(),
                 cf: st.today_cf.clone(),
                 vercel: st.today_vercel.clone(),
+                rn: st.today_rn.clone(),
                 upstream: st.today_upstream.clone(),
             });
             let keep = st.history.len().saturating_sub(6);
@@ -1509,6 +1517,7 @@ fn traffic_snapshot() -> TrafficPersist {
         st.date = today;
         st.today_cf = EgressBucket::default();
         st.today_vercel = EgressBucket::default();
+        st.today_rn = EgressBucket::default();
         st.today_upstream = EgressBucket::default();
     }
 
@@ -1518,6 +1527,7 @@ fn traffic_snapshot() -> TrafficPersist {
             hour: cur_hour,
             cf: EgressBucket::default(),
             vercel: EgressBucket::default(),
+            rn: EgressBucket::default(),
             upstream: EgressBucket::default(),
         });
         let keep = st.hourly.len().saturating_sub(24);
@@ -1538,26 +1548,37 @@ fn traffic_snapshot() -> TrafficPersist {
         cur.6.saturating_sub(b.6),
         cur.7.saturating_sub(b.7),
         cur.8.saturating_sub(b.8),
+        cur.9.saturating_sub(b.9),
+        cur.10.saturating_sub(b.10),
+        cur.11.saturating_sub(b.11),
     );
-    if d != (0, 0, 0, 0, 0, 0, 0, 0, 0) {
+    if d != (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) {
         st.today_cf.up += d.0;
         st.today_cf.down += d.1;
         st.today_cf.reqs += d.2;
         st.today_vercel.up += d.3;
         st.today_vercel.down += d.4;
         st.today_vercel.reqs += d.5;
-        st.today_upstream.up += d.6;
-        st.today_upstream.down += d.7;
-        st.today_upstream.reqs += d.8;
+        st.today_rn.up += d.6;
+        st.today_rn.down += d.7;
+        st.today_rn.reqs += d.8;
+        st.today_upstream.up += d.9;
+        st.today_upstream.down += d.10;
+        st.today_upstream.reqs += d.11;
+
         st.total_cf.up += d.0;
         st.total_cf.down += d.1;
         st.total_cf.reqs += d.2;
         st.total_vercel.up += d.3;
         st.total_vercel.down += d.4;
         st.total_vercel.reqs += d.5;
-        st.total_upstream.up += d.6;
-        st.total_upstream.down += d.7;
-        st.total_upstream.reqs += d.8;
+        st.total_rn.up += d.6;
+        st.total_rn.down += d.7;
+        st.total_rn.reqs += d.8;
+        st.total_upstream.up += d.9;
+        st.total_upstream.down += d.10;
+        st.total_upstream.reqs += d.11;
+
         if let Some(last_h) = st.hourly.last_mut() {
             last_h.cf.up += d.0;
             last_h.cf.down += d.1;
@@ -1565,9 +1586,12 @@ fn traffic_snapshot() -> TrafficPersist {
             last_h.vercel.up += d.3;
             last_h.vercel.down += d.4;
             last_h.vercel.reqs += d.5;
-            last_h.upstream.up += d.6;
-            last_h.upstream.down += d.7;
-            last_h.upstream.reqs += d.8;
+            last_h.rn.up += d.6;
+            last_h.rn.down += d.7;
+            last_h.rn.reqs += d.8;
+            last_h.upstream.up += d.9;
+            last_h.upstream.down += d.10;
+            last_h.upstream.reqs += d.11;
         }
     }
     *base = Some(cur);
@@ -1591,7 +1615,7 @@ fn bucket_json(b: &EgressBucket) -> serde_json::Value {
     serde_json::json!({ "requests": b.reqs, "bytes_up": b.up, "bytes_down": b.down })
 }
 
-/// CF / Vercel / Upstream 出网用量：今日 / 累计 / 近 7 日 / 近 24 小时（按时间升序）。
+/// CF / Vercel / RN / Upstream 出网用量：今日 / 累计 / 近 7 日 / 近 24 小时（按时间升序）。
 #[tauri::command]
 fn proxy_traffic_stats() -> serde_json::Value {
     let s = traffic_snapshot();
@@ -1603,6 +1627,7 @@ fn proxy_traffic_stats() -> serde_json::Value {
                 "date": d.date,
                 "cf": bucket_json(&d.cf),
                 "vercel": bucket_json(&d.vercel),
+                "rn": bucket_json(&d.rn),
                 "upstream": bucket_json(&d.upstream),
             })
         })
@@ -1611,6 +1636,7 @@ fn proxy_traffic_stats() -> serde_json::Value {
         "date": s.date,
         "cf": bucket_json(&s.today_cf),
         "vercel": bucket_json(&s.today_vercel),
+        "rn": bucket_json(&s.today_rn),
         "upstream": bucket_json(&s.today_upstream),
     }));
     let hourly: Vec<serde_json::Value> = s
@@ -1621,6 +1647,7 @@ fn proxy_traffic_stats() -> serde_json::Value {
                 "hour": h.hour,
                 "cf": bucket_json(&h.cf),
                 "vercel": bucket_json(&h.vercel),
+                "rn": bucket_json(&h.rn),
                 "upstream": bucket_json(&h.upstream),
             })
         })
@@ -1629,11 +1656,13 @@ fn proxy_traffic_stats() -> serde_json::Value {
         "today": {
             "cf": bucket_json(&s.today_cf),
             "vercel": bucket_json(&s.today_vercel),
+            "rn": bucket_json(&s.today_rn),
             "upstream": bucket_json(&s.today_upstream),
         },
         "total": {
             "cf": bucket_json(&s.total_cf),
             "vercel": bucket_json(&s.total_vercel),
+            "rn": bucket_json(&s.total_rn),
             "upstream": bucket_json(&s.total_upstream),
         },
         "history": history,

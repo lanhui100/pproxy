@@ -72,17 +72,19 @@ interface DayUsage {
   date: string
   cf: TrafficBucket
   vercel: TrafficBucket
+  rn?: TrafficBucket
   upstream?: TrafficBucket
 }
 interface HourUsage {
   hour: string
   cf: TrafficBucket
   vercel: TrafficBucket
+  rn?: TrafficBucket
   upstream?: TrafficBucket
 }
 interface TrafficStats {
-  today: { cf: TrafficBucket; vercel: TrafficBucket; upstream?: TrafficBucket }
-  total: { cf: TrafficBucket; vercel: TrafficBucket; upstream?: TrafficBucket }
+  today: { cf: TrafficBucket; vercel: TrafficBucket; rn?: TrafficBucket; upstream?: TrafficBucket }
+  total: { cf: TrafficBucket; vercel: TrafficBucket; rn?: TrafficBucket; upstream?: TrafficBucket }
   history: DayUsage[]
   hourly?: HourUsage[]
 }
@@ -168,8 +170,8 @@ const todayTotals = computed(() => {
   if (!traffic.value) return { bytes: 0, requests: 0 }
   const t = traffic.value.today
   return {
-    bytes: bucketBytes(t.cf) + bucketBytes(t.vercel) + bucketBytes(t.upstream),
-    requests: (t.cf?.requests ?? 0) + (t.vercel?.requests ?? 0) + (t.upstream?.requests ?? 0),
+    bytes: bucketBytes(t.cf) + bucketBytes(t.vercel) + bucketBytes(t.rn) + bucketBytes(t.upstream),
+    requests: (t.cf?.requests ?? 0) + (t.vercel?.requests ?? 0) + (t.rn?.requests ?? 0) + (t.upstream?.requests ?? 0),
   }
 })
 
@@ -178,8 +180,29 @@ const totalBytes = computed(() => {
   return (
     bucketBytes(traffic.value.total.cf) +
     bucketBytes(traffic.value.total.vercel) +
+    bucketBytes(traffic.value.total.rn) +
     bucketBytes(traffic.value.total.upstream)
   )
+})
+
+// ---- 出口R (VPS) 专属流量监控指标 (每月 500GB 额度) ----
+const VPS_MONTHLY_LIMIT_BYTES = 500 * 1024 * 1024 * 1024 // 500 GB
+
+const vpsUsage = computed(() => {
+  const t = traffic.value
+  const todayRn = t?.today.rn
+  const totalRn = t?.total.rn
+  const todayBytes = bucketBytes(todayRn)
+  const todayReqs = todayRn?.requests ?? 0
+  const monthBytes = bucketBytes(totalRn)
+  const pct = Math.min(100, Math.max(0, (monthBytes / VPS_MONTHLY_LIMIT_BYTES) * 100))
+  return {
+    todayBytes,
+    todayReqs,
+    monthBytes,
+    monthLimitBytes: VPS_MONTHLY_LIMIT_BYTES,
+    percent: pct.toFixed(2),
+  }
 })
 
 const currentSpeed = ref<{ up: number; down: number }>({ up: 0, down: 0 })
@@ -911,6 +934,33 @@ async function submitImportOrChained() {
           </div>
 
           <p class="mt-3 text-xs text-muted-foreground text-center">{{ statusText }}</p>
+
+          <!-- 出口R (VPS 专属节点) 流量监控面板卡片 -->
+          <div class="mt-4 w-72 rounded-xl bg-card border border-border/40 p-3 shadow-xs space-y-2">
+            <div class="flex items-center justify-between text-xs font-medium">
+              <span class="inline-flex items-center gap-1.5 text-foreground">
+                <span class="h-2 w-2 rounded-full bg-emerald-500"></span>出口R (VPS)
+              </span>
+              <span class="text-[11px] font-mono text-muted-foreground">
+                今日: {{ formatBytes(vpsUsage.todayBytes) }} · {{ vpsUsage.todayReqs }}次
+              </span>
+            </div>
+            <!-- 进度条与月限额 (500GB) -->
+            <div class="space-y-1">
+              <div class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                <div
+                  class="h-full rounded-full bg-primary transition-all duration-500"
+                  :style="{ width: `${Math.max(1, Number(vpsUsage.percent))}%` }"
+                ></div>
+              </div>
+              <div class="flex items-center justify-between text-[10px] text-muted-foreground font-mono">
+                <span>月累计: {{ formatBytes(vpsUsage.monthBytes) }} / 500GB</span>
+                <span :class="Number(vpsUsage.percent) > 80 ? 'text-amber-500 font-medium' : ''">
+                  {{ vpsUsage.percent }}%
+                </span>
+              </div>
+            </div>
+          </div>
         </section>
 
         <!-- 用量统计：极简合并单图（左上角请求/累计，右上角定宽高精实时速率） -->

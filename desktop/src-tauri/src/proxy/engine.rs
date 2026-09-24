@@ -86,6 +86,9 @@ pub struct EngineStats {
     pub vercel_up: AtomicU64,
     pub vercel_down: AtomicU64,
     pub vercel_reqs: AtomicU64,
+    pub rn_up: AtomicU64,
+    pub rn_down: AtomicU64,
+    pub rn_reqs: AtomicU64,
     pub upstream_up: AtomicU64,
     pub upstream_down: AtomicU64,
     pub upstream_reqs: AtomicU64,
@@ -95,16 +98,18 @@ pub struct EngineStats {
 impl pproxy_transport::TrafficCounter for EngineStats {
     fn record_up(&self, egress: pproxy_transport::Egress, bytes: u64) {
         match egress {
-            pproxy_transport::Egress::Cf | pproxy_transport::Egress::NativeVps => &self.cf_up,
+            pproxy_transport::Egress::Cf => &self.cf_up,
             pproxy_transport::Egress::Vercel => &self.vercel_up,
+            pproxy_transport::Egress::NativeVps => &self.rn_up,
         }
         .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn record_down(&self, egress: pproxy_transport::Egress, bytes: u64) {
         match egress {
-            pproxy_transport::Egress::Cf | pproxy_transport::Egress::NativeVps => &self.cf_down,
+            pproxy_transport::Egress::Cf => &self.cf_down,
             pproxy_transport::Egress::Vercel => &self.vercel_down,
+            pproxy_transport::Egress::NativeVps => &self.rn_down,
         }
         .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }

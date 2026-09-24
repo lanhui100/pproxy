@@ -285,7 +285,7 @@ pub async fn connect_and_relay(
                 match egress {
                     Egress::Cf => &stats.cf_reqs,
                     Egress::Vercel => &stats.vercel_reqs,
-                    Egress::NativeVps => &stats.cf_reqs,
+                    Egress::NativeVps => &stats.rn_reqs,
                 }
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if parsed.kind == Kind::Connect {
@@ -298,7 +298,7 @@ pub async fn connect_and_relay(
                     match egress {
                         Egress::Cf => &stats.cf_up,
                         Egress::Vercel => &stats.vercel_up,
-                        Egress::NativeVps => &stats.cf_up,
+                        Egress::NativeVps => &stats.rn_up,
                     }
                     .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     use futures_util::SinkExt as _;
