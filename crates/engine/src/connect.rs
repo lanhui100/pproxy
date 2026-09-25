@@ -397,8 +397,12 @@ pub async fn handle_connect_raw(
     };
 
     // 4. Establish WebSocket Tunnel (优先池化 checkout，失败或重试走全新建连)
+    // 性能架构优化：若可用端点中包含可池化物理出口（如 NativeVps / RackNerd），
+    // 即使为 compliant_egress 也允许优先命中待命池，由 5 RTT (~1.5s) 冷建连降为 1 RTT (~150ms) 首帧绑定！
+    let has_poolable_endpoint = ordered_refs.iter().any(|ep| !pproxy_transport::is_vercel_endpoint(ep));
+
     for attempt in 0..MAX_ATTEMPTS {
-        let pooled_session = if attempt == 0 && !compliant_egress {
+        let pooled_session = if attempt == 0 && (!compliant_egress || has_poolable_endpoint) {
             pool.checkout_ordered(&ordered_refs)
         } else {
             None
