@@ -44,22 +44,25 @@ jobs:
       - name: Prepare updater endpoints fragment (build-time injection)
         shell: bash
         # tracked tauri.conf.json 保持开源中立占位；发版时经 UPDATER_ENDPOINTS secret 注入真实
-        # 分发地址（逗号分隔）。secret 未设时回落占位端点，保证构建确定性。
+        # 分发地址（逗号分隔）。强制包含 GitHub 官方 Releases 兜底，防止自建域名故障时更新链断裂。
         env:
           UPDATER_ENDPOINTS: ${{ secrets.UPDATER_ENDPOINTS }}
         run: |
           node -e '
             const fs = require("fs");
+            const defaultGh = "https://github.com/lanhui100/pproxy/releases/latest/download/latest.json";
             const src = (process.env.UPDATER_ENDPOINTS || "")
               .split(",").map(s => s.trim()).filter(Boolean);
             const def = [
-              "https://github.com/lanhui100/pproxy/releases/latest/download/latest.json",
-              "https://dl.example.com/latest.json",
-              "https://access.example.com/dsk/latest.json",
+              defaultGh,
+              "https://dl.ponygo.fun/latest.json",
+              "https://access.ponygo.fun/dsk/latest.json",
             ];
+            // 确保官方 GitHub 端点始终保留在列表首位作为可靠兜底
+            const endpoints = Array.from(new Set([defaultGh, ...(src.length ? src : def)]));
             fs.writeFileSync(
               "desktop/src-tauri/tauri.updater.json",
-              JSON.stringify({ plugins: { updater: { endpoints: src.length ? src : def } } })
+              JSON.stringify({ plugins: { updater: { endpoints } } })
             );
           '
           cat desktop/src-tauri/tauri.updater.json
@@ -99,15 +102,18 @@ jobs:
           projectPath: desktop
           args: --config src-tauri/tauri.updater.json
 
-      - name: Deploy static distribution to Vercel
-        if: env.VERCEL_TOKEN != ''
+      - name: Deploy static distribution to Cloudflare R2 / Vercel
+        if: env.R2_TOKEN != '' || env.VERCEL_TOKEN != ''
         continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          R2_TOKEN: ${{ secrets.R2_TOKEN }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET || 'pony-desktop-releases' }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || '56c6fc45269c95f78a41d6a1efb9d0e7' }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          # 分发基础地址（开源中立默认占位；发版方在仓库 secrets 设 PPROXY_DIST_BASE 指向自己的分发域名）
-          PPROXY_DIST_BASE: ${{ secrets.PPROXY_DIST_BASE }}
+          # 分发基础地址（优先 R2 绑定的自定义域 dl.ponygo.fun）
+          PPROXY_DIST_BASE: ${{ secrets.PPROXY_DIST_BASE || 'https://dl.ponygo.fun' }}
         run: |
           mkdir -p dist-assets
           gh release download "${{ github.ref_name }}" --dir dist-assets

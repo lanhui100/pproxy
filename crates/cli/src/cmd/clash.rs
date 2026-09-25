@@ -35,18 +35,36 @@ proxies:
 proxy-groups:
   - name: "PROXY"
     type: select
+    url: "http://cp.cloudflare.com/generate_204"
+    interval: 300
     proxies:
       - "Pony-Proxy"
       - DIRECT
 
 rules:
-  # AI 与大模型服务
+  # 1. 服务端公网与局域网直连保护（审查修复 P0-2：置顶优先，加 no-resolve 避免反向解析延迟）
+  - DOMAIN-SUFFIX,ponygo.fun,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+
+  # 2. 系统与客户端探活直连保护（审查修复 P0-1：置顶于 PROXY 规则前，彻底防止探活偷跑代理流量）
+  - DOMAIN,connectivitycheck.gstatic.com,DIRECT
+  - DOMAIN,connectivitycheck.android.com,DIRECT
+  - DOMAIN,clients3.google.com,DIRECT
+  - DOMAIN,msftconnecttest.com,DIRECT
+  - DOMAIN,captive.apple.com,DIRECT
+  - DOMAIN,cp.cloudflare.com,DIRECT
+
+  # 3. 核心海外大模型与 AI 平台
   - DOMAIN-SUFFIX,openai.com,PROXY
   - DOMAIN-SUFFIX,chatgpt.com,PROXY
   - DOMAIN-SUFFIX,oaistatic.com,PROXY
   - DOMAIN-SUFFIX,oaiusercontent.com,PROXY
   - DOMAIN-SUFFIX,anthropic.com,PROXY
   - DOMAIN-SUFFIX,claude.ai,PROXY
+  - DOMAIN-SUFFIX,claudeusercontent.com,PROXY
   - DOMAIN-SUFFIX,deepmind.google,PROXY
   - DOMAIN-SUFFIX,perplexity.ai,PROXY
   - DOMAIN-SUFFIX,huggingface.co,PROXY
@@ -74,18 +92,16 @@ rules:
   # 开发者平台与通用知识库
   - DOMAIN-SUFFIX,github.com,PROXY
   - DOMAIN-SUFFIX,githubusercontent.com,PROXY
+  - DOMAIN-SUFFIX,github.io,PROXY
+  - DOMAIN-SUFFIX,githubassets.com,PROXY
   - DOMAIN-SUFFIX,gitlab.com,PROXY
   - DOMAIN-SUFFIX,docker.com,PROXY
   - DOMAIN-SUFFIX,docker.io,PROXY
   - DOMAIN-SUFFIX,stackoverflow.com,PROXY
   - DOMAIN-SUFFIX,wikipedia.org,PROXY
   - DOMAIN-SUFFIX,wikimedia.org,PROXY
-  # 国内与局域网直连保护（确保国内 App 不受影响）
+  # 国内直连与 GEOIP 兜底
   - DOMAIN-SUFFIX,cn,DIRECT
-  - IP-CIDR,127.0.0.0/8,DIRECT
-  - IP-CIDR,172.16.0.0/12,DIRECT
-  - IP-CIDR,192.168.0.0/16,DIRECT
-  - IP-CIDR,10.0.0.0/8,DIRECT
   - GEOIP,CN,DIRECT
   # 兜底规则：未匹配项默认直连，国内网络裸奔顺畅
   - MATCH,DIRECT

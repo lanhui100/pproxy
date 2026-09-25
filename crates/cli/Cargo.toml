@@ -1,6 +1,6 @@
 [package]
 name = "pproxy-cli"
-version = "0.3.51"
+version = "0.3.54"
 edition = "2021"
 
 [[bin]]

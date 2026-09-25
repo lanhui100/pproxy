@@ -14,6 +14,8 @@ sha2.workspace = true
 rand.workspace = true
 hex.workspace = true
 dashmap.workspace = true
+ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
+base64.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 [dev-dependencies]

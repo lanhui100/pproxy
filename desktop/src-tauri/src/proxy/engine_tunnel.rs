@@ -161,12 +161,21 @@ async fn establish(
     let mut first_401: Option<std::io::Error> = None;
     let mut last_err = None;
     let mut saw_401 = false;
+    let mut saw_402 = false;
+    let mut quota_err: Option<std::io::Error> = None;
+
     for u in &urls {
         match try_establish_url(u, &token, &parsed.host, parsed.port).await {
             Ok(pair) => return Ok((pair, (*u).to_string())),
             Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("402") || msg.contains("Quota Exceeded") {
+                    saw_402 = true;
+                    quota_err = Some(io(msg));
+                    break; // 审查修复（P0-1 & P0-2）：账户配额耗尽，立即短路退出端点重试风暴
+                }
                 let egress = classify_egress(u);
-                if e.to_string().contains(AUTH_401_MARKER) {
+                if msg.contains(AUTH_401_MARKER) {
                     saw_401 = true;
                     if first_401.is_none() { first_401 = Some(io(e.to_string())); }
                 }
@@ -175,6 +184,11 @@ async fn establish(
                 last_err = Some(e);
             }
         }
+    }
+
+    if saw_402 {
+        let err_desc = quota_err.map(|e| e.to_string()).unwrap_or_else(|| "Quota Exceeded".into());
+        return Err(io(format!("402: quota_exceeded —— 您的出海流量配额已耗尽，请联系管理员扩充配额 ({err_desc})")));
     }
 
     // 401 自愈：全部端点鉴权失败时，凭据可能已被外部更新（轮换）——重读凭据并刷新重试。
@@ -267,6 +281,14 @@ async fn establish(
         }
     }
 
+    // 审查加固（P0-2 & P0-3）：捕获 402 Quota Exceeded，阻断无效重试并向用户友好回显
+    if let Some(ref err) = last_err {
+        let msg = err.to_string();
+        if msg.contains("402") || msg.contains("Quota Exceeded") {
+            return Err(io("402: quota_exceeded —— 您的出海流量配额已耗尽，请联系管理员扩充配额"));
+        }
+    }
+
     Err(last_err.unwrap_or_else(|| io("no valid tunnel urls configured")))
 }
 
@@ -310,6 +332,11 @@ pub async fn connect_and_relay(
                 return relay_bidir_ws(client, ws_tx, ws_rx, egress, stats).await;
             }
             Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("402") || msg.contains("quota_exceeded") {
+                    last_err = Some(e);
+                    break; // 审查修复（P0-1）：遇 402 立即短路退出，杜绝 5 次无效重试与延迟风暴
+                }
                 // P0：401 同 token 重试必败——跳过 RETRY 退避，直接 502（省 ~1.5s 延迟与 keyring 风暴）
                 if is_auth_failure(&e) {
                     last_err = Some(e);

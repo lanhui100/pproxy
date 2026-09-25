@@ -68,3 +68,36 @@
 - 背景：M6 隧道出口单一依赖 CF Worker；CF 平台故障期隧道不可用
 - 唯一可行替代：海外 VPS 跑轻量 TCP 中继（Vercel 无 TCP 能力，不可行）
 - 触发条件：CF 故障频发 / 单点依赖成为实际痛点
+
+### B005 — 跨节点配额/用量一致性（信用租约） #F-01 #F-02
+- 现象：gate-server 用量为单机内存 DashMap；多节点并发可放大配额（无界透支）
+- 子项：#F-01 用量 Gossip 同步；#F-02 单用户 max_conns 跨节点穿透
+- 方案：令牌 lease_bytes 单节点切片放行 → 增量用量 Gossip → 402 截断；
+  并发用 UID 哈希锚点/接入点亲和性
+- 验收：同令牌两节点各耗 5G（总额 8G），第二节点用量达 8G 返回 402；
+  合计在线连接 >3 时第 4 条返回 429
+- 关联：docs/product/specs/distributed-commercialization/FOLLOW-UPS.md #F-01/#F-02
+
+### B006 — 撤销（revoke）跨节点传播 #F-03
+- 现象：撤销已实现本机落盘 + 本机 gate-server 热更新闭环；集群其他节点不同步
+- 方案：revoked_tokens.txt 纳入集群 Gossip 反熵；中期走管理面 eager-fanout + ACK，绑定 exp 自动清理
+- 验收：节点 A revoke 后，节点 B ≤1 心跳周期对同令牌返回 401
+- 关联：docs/product/specs/distributed-commercialization/FOLLOW-UPS.md #F-03
+
+### B007 — 节点身份标识注入机器名 #F-04
+- 现象：cluster status 恒显示 node-local，多节点无法辨识
+- 方案：cluster join 采集 hostname/machine-id 作 node_id；serve 从 cluster.json 上报
+- 验收：status 显示 devserver / jobcopilot-preprod
+- 关联：docs/product/specs/distributed-commercialization/FOLLOW-UPS.md #F-04
+
+### B008 — 零停机滚动升级真实编排 #F-05
+- 现象：upgrade 已支持单机签名校验/原子备份替换；集群逐台 Draining→漂移→探活未联调
+- 方案：结合 B005 Gossip 通道落地逐节点状态机（Draining 15s 硬超时→替换→探活→下一台）
+- 验收：双节点并发下载触发升级，客户端错误率 0；升级中途另一节点宕机不阻塞
+- 关联：docs/product/specs/distributed-commercialization/FOLLOW-UPS.md #F-05
+
+### B009 — 跨发行版 GLIBC 兼容（静态编译） #F-06
+- 现象：dev（GLIBC 2.39）编译产物在 preprod（GLIBC 2.35）报 GLIBC_2.39 not found
+- 方案：x86_64-unknown-linux-musl 静态编译；或按节点发行版分别发布
+- 验收：同一 release 产物可在 GLIBC 2.35/2.39 混布环境直接运行
+- 关联：docs/product/specs/distributed-commercialization/FOLLOW-UPS.md #F-06

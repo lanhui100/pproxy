@@ -111,10 +111,36 @@ EOF
 # ---- 途径 A: Cloudflare R2 / S3 兼容对象存储直传（推荐，零出网流量费，版本永久保留） ----
 if [[ -n "${R2_BUCKET:-${S3_BUCKET:-}}" ]]; then
   BUCKET="${R2_BUCKET:-$S3_BUCKET}"
-  ENDPOINT="${R2_ENDPOINT:-${S3_ENDPOINT:-}}"
+  ACCOUNT_ID="${R2_ACCOUNT_ID:-56c6fc45269c95f78a41d6a1efb9d0e7}"
+  ENDPOINT="${R2_ENDPOINT:-https://${ACCOUNT_ID}.r2.cloudflarestorage.com}"
   ENDPOINT_FLAG=""
   if [[ -n "$ENDPOINT" ]]; then
     ENDPOINT_FLAG="--endpoint-url $ENDPOINT"
+  fi
+
+  # 若提供了 R2_TOKEN / CF_API_TOKEN，支持通过 Cloudflare R2 API 直传
+  if [[ -n "${R2_TOKEN:-${CF_API_TOKEN:-}}" ]]; then
+    TOKEN="${R2_TOKEN:-$CF_API_TOKEN}"
+    echo "[R2] 使用 Cloudflare R2 API 同步分发资产到存储桶: $BUCKET"
+    for file in "$STAGE"/*; do
+      if [[ -f "$file" ]]; then
+        fname=$(basename "$file")
+        mime="application/octet-stream"
+        cache="public, max-age=31536000, immutable"
+        if [[ "$fname" == "latest.json" ]]; then
+          mime="application/json"
+          cache="public, max-age=0, must-revalidate"
+        fi
+        echo "[R2] 上传 $fname ..."
+        curl -s -f -X PUT "https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/r2/buckets/${BUCKET}/objects/${fname}" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: ${mime}" \
+          -H "Cache-Control: ${cache}" \
+          --data-binary "@${file}" >/dev/null
+      fi
+    done
+    echo "[R2] 发布完成：${DIST_BASE}/latest.json（$NAME）"
+    exit 0
   fi
 
   echo "[R2/S3] 同步分发资产到存储桶: $BUCKET"
@@ -129,7 +155,7 @@ if [[ -n "${R2_BUCKET:-${S3_BUCKET:-}}" ]]; then
     echo "[R2/S3] 发布完成：${DIST_BASE}/latest.json（$NAME）"
     exit 0
   else
-    echo "WARN: 未找到 aws cli，回退尝试通过 Vercel 静态分发..."
+    echo "WARN: 未找到 aws cli 且未配置 R2_TOKEN，回退尝试通过 Vercel 静态分发..."
   fi
 fi
 

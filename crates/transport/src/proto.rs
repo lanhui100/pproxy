@@ -13,10 +13,12 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 /// 401 鉴权失败稳定标记（供自愈状态机捕获）
 pub const AUTH_401_MARKER: &str = "HTTP error: 401 Unauthorized";
+/// 402 租约配额耗尽稳定标记（供客户端原生通知与阻断捕获）
+pub const QUOTA_402_MARKER: &str = "HTTP error: 402 Payment Required: Quota Exceeded";
 
-// 超时预算：生产环境下为应对跨国网络/Cloudflare Anycast 偶发路由抖动，放宽至 8000ms
+// 超时预算：审查加固（P0-8）——收紧至 800ms 快速探测，消除 SYN 丢包卡死 20s+ 隐患
 #[cfg(not(test))]
-pub const DIAL_TIMEOUT: Duration = Duration::from_millis(8000);
+pub const DIAL_TIMEOUT: Duration = Duration::from_millis(800);
 #[cfg(not(test))]
 pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(5000);
 
@@ -59,6 +61,9 @@ pub async fn connect_ws(url_str: &str, token: &str) -> Result<WsPair> {
             if let tokio_tungstenite::tungstenite::Error::Http(resp) = &e {
                 if resp.status() == tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED {
                     return Err(io_err(AUTH_401_MARKER));
+                }
+                if resp.status().as_u16() == 402 {
+                    return Err(io_err(QUOTA_402_MARKER));
                 }
             }
             return Err(io_err(e));

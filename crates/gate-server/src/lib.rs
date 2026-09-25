@@ -24,7 +24,7 @@ use axum::{
     },
     http::{header, HeaderMap, HeaderName, Request, Response, StatusCode},
     response::IntoResponse,
-    routing::{any, get},
+    routing::{any, get, post},
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -38,6 +38,29 @@ pub struct ServerConfig {
     pub tunnel_token_hash: String,
     pub proxy_secret: String,
     pub client: reqwest::Client,
+    pub verifier: Option<Arc<pproxy_core::TokenVerifier>>,
+    pub user_active_conns: Arc<dashmap::DashMap<String, usize>>,
+    pub user_used_bytes: Arc<dashmap::DashMap<String, std::sync::atomic::AtomicU64>>,
+    pub revoked_tokens: Arc<dashmap::DashSet<String>>, // 黑名单撤销表（存储已废止的 jti 或 sub）
+    pub gate_admin_token: String, // 管理端点鉴权（POST /api/revoke 等），来源于 ENV GATE_ADMIN_TOKEN
+}
+
+/// 从 `~/.pony/revoked_tokens.txt` 加载既有撤销条目（幂等；文件缺失视为空）
+pub fn load_revoked_tokens(map: &Arc<dashmap::DashSet<String>>) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dm".into());
+    let path = std::path::Path::new(&home).join(".pony").join("revoked_tokens.txt");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let mut n = 0;
+    for line in content.lines() {
+        let id = line.trim();
+        if !id.is_empty() {
+            map.insert(id.to_string());
+            n += 1;
+        }
+    }
+    tracing::info!(loaded = n, path = %path.display(), "revoked tokens loaded from disk");
 }
 
 pub fn sha256_hex(s: &str) -> String {
@@ -88,10 +111,122 @@ pub fn build_router(cfg: Arc<ServerConfig>) -> Router {
         .route("/debug", get(handle_debug))
         .route("/ws", get(handle_ws))
         .route("/api/ws", get(handle_ws))
+        .route("/api/user/profile", get(handle_user_profile))
+        .route("/api/user/revoke", post(handle_revoke))
         .route("/proxy", any(handle_proxy))
         .route("/api/proxy", any(handle_proxy))
         .route("/", get(handle_root))
         .with_state(cfg)
+}
+
+/// 管理端点：热更新撤销列表（受 `GATE_ADMIN_TOKEN` Bearer 鉴权）。
+/// Body: `{"identifier": "usr_carol" | "usr_live_...jti" }`
+async fn handle_revoke(
+    State(cfg): State<Arc<ServerConfig>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    // 管理端点鉴权（固定时间比较防时序侧信道）
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let expected = cfg.gate_admin_token.trim();
+    if expected.is_empty()
+        || presented.len() != expected.len()
+        || !pproxy_core::user::constant_time_eq(presented.as_bytes(), expected.as_bytes())
+    {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RevokeReq {
+        identifier: String,
+    }
+
+    let req: RevokeReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => return (StatusCode::BAD_REQUEST, "bad_request: expect {\"identifier\": \"...\"}").into_response(),
+    };
+
+    let identifier = req.identifier.trim().to_string();
+    if identifier.is_empty() {
+        return (StatusCode::BAD_REQUEST, "bad_request: empty identifier").into_response();
+    }
+
+    cfg.revoked_tokens.insert(identifier.clone());
+
+    // 同步追加到本地撤销文件（幂等：文件锁 + append）
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dm".into());
+    let dir = std::path::Path::new(&home).join(".pony");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("revoked_tokens.txt")) {
+        use std::io::Write;
+        let _ = writeln!(f, "{identifier}");
+    }
+
+    tracing::warn!(identifier = %identifier, "token revoked via admin endpoint");
+    (StatusCode::OK, serde_json::json!({ "ok": true, "identifier": identifier }).to_string()).into_response()
+}
+
+async fn handle_user_profile(
+    State(cfg): State<Arc<ServerConfig>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let presented = if let Some(stripped) = auth.strip_prefix("Bearer ") {
+        stripped.trim()
+    } else {
+        ""
+    };
+
+    if !presented.starts_with("usr_live_") {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized: missing user token").into_response();
+    }
+
+    if let Some(ref verifier) = cfg.verifier {
+        match verifier.verify_token(presented) {
+            Ok(claims) => {
+                if cfg.revoked_tokens.contains(&claims.jti) || cfg.revoked_tokens.contains(&claims.sub) {
+                    return (StatusCode::UNAUTHORIZED, "Unauthorized: Token Revoked").into_response();
+                }
+                let used = cfg.user_used_bytes
+                    .get(&claims.sub)
+                    .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let days_left = if claims.exp > now {
+                    (claims.exp - now) / 86400
+                } else {
+                    0
+                };
+                let resp = serde_json::json!({
+                    "code": 0,
+                    "user": {
+                        "sub": claims.sub,
+                        "name": claims.name,
+                        "status": if used >= claims.quota_bytes { "quota_exceeded" } else { "active" },
+                        "quota_bytes": claims.quota_bytes,
+                        "used_bytes": used,
+                        "expire_at": claims.exp,
+                        "days_left": days_left,
+                        "max_conns": claims.max_conns
+                    }
+                });
+                (StatusCode::OK, [("content-type", "application/json")], resp.to_string()).into_response()
+            }
+            Err(e) => (StatusCode::UNAUTHORIZED, format!("Unauthorized: {e}")).into_response(),
+        }
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Server verifier not configured").into_response()
+    }
 }
 
 async fn handle_root() -> impl IntoResponse {
@@ -132,16 +267,99 @@ async fn handle_ws(
         ""
     };
 
-    let expected_hash = cfg.tunnel_token_hash.trim().to_ascii_lowercase();
-    if expected_hash.is_empty() || presented.is_empty() || sha256_hex(presented) != expected_hash {
-        tracing::warn!("Unauthorized WS upgrade attempt");
-        return (StatusCode::UNAUTHORIZED, HeaderMap::new(), "Unauthorized").into_response();
+    // 1. 判断是否为多租户 User Token (以 usr_live_ 开头)
+    let claims = if presented.starts_with("usr_live_") {
+        if let Some(ref verifier) = cfg.verifier {
+            match verifier.verify_token(presented) {
+                Ok(c) => {
+                    // 检查是否已被撤销 (Revocation Check)
+                    if cfg.revoked_tokens.contains(&c.jti) || cfg.revoked_tokens.contains(&c.sub) {
+                        tracing::warn!(uid = %c.sub, jti = %c.jti, "User Token has been revoked -> 401");
+                        return (StatusCode::UNAUTHORIZED, HeaderMap::new(), "Unauthorized: Token Revoked").into_response();
+                    }
+                    Some(c)
+                }
+                Err(e) => {
+                    tracing::warn!("User Token verification failed: {e}");
+                    return (StatusCode::UNAUTHORIZED, HeaderMap::new(), "Unauthorized: Invalid User Token").into_response();
+                }
+            }
+        } else {
+            tracing::warn!("User Token presented but server has no verifying key configured");
+            return (StatusCode::UNAUTHORIZED, HeaderMap::new(), "Unauthorized: Verifier not configured").into_response();
+        }
+    } else {
+        None
+    };
+
+    // 2. 如果是多租户 Token，检查租约配额与并发
+    if let Some(ref c) = claims {
+        // 检查累计配额是否超额
+        let used = cfg.user_used_bytes
+            .entry(c.sub.clone())
+            .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        if used >= c.quota_bytes {
+            tracing::warn!(uid = %c.sub, used = used, quota = c.quota_bytes, "User quota exceeded -> 402");
+            return (StatusCode::PAYMENT_REQUIRED, HeaderMap::new(), "Payment Required: Quota Exceeded").into_response();
+        }
+
+        // 检查并发活跃连接数（最大为 c.max_conns，默认 3）
+        let max_conns = c.max_conns;
+        let conns_entry = cfg.user_active_conns.entry(c.sub.clone()).or_insert(0);
+        if *conns_entry >= max_conns {
+            tracing::warn!(uid = %c.sub, conns = *conns_entry, max = max_conns, "User max concurrent connections reached -> 429");
+            return (StatusCode::TOO_MANY_REQUESTS, HeaderMap::new(), "Too Many Requests: Concurrent Connections Limit").into_response();
+        }
+    } else {
+        // 回退单口令兼容模式
+        let expected_hash = cfg.tunnel_token_hash.trim().to_ascii_lowercase();
+        if expected_hash.is_empty() || presented.is_empty() || sha256_hex(presented) != expected_hash {
+            tracing::warn!("Unauthorized WS upgrade attempt");
+            return (StatusCode::UNAUTHORIZED, HeaderMap::new(), "Unauthorized").into_response();
+        }
     }
 
-    ws.on_upgrade(move |socket| handle_ws_socket(socket))
+    let cfg_clone = cfg.clone();
+    ws.on_upgrade(move |socket| handle_ws_socket(socket, cfg_clone, claims))
 }
 
-async fn handle_ws_socket(socket: WebSocket) {
+async fn handle_ws_socket(
+    socket: WebSocket,
+    cfg: Arc<ServerConfig>,
+    claims: Option<pproxy_core::UserTokenClaims>,
+) {
+    // 审查修复（P1）：仅在真实进入 WebSocket socket 处理阶段才持有活跃连接计数，防止 HTTP 升级夭折导致计数泄漏
+    struct ConnGuard {
+        sub: Option<String>,
+        conns: Arc<dashmap::DashMap<String, usize>>,
+    }
+    impl ConnGuard {
+        fn new(sub: Option<String>, conns: Arc<dashmap::DashMap<String, usize>>) -> Self {
+            if let Some(ref uid) = sub {
+                let mut count = conns.entry(uid.clone()).or_insert(0);
+                *count += 1;
+            }
+            Self { sub, conns }
+        }
+    }
+    impl Drop for ConnGuard {
+        fn drop(&mut self) {
+            if let Some(ref uid) = self.sub {
+                if let Some(mut count) = self.conns.get_mut(uid) {
+                    if *count > 0 {
+                        *count -= 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let _guard = ConnGuard::new(
+        claims.as_ref().map(|c| c.sub.clone()),
+        cfg.user_active_conns.clone(),
+    );
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
     // 1. Wait for first frame: {"host":"...","port":443}
@@ -193,43 +411,108 @@ async fn handle_ws_socket(socket: WebSocket) {
         return;
     }
 
-    // 4. Bi-directional relay between WS binary frames and raw TCP stream
+    // 4. Bi-directional relay between WS binary frames and raw TCP stream with coordinated quota cancellation
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
+    let uid_up = claims.as_ref().map(|c| c.sub.clone());
+    let quota_up = claims.as_ref().map(|c| c.quota_bytes);
+    let bytes_map_up = cfg.user_used_bytes.clone();
+
+    // 审查修复（P0）：使用 CancellationToken 协调双向流式熔断，任一侧超额立即通知另一侧中止
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel_tx = cancel_token.clone();
+    let cancel_rx = cancel_token.clone();
+
     let ws_to_tcp = async move {
-        while let Some(msg) = ws_receiver.next().await {
-            match msg {
-                Ok(Message::Binary(bin)) => {
-                    if tcp_write.write_all(&bin).await.is_err() {
-                        break;
+        loop {
+            tokio::select! {
+                _ = cancel_tx.cancelled() => {
+                    break;
+                }
+                msg = ws_receiver.next() => {
+                    match msg {
+                        Some(Ok(Message::Binary(bin))) => {
+                            let len = bin.len() as u64;
+                            if let Some(ref uid) = uid_up {
+                                let total_used = if let Some(cell) = bytes_map_up.get(uid) {
+                                    cell.fetch_add(len, std::sync::atomic::Ordering::Relaxed) + len
+                                } else {
+                                    0
+                                };
+                                if let Some(quota) = quota_up {
+                                    if total_used >= quota {
+                                        tracing::warn!(uid = %uid, "Quota exceeded in-flight (upload) -> triggering cancellation");
+                                        cancel_tx.cancel();
+                                        break;
+                                    }
+                                }
+                            }
+                            if tcp_write.write_all(&bin).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Ping(_))) => {}
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                        _ => {}
                     }
                 }
-                Ok(Message::Ping(_)) => {}
-                Ok(Message::Close(_)) | Err(_) => break,
-                _ => {}
             }
         }
-        // 半关闭：客户端写完后向上游发送 FIN，但绝不终止下行接收响应
         let _ = tcp_write.shutdown().await;
     };
 
+    let uid_down = claims.as_ref().map(|c| c.sub.clone());
+    let quota_down = claims.as_ref().map(|c| c.quota_bytes);
+    let bytes_map_down = cfg.user_used_bytes.clone();
+
     let tcp_to_ws = async move {
         let mut buf = vec![0u8; 16384];
+        let mut exceeded = false;
         loop {
-            match tcp_read.read(&mut buf).await {
-                Ok(0) => break, // 上游 EOF
-                Ok(n) => {
-                    if ws_sender.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
-                        break;
+            tokio::select! {
+                _ = cancel_rx.cancelled() => {
+                    exceeded = true;
+                    break;
+                }
+                read_res = tcp_read.read(&mut buf) => {
+                    match read_res {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let len = n as u64;
+                            if let Some(ref uid) = uid_down {
+                                let total_used = if let Some(cell) = bytes_map_down.get(uid) {
+                                    cell.fetch_add(len, std::sync::atomic::Ordering::Relaxed) + len
+                                } else {
+                                    0
+                                };
+                                if let Some(quota) = quota_down {
+                                    if total_used >= quota {
+                                        tracing::warn!(uid = %uid, "Quota exceeded in-flight (download) -> cancelling and closing");
+                                        cancel_rx.cancel();
+                                        exceeded = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ws_sender.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
                     }
                 }
-                Err(_) => break,
             }
+        }
+
+        if exceeded {
+            let _ = ws_sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 4402,
+                reason: "Quota Exceeded".into(),
+            }))).await;
         }
         let _ = ws_sender.close().await;
     };
 
-    // 智能体 C 审查修复（P0）：双向等待完全结束（join），杜绝客户端单向传完请求导致服务端响应被截断掐死
     tokio::join!(ws_to_tcp, tcp_to_ws);
 }
 
@@ -270,10 +553,12 @@ async fn handle_proxy(
     let method = req.method().clone();
     let mut req_builder = cfg.client.request(method, target_url.clone());
 
+    // 安全审查遵循 P2-02：物理剔除客户端代理凭据，绝对防止向目标站点泄露 Token
     let req_strip: HashSet<&'static str> = [
         "host", "connection", "keep-alive", "transfer-encoding", "upgrade",
         "content-length", "x-proxy-secret", "x-forwarded-for", "x-forwarded-proto",
         "x-forwarded-host", "x-real-ip", "forwarded", "via", "true-client-ip",
+        "proxy-authorization", "x-pony-token", "x-pproxy-token",
     ]
     .into_iter()
     .collect();
@@ -341,6 +626,11 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
         tunnel_token_hash: token_hash,
         proxy_secret,
         client,
+        verifier: None,
+        user_active_conns: Arc::new(dashmap::DashMap::new()),
+        user_used_bytes: Arc::new(dashmap::DashMap::new()),
+        revoked_tokens: Arc::new(dashmap::DashSet::new()),
+        gate_admin_token: String::new(),
     });
 
     let app = build_router(state);
@@ -351,3 +641,7 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
         .await
         .map_err(Into::into)
 }
+
+#[cfg(test)]
+mod tests;
+

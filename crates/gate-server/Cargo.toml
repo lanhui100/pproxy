@@ -5,7 +5,10 @@ edition = "2021"
 description = "High-performance, minimal-footprint native WS-to-TCP tunnel bridge and HTTP proxy for pproxy egress"
 
 [dependencies]
+pproxy-core = { path = "../core" }
+dashmap = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { version = "0.7" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
@@ -19,3 +22,4 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 http-body-util = { workspace = true }
 hyper = { workspace = true }
 url = { workspace = true }
+tower = { version = "0.5" }

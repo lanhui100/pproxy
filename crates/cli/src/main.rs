@@ -54,7 +54,7 @@ enum Command {
         #[arg(long, short = 'p')]
         port: Option<u16>,
     },
-    /// 用户管理（Basic Auth 用户名/密码）
+    /// 用户管理（Basic Auth 用户名/密码 或 签发多租户令牌）
     User {
         #[command(subcommand)]
         cmd: UserCmd,
@@ -63,6 +63,11 @@ enum Command {
     Sync {
         #[command(subcommand)]
         cmd: SyncCmd,
+    },
+    /// 分布式自包含集群管理（一键入网、对等互联、大盘监控）
+    Cluster {
+        #[command(subcommand)]
+        cmd: ClusterCmd,
     },
     /// 写入 ~/.pony/config.toml（或 --interactive 交互式引导）
     Init {
@@ -243,16 +248,24 @@ enum MigrateCmd {
 
 #[derive(Subcommand)]
 enum UserCmd {
-    /// 添加 Basic Auth 用户
+    /// 添加 Basic Auth 用户或签发商业化多租户令牌
     Add {
         username: String,
         /// 自定义密码（若不提供将自动生成高强度密码）
-        #[arg(long)]
+        #[arg(long, short = 'p')]
         password: Option<String>,
-        /// 有效天数（默认永久）
-        #[arg(long)]
+        /// 有效天数（默认 30 天）
+        #[arg(long, short = 'd')]
         expires_days: Option<u32>,
+        /// 商业化自包含令牌：周期总配额（如 50G, 100M）
+        #[arg(long, short = 'q')]
+        quota: Option<String>,
+        /// 商业化自包含令牌：最大并发连接数（默认 3）
+        #[arg(long, short = 'c', default_value = "3")]
+        max_conns: usize,
     },
+    /// 生成/初始化集群签名私钥与公钥
+    Keygen,
     /// 列出所有用户
     List,
     /// 删除指定用户
@@ -264,8 +277,13 @@ enum UserCmd {
     /// 修改指定用户密码
     Passwd {
         username: String,
-        #[arg(long)]
+        #[arg(long, short = 'p')]
         password: String,
+    },
+    /// 废止/撤销指定多租户令牌或用户（加入全网黑名单）
+    Revoke {
+        /// 待撤销的令牌字符串 (usr_live_...) 或 用户名 (username)
+        target: String,
     },
 }
 
@@ -281,6 +299,48 @@ enum SyncCmd {
         payload: String,
         #[arg(long)]
         passphrase: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClusterCmd {
+    /// 生成节点加入令牌（One-Time Join Token）
+    TokenCreate {
+        /// 种子节点内网地址（如 100.95.193.103:8899）
+        #[arg(long, short = 's')]
+        seed: Option<String>,
+        /// 令牌有效分钟数（默认 10 分钟，遵循安全审查限制）
+        #[arg(long, short = 'm', default_value = "10")]
+        valid_minutes: u64,
+    },
+    /// 将当前机器加入现有分布式备灾集群
+    Join {
+        /// 节点加入令牌
+        #[arg(long, short = 't')]
+        token: String,
+        /// 种子节点地址（若令牌中未包含）
+        #[arg(long, short = 'p')]
+        peer: Option<String>,
+        /// 入网后全自动拉取后台局域网双模服务 (Zero-Touch Bootstrap)
+        #[arg(long, default_value = "false")]
+        auto_start: bool,
+    },
+    /// 查看当前节点及全集群状态大盘
+    Status,
+    /// 触发全集群零停机滚动升级 (Zero-Downtime Rolling Upgrade)
+    Upgrade {
+        /// 本地新二进制路径（P2P 流式推送，推荐）
+        #[arg(long, short = 'l')]
+        local: Option<String>,
+        /// MinIO 备份对象存储 URL
+        #[arg(long, short = 'm')]
+        minio: Option<String>,
+        /// Cloudflare R2 备份 URL
+        #[arg(long, short = 'r')]
+        r2: Option<String>,
+        /// 开发者 Ed25519 签名文件路径（.sig 强制校验防篡改）
+        #[arg(long, short = 's')]
+        sig: Option<String>,
     },
 }
 
@@ -457,15 +517,37 @@ fn run(cli: Cli) -> Result<i32, RunError> {
     // 2. user 用户管理
     if let Command::User { cmd } = &cli.command {
         return match cmd {
-            UserCmd::Add { username, password, expires_days } => {
-                cmd::user::add(username, password.as_deref(), *expires_days).map_err(RunError::Msg)
+            UserCmd::Add { username, password, expires_days, quota, max_conns } => {
+                cmd::user::add(username, password.as_deref(), *expires_days, quota.as_deref(), *max_conns).map_err(RunError::Msg)
             }
+            UserCmd::Keygen => cmd::user::keygen().map_err(RunError::Msg),
             UserCmd::List => cmd::user::list().map_err(RunError::Msg),
             UserCmd::Rm { username } => cmd::user::rm(username).map_err(RunError::Msg),
             UserCmd::Disable { username } => cmd::user::disable(username).map_err(RunError::Msg),
             UserCmd::Enable { username } => cmd::user::enable(username).map_err(RunError::Msg),
             UserCmd::Passwd { username, password } => {
                 cmd::user::passwd(username, password).map_err(RunError::Msg)
+            }
+            UserCmd::Revoke { target } => {
+                cmd::user::revoke(target).map_err(RunError::Msg)
+            }
+        };
+    }
+
+    // 2.1 cluster 分布式集群管理
+    if let Command::Cluster { cmd } = &cli.command {
+        return match cmd {
+            ClusterCmd::TokenCreate { seed, valid_minutes } => {
+                cmd::cluster::token_create(seed.as_deref(), *valid_minutes).map_err(RunError::Msg)
+            }
+            ClusterCmd::Join { token, peer, auto_start } => {
+                cmd::cluster::join(token, peer.as_deref(), *auto_start).map_err(RunError::Msg)
+            }
+            ClusterCmd::Status => {
+                cmd::cluster::status().map_err(RunError::Msg)
+            }
+            ClusterCmd::Upgrade { local, minio, r2, sig } => {
+                cmd::cluster::upgrade(local.as_deref(), minio.as_deref(), r2.as_deref(), sig.as_deref()).map_err(RunError::Msg)
             }
         };
     }
@@ -688,6 +770,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         | Command::Clash { .. }
         | Command::User { .. }
         | Command::Sync { .. }
+        | Command::Cluster { .. }
         | Command::Init { .. }
         | Command::Deploy { .. }
         | Command::Start

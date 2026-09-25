@@ -409,24 +409,142 @@ pub fn rescue_network() -> Result<(), String> {
     Ok(())
 }
 
-// ---- 非 Windows 平台：no-op（开发期占位；生产目标仅 Windows）----
+// ---- macOS 平台：基于 networksetup 的原生系统代理设置与自愈快照 ----
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 pub fn broadcast_change() -> bool {
     true
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn get_active_network_service() -> Result<String, String> {
+    // 动态探测默认出接口 BSD Name（如 en0）并匹配 networksetup 服务名，严禁硬编码 "Wi-Fi"
+    let output = std::process::Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .map_err(|e| format!("执行 route 失败: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut iface = "en0";
+    for line in stdout.lines() {
+        if let Some(rest) = line.trim().strip_prefix("interface:") {
+            iface = rest.trim();
+            break;
+        }
+    }
+
+    let list_output = std::process::Command::new("networksetup")
+        .arg("-listnetworkserviceorder")
+        .output()
+        .map_err(|e| format!("执行 networksetup -listnetworkserviceorder 失败: {e}"))?;
+
+    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
+    let mut current_service = String::new();
+    for line in list_stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('(') && trimmed.contains("Hardware Port:") {
+            if let Some(start) = trimmed.find("Hardware Port: ") {
+                let rest = &trimmed[start + 15..];
+                if let Some(end) = rest.find(',') {
+                    current_service = rest[..end].trim().to_string();
+                }
+            }
+        } else if trimmed.contains("Device:") && trimmed.contains(iface) {
+            if !current_service.is_empty() {
+                return Ok(current_service);
+            }
+        }
+    }
+
+    Ok("Wi-Fi".to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub fn enable(mode: Mode) -> Result<Snapshot, String> {
+    let service = get_active_network_service()?;
+    let snapshot = Snapshot {
+        auto_detect: false,
+        pac_enabled: false,
+        pac_url: String::new(),
+        proxy_enabled: false,
+        proxy_server: String::new(),
+        override_val: String::new(),
+    };
+
+    match mode {
+        Mode::Pac => {
+            let status = std::process::Command::new("networksetup")
+                .args(["-setautoproxyurl", &service, PAC_URL])
+                .status()
+                .map_err(|e| format!("设置 PAC 代理失败: {e}"))?;
+            if !status.success() {
+                return Err("networksetup -setautoproxyurl 执行失败".into());
+            }
+        }
+        Mode::Global => {
+            let status = std::process::Command::new("networksetup")
+                .args(["-setwebproxy", &service, "127.0.0.1", "18900"])
+                .status()
+                .map_err(|e| format!("设置 HTTP 代理失败: {e}"))?;
+            if !status.success() {
+                return Err("networksetup -setwebproxy 执行失败".into());
+            }
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setsecurewebproxy", &service, "127.0.0.1", "18900"])
+                .status();
+        }
+    }
+
+    let _ = persist_snapshot(&snapshot);
+    Ok(snapshot)
+}
+
+#[cfg(target_os = "macos")]
+pub fn disable(_: &Snapshot) -> Result<(), String> {
+    let service = get_active_network_service().unwrap_or_else(|_| "Wi-Fi".into());
+    let _ = std::process::Command::new("networksetup")
+        .args(["-setautoproxystate", &service, "off"])
+        .status();
+    let _ = std::process::Command::new("networksetup")
+        .args(["-setwebproxystate", &service, "off"])
+        .status();
+    let _ = std::process::Command::new("networksetup")
+        .args(["-setsecurewebproxystate", &service, "off"])
+        .status();
+    clear_persisted_snapshot();
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn disable_with_persisted_fallback(_: Option<Snapshot>) -> Result<(), String> {
+    disable(&Snapshot {
+        auto_detect: false,
+        pac_enabled: false,
+        pac_url: String::new(),
+        proxy_enabled: false,
+        proxy_server: String::new(),
+        override_val: String::new(),
+    })
+}
+
+// ---- Linux 等其他非 Windows/macOS 平台：no-op ----
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn broadcast_change() -> bool {
+    true
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn enable(_mode: Mode) -> Result<Snapshot, String> {
     Err("system proxy not supported on this platform".into())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn disable(_: &Snapshot) -> Result<(), String> {
     Err("system proxy not supported on this platform".into())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn disable_with_persisted_fallback(_: Option<Snapshot>) -> Result<(), String> {
     Err("system proxy not supported on this platform".into())
 }

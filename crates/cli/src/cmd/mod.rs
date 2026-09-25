@@ -15,4 +15,5 @@ pub mod user;
 pub mod upgrade;
 pub mod clash;
 pub mod migrate;
+pub mod cluster;
 

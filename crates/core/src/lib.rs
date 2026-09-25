@@ -11,6 +11,8 @@ pub mod quota;
 pub mod alert;
 pub mod user;
 pub mod gatekeeper;
+pub mod auth;
+pub mod cluster;
 
 pub use pool::Pool;
 pub use edge::{EdgeClient, ForwardRequest};
@@ -20,6 +22,8 @@ pub use token::TokenService;
 pub use usage::UsageTracker;
 pub use user::UserService;
 pub use gatekeeper::{AuthGatekeeper, GatekeeperConfig};
+pub use auth::{TokenSigner, TokenVerifier, UserTokenClaims};
+pub use cluster::{ClusterHeartbeat, ClusterJoinToken, ClusterManager, NodeState, PeerNode};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
