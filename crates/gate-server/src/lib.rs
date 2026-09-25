@@ -292,7 +292,7 @@ async fn handle_ws(
         None
     };
 
-    // 2. 如果是多租户 Token，检查租约配额与并发
+    // 2. 如果是多租户 Token，检查租约配额与并发（安全审查加固 SEC-P1-01：原子自增预占，堵死 TOCTOU 竞态）
     if let Some(ref c) = claims {
         // 检查累计配额是否超额
         let used = cfg.user_used_bytes
@@ -307,11 +307,13 @@ async fn handle_ws(
 
         // 检查并发活跃连接数（最大为 c.max_conns，默认 3）
         let max_conns = c.max_conns;
-        let conns_entry = cfg.user_active_conns.entry(c.sub.clone()).or_insert(0);
+        let mut conns_entry = cfg.user_active_conns.entry(c.sub.clone()).or_insert(0);
         if *conns_entry >= max_conns {
             tracing::warn!(uid = %c.sub, conns = *conns_entry, max = max_conns, "User max concurrent connections reached -> 429");
             return (StatusCode::TOO_MANY_REQUESTS, HeaderMap::new(), "Too Many Requests: Concurrent Connections Limit").into_response();
         }
+        // 立即原子预占槽位，防止并发突发请求穿越 429 检查门禁
+        *conns_entry += 1;
     } else {
         // 回退单口令兼容模式
         let expected_hash = cfg.tunnel_token_hash.trim().to_ascii_lowercase();
@@ -330,17 +332,13 @@ async fn handle_ws_socket(
     cfg: Arc<ServerConfig>,
     claims: Option<pproxy_core::UserTokenClaims>,
 ) {
-    // 审查修复（P1）：仅在真实进入 WebSocket socket 处理阶段才持有活跃连接计数，防止 HTTP 升级夭折导致计数泄漏
+    // 槽位已在 HTTP 阶段预占，此处构造 Guard 负责退出/中断时自动释放
     struct ConnGuard {
         sub: Option<String>,
         conns: Arc<dashmap::DashMap<String, usize>>,
     }
     impl ConnGuard {
-        fn new(sub: Option<String>, conns: Arc<dashmap::DashMap<String, usize>>) -> Self {
-            if let Some(ref uid) = sub {
-                let mut count = conns.entry(uid.clone()).or_insert(0);
-                *count += 1;
-            }
+        fn new_preoccupied(sub: Option<String>, conns: Arc<dashmap::DashMap<String, usize>>) -> Self {
             Self { sub, conns }
         }
     }
@@ -356,7 +354,7 @@ async fn handle_ws_socket(
         }
     }
 
-    let _guard = ConnGuard::new(
+    let _guard = ConnGuard::new_preoccupied(
         claims.as_ref().map(|c| c.sub.clone()),
         cfg.user_active_conns.clone(),
     );

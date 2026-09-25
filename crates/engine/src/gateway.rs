@@ -238,14 +238,21 @@ pub async fn auth_middleware(
     let rest = path.strip_prefix('/').unwrap_or(&path).to_string();
     let (first_seg, remaining) = split_first_segment(&rest);
 
-    // 2.5 本机回环来源免认证（部署 pproxy 的本地机器是信任边界）：
-    //     127.0.0.1 / ::1 的请求视为本机可信调用（如 ponyllm 等本地服务），
-    //     无需用户密码或集群票证即可放行——这正是"本地部署不用用户"的产品语义。
+    // 2.5 本机回环来源免认证（安全审查加固 SEC-P0-01）：
+    //     严格禁止反向代理后的回环免密穿透！
+    //     若请求头包含外部代理标记（X-Forwarded-For / X-Real-IP / Forwarded），
+    //     说明该请求来源于外部公网反代，坚决不视作本地回环可信调用，强制走后续鉴权！
+    let has_forwarded_headers = req.headers().contains_key("x-forwarded-for")
+        || req.headers().contains_key("x-real-ip")
+        || req.headers().contains_key("forwarded");
+
     let is_loopback = match client_ip {
         std::net::IpAddr::V4(v4) => v4.is_loopback(),
         std::net::IpAddr::V6(v6) => v6.is_loopback(),
     };
-    if is_loopback {
+
+    let is_pure_local = is_loopback && !has_forwarded_headers;
+    if is_pure_local {
         let ctx = AuthContext {
             subject: AuthSubject::ClusterNode {
                 id: 0,

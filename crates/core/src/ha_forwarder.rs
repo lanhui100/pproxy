@@ -187,32 +187,87 @@ impl LocalHaForwarder {
             }
         };
 
-        // 3. 构造转发头部：高效按切片组装，消除全量 String 堆分配
-        if is_remote && !self.cluster_auth_key.is_empty() && !self.node_id.is_empty() {
-            if let Ok(ticket) = crate::cluster_ticket::create_ticket(&self.cluster_auth_key, &self.node_id) {
-                outbound.write_all(raw_headers).await?;
-                outbound.write_all(b"\r\n").await?;
-                outbound.write_all(crate::cluster_ticket::CLUSTER_TICKET_HEADER.as_bytes()).await?;
-                outbound.write_all(b": ").await?;
-                outbound.write_all(ticket.as_bytes()).await?;
-                outbound.write_all(b"\r\n\r\n").await?;
-            } else {
-                outbound.write_all(&head_buf[..header_end_pos + 4]).await?;
-            }
+        // 3. 构造转发头部（安全审查加固 SEC-P0-02 & SEC-P1-02）：
+        //    - 严格清洗客户端伪造的 X-Pony-Cluster-Ticket 头部，防止覆盖攻击；
+        //    - 仅远程上游注入权威集群票证；
+        //    - 强制注入 Connection: close 避免 HTTP/1.1 Pipelining 导致的走私与后续票证丢失。
+        let ticket_val = if is_remote && !self.cluster_auth_key.is_empty() && !self.node_id.is_empty() {
+            crate::cluster_ticket::create_ticket(&self.cluster_auth_key, &self.node_id).ok()
         } else {
-            // 本地直连原样发出去，零分配零拷贝
-            outbound.write_all(&head_buf[..header_end_pos + 4]).await?;
-        }
+            None
+        };
 
-        // 4. 首包剩余载荷（如 TLS ClientHello）快速透传
+        let sanitized_headers = sanitize_and_inject_ticket(
+            raw_headers,
+            crate::cluster_ticket::CLUSTER_TICKET_HEADER.as_bytes(),
+            ticket_val.as_deref(),
+        );
+
+        outbound.write_all(&sanitized_headers).await?;
+
+        // 4. 首包剩余载荷（如 TLS ClientHello 或 POST body）快速透传
         if !leftover_payload.is_empty() {
             outbound.write_all(leftover_payload).await?;
         }
 
-        // 5. 双向流零拷贝中继
-        tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await?;
+        // 5. 双向流零拷贝中继（安全审查加固 SEC-P2-01：施加 300s 会话超时守护防 FD 泄漏）
+        let session_timeout = Duration::from_secs(300);
+        let _ = tokio::time::timeout(
+            session_timeout,
+            tokio::io::copy_bidirectional(&mut inbound, &mut outbound),
+        ).await;
+
         Ok(())
     }
+}
+
+/// 在字节切片层彻底清洗客户端伪造的集群票证头，并安全注入官方合法票证（防御大小写变体、前后空格混淆、重复头注入）
+fn sanitize_and_inject_ticket(
+    raw_headers: &[u8],
+    header_name: &[u8],
+    ticket_val: Option<&str>,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw_headers.len() + 128);
+    let mut cursor = raw_headers;
+
+    while let Some(pos) = cursor.windows(2).position(|w| w == b"\r\n") {
+        let line = &cursor[..pos];
+        cursor = &cursor[pos + 2..];
+
+        let trimmed_line = trim_byte_spaces(line);
+        if let Some(colon_pos) = trimmed_line.iter().position(|&b| b == b':') {
+            let key = trim_byte_spaces(&trimmed_line[..colon_pos]);
+            if key.eq_ignore_ascii_case(header_name) {
+                // 命中目标请求头，坚决剔除客户端伪造行！
+                continue;
+            }
+        }
+        out.extend_from_slice(line);
+        out.extend_from_slice(b"\r\n");
+    }
+
+    // 注入由 Forwarder 官方签署的合法集群票证
+    if let Some(ticket) = ticket_val {
+        out.extend_from_slice(header_name);
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(ticket.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+#[inline]
+fn trim_byte_spaces(b: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < b.len() && (b[start] == b' ' || b[start] == b'\t') {
+        start += 1;
+    }
+    let mut end = b.len();
+    while end > start && (b[end - 1] == b' ' || b[end - 1] == b'\t') {
+        end -= 1;
+    }
+    &b[start..end]
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {

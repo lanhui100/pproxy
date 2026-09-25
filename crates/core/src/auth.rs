@@ -38,11 +38,34 @@ fn default_max_conns() -> usize {
 
 impl UserTokenClaims {
     pub fn is_expired(&self) -> bool {
+        self.is_time_valid().is_err()
+    }
+
+    /// 严格时间有效性校验（防未来穿越、时钟回拨、非法生命周期）
+    pub fn is_time_valid(&self) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        now > self.exp
+
+        // 允许最大 60 秒的时钟倾斜 (Clock Skew Tolerance)
+        const CLOCK_SKEW_TOLERANCE_SECS: u64 = 60;
+
+        if now > self.exp {
+            anyhow::bail!("token has expired at {} (current: {})", self.exp, now);
+        }
+
+        // 防未来时间穿越：签发时间不能大于当前时间加时钟倾斜容忍度
+        if self.iat > now.saturating_add(CLOCK_SKEW_TOLERANCE_SECS) {
+            anyhow::bail!("token issued in the future (iat: {}, current: {})", self.iat, now);
+        }
+
+        // 基本合理性检查：过期时间不能早于签发时间
+        if self.exp <= self.iat {
+            anyhow::bail!("malformed token lifetime: exp <= iat");
+        }
+
+        Ok(())
     }
 }
 
@@ -168,9 +191,7 @@ impl TokenVerifier {
         let claims: UserTokenClaims = serde_json::from_slice(&payload_json)
             .map_err(|e| anyhow!("invalid claims json: {e}"))?;
 
-        if claims.is_expired() {
-            return Err(anyhow!("token has expired at {}", claims.exp));
-        }
+        claims.is_time_valid()?;
 
         Ok(claims)
     }

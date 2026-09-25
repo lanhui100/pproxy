@@ -100,20 +100,23 @@ impl ClusterJoinToken {
     ) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(cluster_id.as_bytes());
-        hasher.update(seed_addr.to_string().as_bytes());
-        hasher.update(exp.to_le_bytes());
-        hasher.update(nonce.as_bytes());
-        hasher.update(key.as_bytes());
-        if let Some(gu) = gate_url {
-            hasher.update(gu.as_bytes());
-        }
-        if let Some(tt) = tunnel_token {
-            hasher.update(tt.as_bytes());
-        }
-        if let Some(vk) = verifying_key {
-            hasher.update(vk.as_bytes());
-        }
+        // 密码学安全加固 SEC-VULN-06：域隔离前缀 + 长度前缀编码 (Length-Prefixed Canonicalization) 彻底杜绝拼接碰撞
+        hasher.update(b"PONY_CLUSTER_JOIN_V1\x00");
+
+        let mut put_field = |h: &mut Sha256, val: &str| {
+            h.update(&(val.len() as u32).to_le_bytes());
+            h.update(val.as_bytes());
+        };
+
+        put_field(&mut hasher, cluster_id);
+        put_field(&mut hasher, &seed_addr.to_string());
+        hasher.update(&exp.to_le_bytes());
+        put_field(&mut hasher, nonce);
+        put_field(&mut hasher, key);
+        put_field(&mut hasher, gate_url.unwrap_or(""));
+        put_field(&mut hasher, tunnel_token.unwrap_or(""));
+        put_field(&mut hasher, verifying_key.unwrap_or(""));
+
         hex::encode(hasher.finalize())
     }
 

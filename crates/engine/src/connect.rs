@@ -311,13 +311,17 @@ pub async fn handle_connect_raw(
         return;
     }
 
-    // 2. 强制身份鉴权（MANDATORY AUTHENTICATION - 堵死 Blocker-01）
-    //    本机回环来源免认证（信任边界）：127.0.0.1 / ::1 的 CONNECT 视为本机可信调用。
+    // 2. 强制身份鉴权（安全审查加固 SEC-P0-01）
+    //    本机回环来源免认证：仅在真实无代理痕迹的回环连接下豁免；若请求包含 X-Forwarded-For 严禁豁免
+    let has_forwarded = head.lines().any(|l| {
+        let low = l.to_ascii_lowercase();
+        low.starts_with("x-forwarded-for:") || low.starts_with("x-real-ip:") || low.starts_with("forwarded:")
+    });
     let is_loopback = match client_ip {
         IpAddr::V4(v4) => v4.is_loopback(),
         IpAddr::V6(v6) => v6.is_loopback(),
     };
-    let is_auth_ok = if is_loopback {
+    let is_auth_ok = if is_loopback && !has_forwarded {
         true
     } else {
         verify_connect_credentials(head, users.as_deref(), &tokens, cluster_auth_key)

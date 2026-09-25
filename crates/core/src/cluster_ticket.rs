@@ -1,32 +1,67 @@
-//! 集群转发票证 (Cluster Relay Ticket)
-//!
-//! 用途：Local HA Forwarder 在 failover 转发到远程集群节点时，注入基于集群机器密钥
-//! `cluster_auth_key` 的 HMAC 短效票证，远程节点验签放行。
-//!
-//! 安全属性：
-//! - 防伪造：仅持有 cluster_auth_key 的集群节点可生成有效 HMAC 签名；
-//! - 防重放：票证内嵌签发时间戳，远端校验新鲜度（默认 ±60s），过期即拒；
-//! - 来源可辨：票证携带 node_id，远端可审计是哪个集群节点在转发；
-//! - 与用户体系隔离：不进入 Basic Auth / Token 用户池，统一用户密码不再作为转发凭据。
-
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 票证默认最大新鲜度（秒）：签发时间与远端校验时间之差超过该值即拒绝重放。
 pub const TICKET_MAX_AGE_SECS: u64 = 120;
-
-/// 票证头名称：HA Forwarder 注入、远端数据面识别。
 pub const CLUSTER_TICKET_HEADER: &str = "x-pony-cluster-ticket";
 
-/// 签发一张集群转发票证。
-/// 格式：`<node_id>|<unix_ts>|<hex_hmac>`，HMAC 覆盖 `node_id|unix_ts`。
+/// 安全标准 HMAC-SHA256 实现（严格遵循 RFC 2104 规范）
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK_SIZE: usize = 64;
+    let mut key_block = [0u8; BLOCK_SIZE];
+
+    if key.len() > BLOCK_SIZE {
+        let digest = Sha256::digest(key);
+        key_block[..32].copy_from_slice(&digest);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; BLOCK_SIZE];
+    let mut opad = [0x5cu8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+
+    let mut inner = Sha256::new();
+    inner.update(&ipad);
+    inner.update(message);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(&opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
+}
+
+/// 恒定时间字节比对（抵御微秒级时序侧信道嗅探）
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// 校验 node_id 字符集，根除定界符注入
+fn sanitize_node_id(node_id: &str) -> Result<()> {
+    if node_id.trim().is_empty() {
+        return Err(anyhow!("node_id cannot be empty"));
+    }
+    if node_id.contains('|') || node_id.contains('\n') || node_id.contains('\r') {
+        return Err(anyhow!("forbidden character '|' or newline in node_id"));
+    }
+    Ok(())
+}
+
 pub fn create_ticket(cluster_auth_key: &str, node_id: &str) -> Result<String> {
+    sanitize_node_id(node_id)?;
     if cluster_auth_key.trim().is_empty() {
         return Err(anyhow!("cluster_auth_key is empty"));
-    }
-    if node_id.trim().is_empty() {
-        return Err(anyhow!("node_id is empty"));
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -35,61 +70,42 @@ pub fn create_ticket(cluster_auth_key: &str, node_id: &str) -> Result<String> {
     Ok(create_ticket_at(cluster_auth_key, node_id, now))
 }
 
-/// 在指定时间戳签发票证（测试用）。
 pub fn create_ticket_at(cluster_auth_key: &str, node_id: &str, ts: u64) -> String {
     let payload = format!("{node_id}|{ts}");
-    let mac = hmac_hex(cluster_auth_key, &payload);
-    format!("{payload}|{mac}")
+    let mac = hmac_sha256(cluster_auth_key.as_bytes(), payload.as_bytes());
+    format!("{payload}|{}", hex::encode(mac))
 }
 
-/// 校验票证。成功返回票证声明的 node_id；失败返回原因。
 pub fn verify_ticket(cluster_auth_key: &str, ticket: &str, now: u64) -> Result<String> {
     let ticket = ticket.trim();
     if ticket.is_empty() {
         return Err(anyhow!("empty cluster ticket"));
     }
-    // 格式：node_id|ts|mac
-    let parts: Vec<&str> = ticket.split('|').collect();
-    if parts.len() != 3 || parts[0].is_empty() || parts[1].is_empty() || parts[2].is_empty() {
-        return Err(anyhow!("malformed cluster ticket"));
-    }
-    let node_id = parts[0];
-    let ts: u64 = parts[1]
-        .parse()
-        .map_err(|_| anyhow!("invalid ticket timestamp"))?;
-    let presented_mac = parts[2];
 
-    // 1. 时间戳新鲜度（防重放）
+    // 严苛结构拆解：限制仅切两次，防字段膨胀
+    let (node_id, rest) = ticket.split_once('|')
+        .ok_or_else(|| anyhow!("malformed cluster ticket: missing node_id delimiter"))?;
+    let (ts_str, presented_mac_hex) = rest.split_once('|')
+        .ok_or_else(|| anyhow!("malformed cluster ticket: missing timestamp delimiter"))?;
+
+    sanitize_node_id(node_id)?;
+
+    let ts: u64 = ts_str.parse().map_err(|_| anyhow!("invalid ticket timestamp"))?;
     let age = now.abs_diff(ts);
     if age > TICKET_MAX_AGE_SECS {
-        return Err(anyhow!(
-            "cluster ticket expired: age={age}s > max={TICKET_MAX_AGE_SECS}s"
-        ));
+        return Err(anyhow!("cluster ticket expired: age={age}s > max={TICKET_MAX_AGE_SECS}s"));
     }
 
-    // 2. HMAC 签名校验（防伪造）
     let payload = format!("{node_id}|{ts}");
-    let expected_mac = hmac_hex(cluster_auth_key, &payload);
-    if presented_mac != expected_mac {
+    let expected_mac = hmac_sha256(cluster_auth_key.as_bytes(), payload.as_bytes());
+    let presented_mac = hex::decode(presented_mac_hex)
+        .map_err(|_| anyhow!("invalid ticket mac hex"))?;
+
+    if !constant_time_eq(&expected_mac, &presented_mac) {
         return Err(anyhow!("cluster ticket HMAC mismatch (forged or tampered)"));
     }
 
     Ok(node_id.to_string())
-}
-
-/// HMAC-SHA256（hex 小写）。
-fn hmac_hex(key: &str, payload: &str) -> String {
-    // HMAC = SHA256(key XOR opad || SHA256(key XOR ipad || message))
-    // 简化安全实现：使用双层哈希构造（不依赖外部 hmac crate，长度 ≥32 字节密钥场景等价强度）
-    let mut inner = Sha256::new();
-    inner.update(key.as_bytes());
-    inner.update(payload.as_bytes());
-    let inner_digest = inner.finalize();
-
-    let mut outer = Sha256::new();
-    outer.update(key.as_bytes());
-    outer.update(inner_digest);
-    hex::encode(outer.finalize())
 }
 
 #[cfg(test)]
@@ -110,7 +126,6 @@ mod tests {
         let key = "secret-key";
         let ticket = create_ticket(key, "devserver").unwrap();
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        // 篡改 node_id
         let tampered = ticket.replace("devserver", "attacker");
         let err = verify_ticket(key, &tampered, now).unwrap_err();
         assert!(err.to_string().contains("HMAC mismatch"));
@@ -127,10 +142,17 @@ mod tests {
     #[test]
     fn test_ticket_replay_rejected() {
         let key = "secret-key";
-        let ts = 1_700_000_000; // 过期时间戳
+        let ts = 1_700_000_000;
         let ticket = create_ticket_at(key, "devserver", ts);
-        let now = ts + TICKET_MAX_AGE_SECS + 10; // 超过新鲜度窗口
+        let now = ts + TICKET_MAX_AGE_SECS + 10;
         let err = verify_ticket(key, &ticket, now).unwrap_err();
         assert!(err.to_string().contains("expired"));
+    }
+
+    #[test]
+    fn test_ticket_delimiter_injection_rejected() {
+        let key = "secret-key";
+        let err = create_ticket(key, "node|1899999999").unwrap_err();
+        assert!(err.to_string().contains("forbidden character"));
     }
 }
