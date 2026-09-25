@@ -221,24 +221,43 @@ impl TunnelPool {
 }
 
 /// 提取 CONNECT 请求头中的认证信息并校验。
+/// 支持：Basic Auth 用户 / Token / 集群转发票证 (X-Pony-Cluster-Ticket)。
 pub fn verify_connect_credentials(
     head: &str,
     users: Option<&UserService>,
     tokens: &TokenService,
+    cluster_auth_key: Option<&str>,
 ) -> bool {
     let mut basic_auth = None;
     let mut token_header = None;
+    let mut cluster_ticket = None;
 
     for line in head.lines() {
         let line = line.trim();
-        if line.to_ascii_lowercase().starts_with("proxy-authorization:") {
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("proxy-authorization:") {
             if let Some((_, val)) = line.split_once(':') {
                 basic_auth = parse_basic_auth(val);
             }
-        } else if line.to_ascii_lowercase().starts_with("x-pony-token:") {
+        } else if lower.starts_with("x-pony-token:") {
             if let Some((_, val)) = line.split_once(':') {
                 token_header = Some(val.trim().to_string());
             }
+        } else if lower.starts_with(pproxy_core::cluster_ticket::CLUSTER_TICKET_HEADER) {
+            if let Some((_, val)) = line.split_once(':') {
+                cluster_ticket = Some(val.trim().to_string());
+            }
+        }
+    }
+
+    // 0. 集群转发票证校验（HA Forwarder failover 转发专用）
+    if let (Some(key), Some(ticket)) = (cluster_auth_key, cluster_ticket.as_deref()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if pproxy_core::cluster_ticket::verify_ticket(key, ticket, now).is_ok() {
+            return true;
         }
     }
 
@@ -276,6 +295,7 @@ pub async fn handle_connect_raw(
     users: Option<Arc<UserService>>,
     tokens: Arc<TokenService>,
     gatekeeper: Arc<AuthGatekeeper>,
+    cluster_auth_key: Option<&str>,
 ) {
     // 1. 防爆破门禁检查（Lockout Check）
     if let Err(_msg) = gatekeeper.check(&client_ip) {
@@ -292,7 +312,16 @@ pub async fn handle_connect_raw(
     }
 
     // 2. 强制身份鉴权（MANDATORY AUTHENTICATION - 堵死 Blocker-01）
-    let is_auth_ok = verify_connect_credentials(head, users.as_deref(), &tokens);
+    //    本机回环来源免认证（信任边界）：127.0.0.1 / ::1 的 CONNECT 视为本机可信调用。
+    let is_loopback = match client_ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => v6.is_loopback(),
+    };
+    let is_auth_ok = if is_loopback {
+        true
+    } else {
+        verify_connect_credentials(head, users.as_deref(), &tokens, cluster_auth_key)
+    };
     if !is_auth_ok {
         gatekeeper.record_failure(client_ip);
         tracing::warn!(%client_ip, "connect denied: missing or invalid authentication credentials");

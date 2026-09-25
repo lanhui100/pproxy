@@ -69,6 +69,18 @@ enum Command {
         #[command(subcommand)]
         cmd: ClusterCmd,
     },
+    /// 独立运行本地高可用分发守护进程（Local HA Forwarder，仅供 serve 内部派生，勿手动前台运行）
+    HaForwarder {
+        /// 对外固定监听入口（默认 127.0.0.1:8899）
+        #[arg(long)]
+        listen: String,
+        /// 本地主引擎内部端口（如 127.0.0.1:18899）
+        #[arg(long)]
+        local: String,
+        /// 集群备灾候选节点（逗号分隔 SocketAddr）
+        #[arg(long)]
+        peers: String,
+    },
     /// 写入 ~/.pony/config.toml（或 --interactive 交互式引导）
     Init {
         #[arg(long)]
@@ -507,6 +519,47 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         return cmd::serve::run(listen.as_deref(), admin_listen.as_deref(), *lan, *port).map_err(RunError::Msg);
     }
 
+    // 1.0 ha-forwarder 独立高可用守护进程（由 serve 内部派生）
+    if let Command::HaForwarder { listen, local, peers } = &cli.command {
+        let listen_sock: std::net::SocketAddr = listen.parse().map_err(|e: std::net::AddrParseError| RunError::Msg(e.to_string()))?;
+        let local_sock: std::net::SocketAddr = local.parse().map_err(|e: std::net::AddrParseError| RunError::Msg(e.to_string()))?;
+        let peer_addrs: Vec<std::net::SocketAddr> = peers
+            .split([',', ';'])
+            .filter_map(|p| p.trim().parse().ok())
+            .collect();
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| RunError::Msg(e.to_string()))?;
+
+        let start_result = rt.block_on(async move {
+            // ha-forwarder 独立进程：初始化 tracing 以便 failover 日志可观测（stderr）
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .try_init()
+                .ok();
+
+            let cluster_key = std::env::var("PPROXY_CLUSTER_KEY").unwrap_or_default();
+            let node_id = std::env::var("PPROXY_CLUSTER_NODE_ID")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "node-local".into());
+            let ha = std::sync::Arc::new(
+                pproxy_core::LocalHaForwarder::new(listen_sock, local_sock, peer_addrs)
+                    .with_cluster_identity(cluster_key, node_id),
+            );
+            ha.start().await.map_err(|e| e.to_string())?;
+            // 常驻运行（start 内部已 spawn 转发循环，此处保持主协程存活）
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), String>(())
+        });
+
+        start_result.map_err(RunError::Msg)?;
+    }
+
     // 1.1 clash 手机配置生成与扫码导入
     if let Command::Clash { token, lan_ip, port, url_only } = &cli.command {
         let cfg = config::load().unwrap_or_default();
@@ -767,6 +820,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             return Ok(EXIT_OK);
         }
         Command::Serve { .. }
+        | Command::HaForwarder { .. }
         | Command::Clash { .. }
         | Command::User { .. }
         | Command::Sync { .. }

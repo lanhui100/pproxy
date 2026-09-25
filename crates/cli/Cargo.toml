@@ -13,6 +13,7 @@ pproxy-engine = { path = "../engine" }
 pproxy-server = { path = "../server" }
 axum.workspace = true
 tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 serde.workspace = true

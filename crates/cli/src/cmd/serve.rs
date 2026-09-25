@@ -280,6 +280,16 @@ pub fn run(
             let _ = shutdown_tx.send(true);
         });
 
+        // 读取集群机器密钥 (cluster_auth_key) 用于校验 HA Forwarder 的集群转发票证
+        let cluster_auth_key = {
+            let home2 = std::env::var("HOME").unwrap_or_else(|_| "/home/dm".into());
+            let cj = std::path::Path::new(&home2).join(".pony").join("cluster.json");
+            std::fs::read_to_string(&cj).ok().and_then(|raw| {
+                serde_json::from_str::<serde_json::Value>(&raw).ok()
+                    .and_then(|v| v.get("cluster_auth_key").and_then(|k| k.as_str()).map(|s| s.to_string()))
+            }).or_else(|| std::env::var("PPROXY_CLUSTER_KEY").ok())
+        };
+
         let state = GatewayState {
             tokens,
             users: Some(users),
@@ -288,10 +298,139 @@ pub fn run(
             gatekeeper,
             tunnel: tunnel_pool.clone(),
             instance_uuid: instance_uuid.clone(),
+            cluster_auth_key,
+        };
+
+        // 组装集群备灾候选节点 (Local HA Forwarder)
+        // 来源优先级：PPROXY_CLUSTER_PEERS 环境变量（逗号分隔）> ~/.pony/cluster.json 的 seed_addr
+        let mut remote_peers = Vec::new();
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dm".into());
+
+        if let Ok(peers_env) = std::env::var("PPROXY_CLUSTER_PEERS") {
+            for p in peers_env.split([',', ';']) {
+                if let Ok(sa) = p.trim().parse::<std::net::SocketAddr>() {
+                    remote_peers.push(sa);
+                }
+            }
+        }
+
+        let cluster_json_path = std::path::Path::new(&home).join(".pony").join("cluster.json");
+        if cluster_json_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&cluster_json_path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(seed) = v.get("seed_addr").and_then(|s| s.as_str()) {
+                        if let Ok(sa) = seed.parse::<std::net::SocketAddr>() {
+                            // 去重后并入
+                            if !remote_peers.contains(&sa) {
+                                remote_peers.push(sa);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        remote_peers.sort();
+        remote_peers.dedup();
+
+        // 如果外部监听端口为 8899，且发现了远程对等节点，则派生独立 Local HA Forwarder 守护进程：
+        // 核心数据面移至内部端口 18899，对外 8899 由独立 ha-forwarder 子进程独占常驻监听。
+        // 独立进程设计：主引擎崩溃/升级/重启时，ha-forwarder 子进程完全不受影响，8899 永不关闭，
+        // 从而实现 ponyllm 等本地服务对 pproxy 单点故障的完全免疫（零停机分布式备灾）。
+        let (actual_engine_addr, _forwarder_handle) = if port == 8899 && !remote_peers.is_empty() {
+            let external_sock: std::net::SocketAddr = addr.parse().unwrap_or_else(|_| "127.0.0.1:8899".parse().unwrap());
+            let internal_sock: std::net::SocketAddr = "127.0.0.1:18899".parse().unwrap();
+            // 引擎实际监听地址：0.0.0.0:18899（供集群对等节点经票证互连），HA Forwarder 仍以回环探测本地引擎
+            let engine_bind = format!("0.0.0.0:18899");
+
+            // 派生独立 ha-forwarder 守护进程（与当前 serve 进程完全隔离）
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let peers_arg = remote_peers.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+
+            // 集群机器密钥与节点标识：ha-forwarder failover 时签发 X-Pony-Cluster-Ticket 用。
+            // 来源优先级：PPROXY_CLUSTER_KEY env > ~/.pony/cluster.json 的 cluster_auth_key。
+            let ha_key = std::env::var("PPROXY_CLUSTER_KEY").ok()
+                .or_else(|| {
+                    let home2 = std::env::var("HOME").unwrap_or_else(|_| "/home/dm".into());
+                    std::fs::read_to_string(std::path::Path::new(&home2).join(".pony").join("cluster.json")).ok()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()
+                            .and_then(|v| v.get("cluster_auth_key").and_then(|k| k.as_str()).map(|s| s.to_string())))
+                })
+                .unwrap_or_default();
+            let ha_node_id = std::env::var("HOSTNAME")
+                .or_else(|_| std::env::var("HOST"))
+                .unwrap_or_else(|_| "node-local".into());
+
+            // 先尝试绑定探测外部端口是否被占用：若被占用（如旧 ha-forwarder 残留），
+            // 直接清理重建——ha-forwarder 是 serve 派生的子进程，serve 重启时应同步接管，
+            // 否则孤儿进程会与新的引擎抢占端口导致 serve 退出。
+            let external_free = tokio::net::TcpListener::bind(external_sock).await.is_ok();
+            if !external_free {
+                // 尝试清理可能残留的 ha-forwarder（按其 PID 文件 + cmdline 匹配）
+                let pid_file = {
+                    let home2 = std::env::var("HOME").unwrap_or_else(|_| "/home/dm".into());
+                    std::path::Path::new(&home2).join(".pony").join("ha-forwarder.pid")
+                };
+                if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                        if cmdline.contains("ha-forwarder") {
+                            let _ = std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+                            eprintln!("[INFO] 清理残留 Local HA Forwarder (PID {pid})，重新派生");
+                        }
+                    }
+                }
+                // 若仍被占（非 HA 进程），等待短暂释放窗口
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            // 重新探测：清理后应可用
+            let external_free = tokio::net::TcpListener::bind(external_sock).await.is_ok();
+            if external_free {
+                let mut cmd = std::process::Command::new(&exe);
+                cmd.arg("ha-forwarder")
+                    .arg("--listen")
+                    .arg(external_sock.to_string())
+                    .arg("--local")
+                    .arg(internal_sock.to_string())
+                    .arg("--peers")
+                    .arg(&peers_arg)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                if !ha_key.is_empty() {
+                    cmd.env("PPROXY_CLUSTER_KEY", &ha_key);
+                    cmd.env("PPROXY_CLUSTER_NODE_ID", &ha_node_id);
+                }
+                let child = cmd.spawn();
+
+                match child {
+                    Ok(c) => {
+                        // 记录 ha-forwarder PID 以便下次启动复用检测
+                        let home3 = std::env::var("HOME").unwrap_or_else(|_| "/home/dm".into());
+                        let pid_file = std::path::Path::new(&home3).join(".pony").join("ha-forwarder.pid");
+                        let _ = std::fs::write(&pid_file, c.id().to_string());
+
+                        println!("  \x1b[1;32m✓ Local HA Forwarder (原生高可用分发桩) 已激活！\x1b[0m");
+                        println!("    对外固定入口:   {} (ponyllm/本地服务专用，永不断线)", external_sock);
+                        println!("    本地首选引擎:   {} (引擎监听: {})", internal_sock, engine_bind);
+                        println!("    集群备灾节点:   {:?}", remote_peers);
+                        println!("    集群票证认证:   {} (X-Pony-Cluster-Ticket / HMAC)", if ha_key.is_empty() { "未配置 (PPROXY_CLUSTER_KEY)" } else { "已启用 ✓" });
+                        println!("    独立守护进程:   PID {}", c.id());
+                        (engine_bind, Some(()))
+                    }
+                    Err(e) => {
+                        eprintln!("[WARN] Local HA Forwarder 独立进程派生失败: {e}");
+                        (addr.clone(), None)
+                    }
+                }
+            } else {
+                eprintln!("[WARN] 外部端口 {external_sock} 仍被占用，回退绑定原地址");
+                (addr.clone(), None)
+            }
+        } else {
+            (addr.clone(), None)
         };
 
         let engine_config = EngineConfig {
-            listen_addr: addr.clone(),
+            listen_addr: actual_engine_addr,
             instance_uuid: instance_uuid.clone(),
             max_connections: 512,
         };

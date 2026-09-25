@@ -159,6 +159,7 @@ async fn handle_conn(
             state.users,
             state.tokens,
             state.gatekeeper,
+            state.cluster_auth_key.as_deref(),
         )
         .await;
         return;

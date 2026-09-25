@@ -24,6 +24,15 @@ use crate::upstream::UpstreamManager;
 
 pub const MAX_BODY_SIZE: usize = 32 * 1024 * 1024;
 
+/// 将 node_id 字符串稳定哈希为 i64 用户/用量统计占位 id（非安全用途，仅统计聚合）
+fn hash_node_id(node_id: &str) -> i64 {
+    let mut h: i64 = 0;
+    for b in node_id.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as i64);
+    }
+    h & 0x7FFF_FFFF // 保持正数
+}
+
 /// 数据面共享状态。
 #[derive(Clone)]
 pub struct GatewayState {
@@ -34,6 +43,8 @@ pub struct GatewayState {
     pub gatekeeper: Arc<AuthGatekeeper>,
     pub tunnel: Option<Arc<TunnelPool>>,
     pub instance_uuid: String,
+    /// 集群机器密钥 (cluster_auth_key)：用于校验 HA Forwarder 注入的 X-Pony-Cluster-Ticket
+    pub cluster_auth_key: Option<String>,
 }
 
 /// 组装数据面 Router。
@@ -227,6 +238,55 @@ pub async fn auth_middleware(
     let rest = path.strip_prefix('/').unwrap_or(&path).to_string();
     let (first_seg, remaining) = split_first_segment(&rest);
 
+    // 2.5 本机回环来源免认证（部署 pproxy 的本地机器是信任边界）：
+    //     127.0.0.1 / ::1 的请求视为本机可信调用（如 ponyllm 等本地服务），
+    //     无需用户密码或集群票证即可放行——这正是"本地部署不用用户"的产品语义。
+    let is_loopback = match client_ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    };
+    if is_loopback {
+        let ctx = AuthContext {
+            subject: AuthSubject::ClusterNode {
+                id: 0,
+                name: "loopback-trusted".into(),
+            },
+            route: first_seg.to_string(),
+            path_query: format!("{remaining}{query}"),
+        };
+        state.gatekeeper.record_success(&client_ip);
+        req.extensions_mut().insert(ctx);
+        return next.run(req).await;
+    }
+
+    // 2.5 集群转发票证校验（X-Pony-Cluster-Ticket）：HA Forwarder failover 转发专用。
+    //     基于 cluster_auth_key 的 HMAC 短效票证，验签 + 时间戳新鲜度双重校验；
+    //     外部用户无密钥无法伪造，票证短时效无法重放，与用户/Token 体系完全隔离。
+    if let Some(cluster_key) = state.cluster_auth_key.as_deref() {
+        if let Some(ticket) = req.headers().get(pproxy_core::cluster_ticket::CLUSTER_TICKET_HEADER)
+            .and_then(|v| v.to_str().ok())
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if let Ok(node_id) = pproxy_core::cluster_ticket::verify_ticket(cluster_key, ticket, now) {
+                tracing::info!(node = %node_id, "cluster relay ticket verified; dispatching as trusted cluster peer");
+                let ctx = AuthContext {
+                    subject: AuthSubject::ClusterNode {
+                        id: hash_node_id(&node_id),
+                        name: node_id,
+                    },
+                    route: first_seg.to_string(),
+                    path_query: format!("{remaining}{query}"),
+                };
+                state.gatekeeper.record_success(&client_ip);
+                req.extensions_mut().insert(ctx);
+                return next.run(req).await;
+            }
+        }
+    }
+
     let (basic_auth, token_header) = extract_credentials(req.headers());
 
     // 3. 分流鉴权
@@ -354,6 +414,7 @@ async fn forward_handler(
     let token_id = match auth.subject {
         AuthSubject::Token { id, .. } => id,
         AuthSubject::User { id, .. } => id,
+        AuthSubject::ClusterNode { id, .. } => id,
     };
     let route = auth.route;
     state.usage.record_request(&route, token_id, bytes_in);

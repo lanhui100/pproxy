@@ -55,6 +55,7 @@ mod tests {
             gatekeeper,
             tunnel: None,
             instance_uuid,
+            cluster_auth_key: None,
         };
 
         (state, store, users, tokens)
@@ -88,11 +89,16 @@ mod tests {
         let (state, _, _, _) = setup_test_state();
         let router = build_data_router(state);
 
+        // 注入非回环客户端地址（10.0.0.99），确保不命中"回环免认证"豁免路径
+        let client_addr = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 99)), 12345);
+
         // 1. 无凭据请求普通路径 -> 401
         let req = Request::builder()
             .uri("/openai/v1/chat/completions")
             .body(Body::empty())
             .unwrap();
+        let mut req = req;
+        req.extensions_mut().insert(client_addr);
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
@@ -102,6 +108,8 @@ mod tests {
             .header("proxy-authorization", "Basic aW52YWxpZDp3cm9uZw==")
             .body(Body::empty())
             .unwrap();
+        let mut req_proxy = req_proxy;
+        req_proxy.extensions_mut().insert(client_addr);
         let resp_proxy = router.oneshot(req_proxy).await.unwrap();
         assert_eq!(resp_proxy.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
     }

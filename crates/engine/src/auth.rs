@@ -13,6 +13,8 @@ pub const AUTHORIZATION: &str = "authorization";
 pub enum AuthSubject {
     User { id: i64, username: String },
     Token { id: i64, name: String },
+    /// 集群节点转发来源（X-Pony-Cluster-Ticket 验签通过；id 存 node_id 字符串）
+    ClusterNode { id: i64, name: String },
 }
 
 /// 鉴权成功后注入 Request Extension 的上下文。

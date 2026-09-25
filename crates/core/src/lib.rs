@@ -13,6 +13,8 @@ pub mod user;
 pub mod gatekeeper;
 pub mod auth;
 pub mod cluster;
+pub mod cluster_ticket;
+pub mod ha_forwarder;
 
 pub use pool::Pool;
 pub use edge::{EdgeClient, ForwardRequest};
@@ -24,6 +26,8 @@ pub use user::UserService;
 pub use gatekeeper::{AuthGatekeeper, GatekeeperConfig};
 pub use auth::{TokenSigner, TokenVerifier, UserTokenClaims};
 pub use cluster::{ClusterHeartbeat, ClusterJoinToken, ClusterManager, NodeState, PeerNode};
+pub use cluster_ticket::{create_ticket, verify_ticket, CLUSTER_TICKET_HEADER, TICKET_MAX_AGE_SECS};
+pub use ha_forwarder::LocalHaForwarder;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
