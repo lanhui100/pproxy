@@ -620,15 +620,36 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
         .pool_max_idle_per_host(32)
         .build()?;
 
+    // 与 crates/gate-server/src/main.rs 独立 binary 同口径：从环境读取多租户
+    // Ed25519 验签公钥与管理口令（CLI `pproxy gate-server` 子命令路径同样生效，
+    // 否则 systemd 经 CLI 启动的网关永远 verifier=None，多租户 token 全 401）。
+    let verifier = match std::env::var("USER_VERIFYING_KEY").ok() {
+        Some(hex_key) => match pproxy_core::TokenVerifier::from_hex(&hex_key) {
+            Ok(v) => {
+                tracing::info!("User Token Verifier enabled");
+                Some(std::sync::Arc::new(v))
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse USER_VERIFYING_KEY: {}", e);
+                None
+            }
+        },
+        None => None,
+    };
+    let gate_admin_token = std::env::var("GATE_ADMIN_TOKEN").unwrap_or_default();
+
+    let revoked_tokens = Arc::new(dashmap::DashSet::new());
+    load_revoked_tokens(&revoked_tokens);
+
     let state = Arc::new(ServerConfig {
         tunnel_token_hash: token_hash,
         proxy_secret,
         client,
-        verifier: None,
+        verifier,
         user_active_conns: Arc::new(dashmap::DashMap::new()),
         user_used_bytes: Arc::new(dashmap::DashMap::new()),
-        revoked_tokens: Arc::new(dashmap::DashSet::new()),
-        gate_admin_token: String::new(),
+        revoked_tokens,
+        gate_admin_token,
     });
 
     let app = build_router(state);
