@@ -16,9 +16,9 @@ pub const AUTH_401_MARKER: &str = "HTTP error: 401 Unauthorized";
 /// 402 租约配额耗尽稳定标记（供客户端原生通知与阻断捕获）
 pub const QUOTA_402_MARKER: &str = "HTTP error: 402 Payment Required: Quota Exceeded";
 
-// 超时预算：审查加固（P0-8）——收紧至 800ms 快速探测，消除 SYN 丢包卡死 20s+ 隐患
+// 超时预算：跨国链路 + TLS/WSS 握手在公网抖动下需充足窗口，回退至 8000ms（对齐 v0.3.50/v0.3.53）
 #[cfg(not(test))]
-pub const DIAL_TIMEOUT: Duration = Duration::from_millis(800);
+pub const DIAL_TIMEOUT: Duration = Duration::from_millis(8000);
 #[cfg(not(test))]
 pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(5000);
 
