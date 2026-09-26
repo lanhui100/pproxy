@@ -16,20 +16,20 @@ echo "[sync] $TAG -> $DEST"
 gh release download "$TAG" --repo lanhui100/pproxy --dir "$DEST" --clobber
 
 # 改写 latest.json 内的资产地址：私仓 GitHub 直链对 updater 不可达（404），
-# 指向 HTTPS 公开分发端点 access.example.com/dsk/（网关公开路由，M6 迁移；
+# 指向 HTTPS 公开分发端点 access.ponygo.fun/dsk/（网关公开路由，M6 迁移；
 # 旧 MagicDNS http 地址仅 tailnet 内可达且与 updater 端点域名不一致，已弃用）
-python3 - "$DEST/latest.json" <<'PY'
+DIST_BASE="${PPROXY_DIST_BASE:-https://access.ponygo.fun}"
+python3 - "$DEST/latest.json" "$DIST_BASE" <<'PY'
 import json, sys, os
 path = sys.argv[1]
+dist_base = sys.argv[2].rstrip("/")
 d = json.load(open(path))
-prefix = f"https://github.com/lanhui100/pproxy/releases/download/{os.environ.get('TAG', '')}/"
 for plat in d.get("platforms", {}).values():
     url = plat.get("url", "")
-    if url.startswith("https://github.com/"):
-        name = url.rsplit("/", 1)[-1]
-        plat["url"] = f"https://access.example.com/dsk/{name}"
+    name = url.rsplit("/", 1)[-1]
+    plat["url"] = f"{dist_base}/dsk/{name}"
 json.dump(d, open(path, "w"), indent=2)
-print("latest.json urls rewritten")
+print("latest.json urls rewritten to", dist_base)
 PY
 
 echo "[sync] 内容清单："

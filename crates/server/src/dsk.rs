@@ -81,9 +81,25 @@ pub(crate) async fn dsk_file_public(
     let Some(name) = sanitize_filename(&name) else {
         return (StatusCode::BAD_REQUEST, "invalid filename").into_response()
     };
-    let dir = std::env::var("PPROXY_DESKTOP_DIST_DIR")
-        .unwrap_or_else(|_| "/opt/pony-desktop-releases".into());
-    match tokio::fs::read(std::path::PathBuf::from(dir).join(&name)).await {
+    let dir = dist_dir();
+    let file_path = dir.join(&name);
+    // 回退尝试：如果指定目录找不到，且在 $HOME/pony-desktop-releases，尝试读取
+    let read_res = match tokio::fs::read(&file_path).await {
+        Ok(bytes) => Ok(bytes),
+        Err(e) => {
+            if let Ok(home) = std::env::var("HOME") {
+                let home_fallback = std::path::PathBuf::from(home).join("pony-desktop-releases").join(&name);
+                if home_fallback != file_path {
+                    tokio::fs::read(&home_fallback).await
+                } else {
+                    Err(e)
+                }
+            } else {
+                Err(e)
+            }
+        }
+    };
+    match read_res {
         Ok(bytes) => {
             let ct = if name.ends_with(".json") { "application/json" }
                      else if name.ends_with(".sig") { "text/plain" }

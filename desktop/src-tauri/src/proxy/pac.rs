@@ -43,7 +43,12 @@ pub fn collect_bypass_hosts() -> BTreeSet<String> {
     }
     // 2. updater.endpoints (tauri.conf.json 静态值)
     // Keep in sync with desktop/src-tauri/tauri.conf.json plugins.updater.endpoints
-    for ep in ["https://access.example.com/dsk/latest.json"] {
+    for ep in [
+        "https://github.com/lanhui100/pproxy/releases/latest/download/latest.json",
+        "https://dl.ponygo.fun/latest.json",
+        "https://access.ponygo.fun/dsk/latest.json",
+        "https://access.example.com/dsk/latest.json",
+    ] {
         if let Ok(p) = url::Url::parse(ep) {
             if let Some(h) = p.host_str() {
                 set.insert(h.to_ascii_lowercase());
@@ -53,6 +58,7 @@ pub fn collect_bypass_hosts() -> BTreeSet<String> {
     }
     // 3. fallback if empty
     if set.is_empty() {
+        set.insert("access.ponygo.fun".to_string());
         set.insert("access.example.com".to_string());
     }
     set
@@ -237,6 +243,7 @@ mod tests {
     #[test]
     fn collect_bypass_contains_updater_host() {
         let set = collect_bypass_hosts();
+        assert!(set.contains("access.ponygo.fun"), "updater host access.ponygo.fun should be in bypass");
         assert!(set.contains("access.example.com"), "updater host should be in bypass");
     }
 }

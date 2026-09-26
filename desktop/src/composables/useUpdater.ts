@@ -51,7 +51,19 @@ export async function checkForUpdate(): Promise<void> {
   try {
     const { check } = await import('@tauri-apps/plugin-updater')
     const proxy = await engineProxy()
-    const u = await check(proxy ? { proxy } : undefined)
+    // 优先尝试使用 proxy（如果引擎运行中），若请求失败或报错，自动 fallback 到直连检查，
+    // 避免因本地代理端口或本地路由异常导致更新检查中断
+    let u = null
+    try {
+      u = await check(proxy ? { proxy } : undefined)
+    } catch (firstErr) {
+      if (proxy) {
+        // Fallback 到直连无 proxy 重试一次
+        u = await check(undefined)
+      } else {
+        throw firstErr
+      }
+    }
     if (u) {
       updateAvailable.value = true
       updateVersion.value = u.version
@@ -76,9 +88,18 @@ export async function downloadAndInstall(): Promise<void> {
   downloaded.value = false
   try {
     const { check } = await import('@tauri-apps/plugin-updater')
-    // 重新获取句柄（插件要求）；同样走系统通道
+    // 重新获取句柄（插件要求）；同样走系统通道，支持 fallback
     const proxy = await engineProxy()
-    const u = await check(proxy ? { proxy } : undefined)
+    let u = null
+    try {
+      u = await check(proxy ? { proxy } : undefined)
+    } catch (firstErr) {
+      if (proxy) {
+        u = await check(undefined)
+      } else {
+        throw firstErr
+      }
+    }
     if (!u) return
     let total = 0
     let received = 0
