@@ -26,6 +26,13 @@ pub struct UserTokenClaims {
     /// 最大允许并发连接数（商业规范硬编码或签发时指定，默认 3）
     #[serde(default = "default_max_conns")]
     pub max_conns: usize,
+    /// 用户角色："admin"（管理员）或 "user"（普通用户，默认）
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+fn default_role() -> String {
+    "user".to_string()
 }
 
 fn default_lease_bytes() -> u64 {
@@ -219,6 +226,7 @@ mod tests {
             exp: now + 3600,
             iat: now,
             max_conns: 3,
+            role: "user".into(),
         };
 
         let token = signer.sign_token(&claims).unwrap();
@@ -229,6 +237,7 @@ mod tests {
         assert_eq!(decoded.name, "Alice");
         assert_eq!(decoded.quota_bytes, 50 * 1024 * 1024 * 1024);
         assert_eq!(decoded.max_conns, 3);
+        assert_eq!(decoded.role, "user");
     }
 
     #[test]
@@ -249,6 +258,7 @@ mod tests {
             exp: now - 10, // 已过期
             iat: now - 100,
             max_conns: 3,
+            role: "user".into(),
         };
 
         let token = signer.sign_token(&claims).unwrap();
@@ -271,6 +281,7 @@ mod tests {
             exp: now + 3600,
             iat: now,
             max_conns: 3,
+            role: "user".into(),
         };
 
         let token = signer.sign_token(&claims).unwrap();

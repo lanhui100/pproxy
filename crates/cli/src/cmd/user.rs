@@ -130,6 +130,11 @@ pub fn add(
         };
 
         let jti = format!("tok-{}", hex::encode(rand::random::<[u8; 8]>()));
+        let role = if username == "admin" || username.starts_with("admin_") {
+            "admin".to_string()
+        } else {
+            "user".to_string()
+        };
         let claims = pproxy_core::UserTokenClaims {
             jti,
             sub: format!("usr_{}", username),
@@ -139,6 +144,7 @@ pub fn add(
             exp,
             iat: now,
             max_conns,
+            role: role.clone(),
         };
 
         let token = signer.sign_token(&claims).map_err(|e| format!("签发令牌失败: {e}"))?;
@@ -147,6 +153,7 @@ pub fn add(
         println!("║       ✓ 商业化多租户自包含令牌签发成功 (Ed25519 签名)         ║");
         println!("╚════════════════════════════════════════════════════════════════╝\n");
         println!("  用户名称:   \x1b[1;36m{}\x1b[0m", username);
+        println!("  用户身份:   \x1b[1;35m{}\x1b[0m", if role == "admin" { "系统管理员 (全局大盘权限)" } else { "普通租户用户" });
         println!("  总配额:     \x1b[1;32m{:.2} GB\x1b[0m ({} 字节)", quota_bytes as f64 / 1024.0 / 1024.0 / 1024.0, quota_bytes);
         println!("  有效时长:   {} 天 (过期时间: {})", days, fmt_ts(Some(exp)));
         println!("  最大并发:   {} 个同时在线长连接", max_conns);

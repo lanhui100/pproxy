@@ -16,6 +16,25 @@ export interface UserClaims {
   exp: number
   iat: number
   max_conns: number
+  role?: string
+}
+
+/**
+ * 判断当前用户是否为管理员角色：
+ * 1. 令牌 Claims 中含有 role: 'admin'
+ * 2. sub 标识为 'usr_admin' 或以 'admin' 开头
+ * 3. 令牌以 'admin_' 或 'gate_admin_' 开头
+ */
+export function isUserAdmin(claims?: UserClaims | null, rawToken?: string): boolean {
+  if (claims) {
+    if (claims.role === 'admin') return true
+    if (claims.sub === 'usr_admin' || claims.sub.startsWith('usr_admin_') || claims.name === 'admin') return true
+  }
+  if (rawToken) {
+    const t = rawToken.trim()
+    if (t.startsWith('admin_') || t.startsWith('gate_admin_') || t === 'admin') return true
+  }
+  return false
 }
 
 /**

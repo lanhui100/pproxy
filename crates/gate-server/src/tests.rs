@@ -38,6 +38,7 @@ mod tests {
             exp: now + 3600,
             iat: now,
             max_conns: 3,
+            role: "user".into(),
         };
         let token = signer.sign_token(&claims).unwrap();
 

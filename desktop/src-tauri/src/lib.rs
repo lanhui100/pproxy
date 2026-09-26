@@ -202,6 +202,7 @@ pub fn run() {
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
       proxy_traffic_stats, proxy_test_egress, proxy_test_site_via, proxy_test_site_local,
       proxy_access_url_generate, proxy_api_token_get, proxy_api_token_set,
+      proxy_cluster_nodes_get,
       open_external_url, proxy_prepare_update_exit,
     ])
     .build(ctx)
@@ -1878,6 +1879,77 @@ async fn proxy_test_site_via(iface: String, host: String) -> Result<serde_json::
             "error": e,
         })),
     }
+}
+
+/// 获取集群节点状态列表（供管理员前端 Dashboard 展示多节点健康状况）
+#[tauri::command]
+async fn proxy_cluster_nodes_get() -> Result<serde_json::Value, String> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/dm".into());
+    let cluster_cfg_path = std::path::Path::new(&home).join(".pony").join("cluster.json");
+    let mut peer_addrs: Vec<String> = Vec::new();
+    let mut cluster_id = "pproxy-mesh".to_string();
+
+    if let Ok(raw) = std::fs::read_to_string(&cluster_cfg_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(cid) = v.get("cluster_id").and_then(|c| c.as_str()) {
+                cluster_id = cid.to_string();
+            }
+            if let Some(seed) = v.get("seed_addr").and_then(|s| s.as_str()) {
+                peer_addrs.push(seed.to_string());
+            }
+        }
+    }
+
+    if let Ok(peers_env) = std::env::var("PPROXY_CLUSTER_PEERS") {
+        for p in peers_env.split([',', ';']) {
+            let s = p.trim().to_string();
+            if !s.is_empty() && !peer_addrs.contains(&s) {
+                peer_addrs.push(s);
+            }
+        }
+    }
+
+    // 默认内置经典三节点拓扑作为缺省候选
+    let default_candidates = ["100.95.193.103:8899", "100.97.143.121:8899", "100.105.241.39:8899"];
+    for def in default_candidates {
+        let s = def.to_string();
+        if !peer_addrs.contains(&s) {
+            peer_addrs.push(s);
+        }
+    }
+
+    let mut nodes = Vec::new();
+    for addr in peer_addrs {
+        let started = std::time::Instant::now();
+        // 快速 TCP 探测
+        let is_online = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            tokio::net::TcpStream::connect(&addr),
+        ).await.map(|r| r.is_ok()).unwrap_or(false);
+        let ms = started.elapsed().as_millis() as u64;
+
+        let name = if addr.contains("100.95.193.103") {
+            "devserver (主力节点)"
+        } else if addr.contains("100.97.143.121") {
+            "preprod (备灾节点1)"
+        } else if addr.contains("100.105.241.39") {
+            "tencent (备灾节点2)"
+        } else {
+            "edge-node"
+        };
+
+        nodes.push(serde_json::json!({
+            "name": name,
+            "address": addr,
+            "online": is_online,
+            "latency_ms": if is_online { Some(ms) } else { None },
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "cluster_id": cluster_id,
+        "nodes": nodes,
+    }))
 }
 
 /// 经本地引擎（127.0.0.1:18900）对指定站点做真实出网拨测（P2-5 修复）：
