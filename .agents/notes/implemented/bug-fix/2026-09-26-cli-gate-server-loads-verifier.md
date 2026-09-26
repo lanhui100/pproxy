@@ -27,3 +27,15 @@ Status: implemented
   `/opt/pproxy/.gate-server.env` 的 `EnvironmentFile` 注入。
 - 单令牌 `gate_` 回退路径不变（`verifier=None` 时仍走 `TUNNEL_TOKEN_HASH` 校验）。
 - 配套验证命令：`cargo test -p pproxy-gate-server`（`test_gate_user_token_auth_flow`）。
+
+---
+
+## Follow-up: 桌面默认端点收敛到唯一多租户出口（同日实施）
+
+`desktop/src-tauri/src/lib.rs`：`DEFAULT_TUNNEL_URLS`/`GATE_WS_URL` 收敛为
+`wss://rn.ponygo.fun/ws`（唯一启用 `USER_VERIFYING_KEY` 的出口）；含
+`example.com` 占位或 `ponyjob.top` 单令牌域名的旧配置经 `migrate_tunnel_url`
+统一收敛；`resolve_gate_url_for_iface("vercel"/"cf")` 回退同样指向 rn；
+无 token 拨测 TCP 目标改为 `rn.ponygo.fun:443`。理由：Vercel/CF Node gate
+仅认 `TUNNEL_TOKEN_HASH`，任何把 `usr_live_` 路由到它们的默认都会 401，
+端点优先级再正确也无意义。UI 不展示端点（维持用户"填 token 即用"体验）。

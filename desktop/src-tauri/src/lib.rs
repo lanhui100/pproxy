@@ -791,21 +791,24 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
 
 // ---- 隧道中继配置 ----
 const TUNNEL_FILE: &str = "tunnel.json";
-/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（本私有部署 gate-worker）。
+/// gate 隧道端点（WS↔TCP 桥）：部署于 rn.ponygo.fun/ws（本私有部署 Rust gate-server，
+/// 唯一启用 USER_VERIFYING_KEY 多租户验签 + 单令牌 fallback 兼容的出口，见 crates/gate-server）。
 /// 注意：与 HTTP 数据面网关（edge.ponygo.fun，cf-worker）不是同一域名，切勿混用。
-const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+/// Vercel/CF 等 Node gate（vgate/gate.ponyjob.top）仅认单令牌 TUNNEL_TOKEN_HASH，
+/// 无法验证 usr_live_ 多租户 token，故不列入默认端点（用户若显式配置单令牌可自行加回）。
+const GATE_WS_URL: &str = "wss://rn.ponygo.fun/ws";
 /// 内置首选出海节点（原生 VPS gate / Rust gate，兼容多租户 usr_live_ 与单令牌 fallback）
 const RN_GATE_URL: &str = "wss://rn.ponygo.fun/ws";
-/// 默认多 gate 端点（私有部署真实端点；参考本机生产 config.toml tunnel_gate_url。
-/// Vercel/CF 等 Node gate 仅认单令牌 TUNNEL_TOKEN_HASH；rn.ponygo.fun 为原生 VPS gate。）
-const DEFAULT_TUNNEL_URLS: &str = "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws";
+/// 默认隧道端点（私有部署真实端点；合规出口分类器认 "rn." 前缀，Google 等照常经此出口）
+const DEFAULT_TUNNEL_URLS: &str = "wss://rn.ponygo.fun/ws";
 
-/// 旧配置迁移：早期脱敏版把真实网关域名替换为 example.com 占位符，读到这类占位一律
-/// 迁移回私有部署真实端点（rn.ponygo.fun/ws），防止拨测超时/隧道连接失败。
+/// 旧配置迁移：早期脱敏三元组（rn/vgate/gate.example.com）与 Node gate 域名
+/// （vgate/gate.ponyjob.top，仅单令牌）一律收敛到支持多租户的 rn.ponygo.fun/ws，
+/// 防止拨测超时 / usr_live_ 401 / 隧道连接失败。
 fn migrate_tunnel_url(url: &str) -> String {
     let t = url.trim();
-    // 通用：凡含 example.com 占位（或已指向真实 rn 端点）统一收敛到真实默认端点
-    if t.contains("example.com") {
+    // 通用：凡含脱敏占位 example.com 或仅单令牌 Node gate 域名，统一收敛到真实默认端点
+    if t.contains("example.com") || t.contains("ponyjob.top") {
         return DEFAULT_TUNNEL_URLS.to_string();
     }
     // 与真实默认端点一致时保持原值
@@ -932,9 +935,16 @@ fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
     let urls: Vec<String> = url_raw.split([',', ';', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
     match iface {
-        "rn" => urls.into_iter().find(|u| is_native_vps(u)).or_else(|| Some(RN_GATE_URL.to_string())),
-        "vercel" => urls.into_iter().find(|u| u.contains("vercel") || u.contains("vgate")).or_else(|| Some("wss://vgate.example.com/api/ws".to_string())),
-        "cf" => urls.into_iter().find(|u| !u.contains("vercel") && !u.contains("vgate") && !is_native_vps(u)).or_else(|| Some(GATE_WS_URL.to_string())),
+        "rn" => urls.iter().find(|u| is_native_vps(u)).cloned().or(Some(RN_GATE_URL.to_string())),
+        // vercel/cf 拨测默认统一走多租户 rn 出口（Node gate 不验签 usr_live_，回退占位只会 401）
+        "vercel" => urls.iter().find(|u| u.contains("vercel") || u.contains("vgate"))
+            .cloned()
+            .or_else(|| urls.iter().find(|u| is_native_vps(u)).cloned())
+            .or(Some(RN_GATE_URL.to_string())),
+        "cf" => urls.iter().find(|u| !u.contains("vercel") && !u.contains("vgate") && !is_native_vps(u))
+            .cloned()
+            .or_else(|| urls.iter().find(|u| is_native_vps(u)).cloned())
+            .or(Some(GATE_WS_URL.to_string())),
         _ => None,
     }
 }
@@ -1770,11 +1780,9 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
         }
     }
 
-    // 未配置授权码时，按 TCP 握手 RTT 测试节点连通性
+    // 未配置授权码时，按 TCP 握手 RTT 测试节点连通性（统一多租户 rn 出口）
     let host_port = extract_host_port_from_url(&gate).unwrap_or_else(|| match iface.as_str() {
-        "rn" => "rn.example.com:443".to_string(),
-        "vercel" => "vgate.example.com:443".to_string(),
-        _ => "gate.example.com:443".to_string(),
+        "rn" | "vercel" | _ => "rn.ponygo.fun:443".to_string(),
     });
     let started = std::time::Instant::now();
     let dial_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
@@ -2655,14 +2663,14 @@ mod tests {
 
     #[test]
     fn migrate_tunnel_url_maps_old_gate_to_correct_endpoint() {
-        // 早期脱敏版把所有真实域名替换为 example.com 占位 → 迁移回私有部署真实默认端点
-        assert_eq!(migrate_tunnel_url("wss://edge.example.com"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws");
-        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws");
-        // 含占位 example.com 一律收敛到真实默认端点
-        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws,wss://vgate.example.com/api/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws");
-        // 已指向真实生产端点保持原样
-        assert_eq!(migrate_tunnel_url("wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws");
-        // 自定义自有端点保持原样（真实域名不含项目保留的 example.com 占位符）
+        // 早期脱敏三元组与仅单令牌 Node gate 一律收敛到支持多租户的 rn.ponygo.fun/ws
+        assert_eq!(migrate_tunnel_url("wss://edge.example.com"), "wss://rn.ponygo.fun/ws");
+        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws"), "wss://rn.ponygo.fun/ws");
+        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws,wss://vgate.example.com/api/ws"), "wss://rn.ponygo.fun/ws");
+        assert_eq!(migrate_tunnel_url("wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws"), "wss://rn.ponygo.fun/ws");
+        // 已指向真实多租户端点保持原样
+        assert_eq!(migrate_tunnel_url("wss://rn.ponygo.fun/ws"), "wss://rn.ponygo.fun/ws");
+        // 自定义自有端点保持原样（真实域名不含占位/Node-gate 串）
         assert_eq!(migrate_tunnel_url("wss://self-gate.internal/ws"), "wss://self-gate.internal/ws");
     }
 
