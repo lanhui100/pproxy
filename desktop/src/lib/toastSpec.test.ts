@@ -18,25 +18,22 @@ describe('Toast Component & UX Specification', () => {
     expect(content).toContain('pointer-events-auto')
   })
 
-  it('enforces flat minimalist style with no box shadow and no border', () => {
+  it('enforces gray high-contrast background with subtle border and min-height for 3 lines', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
-    // 扁平风格，严禁出现任何 shadow 阴影与边框
-    expect(content).not.toMatch(/shadow(-\[|-[a-z0-9]+)/)
-    expect(content).not.toContain('box-shadow')
-    expect(content).not.toMatch(/border( |-[a-z0-9/]+)/)
+    // 质感灰色背景，与浅色桌面形成清晰对比度，拒绝白色透明发飘
+    expect(content).toMatch(/bg-neutral-(800|900)/)
+    // 保证高度至少支持 3 行文字（min-h-[5.25rem] 或更高），避免细长条
+    expect(content).toMatch(/min-h-\[(5|5\.25|5\.5|6)rem\]/)
+    // 宽度合理，避免极度拉伸
+    expect(content).toMatch(/w-\[min\(calc\(100vw-3rem\),(19|20|21|22)rem\)\]/)
   })
 
-  it('adopts white translucent frosted glass with tighter width and smaller radius', () => {
+  it('adopts frosted glass and rounded card container', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
     // 毛玻璃特性：backdrop-blur 或 backdrop-filter
     expect(content).toMatch(/backdrop-blur|backdrop-filter/)
-    // 白色半透明毛玻璃背景（class 或 style）
-    expect(content).toMatch(/bg-white\/(80|75|70)|rgba\(255,\s*255,\s*255/)
-    // 宽度收窄（原 26rem，现缩至约 18~20rem）
-    expect(content).toMatch(/w-\[min\(calc\(100vw-3rem\),(18|19|20)rem\)\]/)
-    // 圆角改小（克制小圆角 rounded 或 rounded-lg，不再是 rounded-2xl）
-    expect(content).toMatch(/rounded(-lg)?\s/)
-    expect(content).not.toContain('rounded-2xl')
+    // 圆角卡片
+    expect(content).toMatch(/rounded-(lg|xl)\s/)
   })
 
   it('restricts semantic colors strictly to internal icons, keeping card and text neutral', () => {
