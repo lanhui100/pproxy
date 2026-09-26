@@ -845,6 +845,7 @@ fn proxy_tunnel_get() -> serde_json::Value {
   // effective_url：引擎实际使用的端点串（含默认双端点回退），UI 与引擎不再分叉
   let (eff_url, _) = tunnel_config_load();
   let user_claims = detail.value.as_deref().and_then(|tok| {
+    use base64::Engine as _;
     let trimmed = tok.trim();
     if !trimmed.starts_with("usr_live_") { return None; }
     let rest = &trimmed["usr_live_".len()..];
