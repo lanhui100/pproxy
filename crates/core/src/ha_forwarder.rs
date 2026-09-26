@@ -9,6 +9,7 @@
 //! 3. 双向原始 TCP 流零拷贝中继 (copy_bidirectional)；
 //! 4. 远程节点全通过集群机器密钥 (HMAC) 票证认证。
 
+use base64::Engine as _;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -24,6 +25,10 @@ pub struct LocalHaForwarder {
     remote_candidates: Arc<RwLock<Vec<SocketAddr>>>,
     cluster_auth_key: String,
     node_id: String,
+    /// 客户端数据面令牌；配置后所有非 loopback 客户端必须携带 X-Pony-Token。
+    client_token: Option<String>,
+    /// 是否允许 loopback 客户端免令牌。默认关闭，必须显式开启。
+    allow_loopback_without_token: bool,
     /// 本地主引擎存活状态（后台探测维护，消除请求关键路径上的 150ms 串行等待）
     local_healthy: Arc<AtomicBool>,
 }
@@ -36,6 +41,8 @@ impl LocalHaForwarder {
             remote_candidates: Arc::new(RwLock::new(remotes)),
             cluster_auth_key: String::new(),
             node_id: String::new(),
+            client_token: None,
+            allow_loopback_without_token: true,
             local_healthy: Arc::new(AtomicBool::new(true)),
         }
     }
@@ -43,6 +50,21 @@ impl LocalHaForwarder {
     pub fn with_cluster_identity(mut self, cluster_auth_key: impl Into<String>, node_id: impl Into<String>) -> Self {
         self.cluster_auth_key = cluster_auth_key.into();
         self.node_id = node_id.into();
+        self
+    }
+
+    /// Require a client token at the forwarder boundary. This is deliberately
+    /// separate from the cluster ticket, which is only for peer-to-peer hops.
+    pub fn with_client_token(mut self, client_token: impl Into<String>) -> Self {
+        let token = client_token.into();
+        self.client_token = (!token.is_empty()).then_some(token);
+        self
+    }
+
+    /// Permit unauthenticated loopback callers only when explicitly enabled.
+    /// Remote callers still require `client_token`.
+    pub fn allow_loopback_without_token(mut self, allow: bool) -> Self {
+        self.allow_loopback_without_token = allow;
         self
     }
 
@@ -125,6 +147,43 @@ impl LocalHaForwarder {
         Ok(())
     }
 
+    fn client_request_allowed(&self, peer_addr: SocketAddr, raw_headers: &[u8]) -> bool {
+        let Some(expected) = self.client_token.as_deref() else {
+            // Preserve loopback compatibility only when no remote boundary is
+            // configured. A non-loopback listener without a token is unsafe.
+            return peer_addr.ip().is_loopback() && self.allow_loopback_without_token;
+        };
+
+        let mut token = None;
+        let mut basic = None;
+        for line in raw_headers.split(|b| *b == b'\n') {
+            let line = if line.ends_with(b"\r") {
+                &line[..line.len() - 1]
+            } else {
+                line
+            };
+            let mut parts = line.splitn(2, |b| *b == b':');
+            let name = match parts.next() {
+                Some(n) => trim_byte_spaces(n),
+                None => continue,
+            };
+            let value = match parts.next() {
+                Some(v) => trim_byte_spaces(v),
+                None => continue,
+            };
+            if name.eq_ignore_ascii_case(b"x-pony-token") {
+                token = std::str::from_utf8(value).ok().map(str::to_owned);
+            } else if name.eq_ignore_ascii_case(b"proxy-authorization")
+                || name.eq_ignore_ascii_case(b"authorization")
+            {
+                basic = std::str::from_utf8(value).ok().and_then(parse_basic_token);
+            }
+        }
+
+        token.as_deref().is_some_and(|candidate| constant_time_equal(candidate.as_bytes(), expected.as_bytes()))
+            || basic.as_deref().is_some_and(|candidate| constant_time_equal(candidate.as_bytes(), expected.as_bytes()))
+    }
+
     async fn pick_upstream(&self) -> Option<(TcpStream, bool)> {
         // 1. 若本地健康标记为 true，才尝试建连本地；若已熔断标记为 false，0 耗时直接跳过！
         if self.local_healthy.load(Ordering::Acquire) {
@@ -157,7 +216,7 @@ impl LocalHaForwarder {
         None
     }
 
-    async fn handle_conn(&self, mut inbound: TcpStream, _peer_addr: SocketAddr) -> anyhow::Result<()> {
+    async fn handle_conn(&self, mut inbound: TcpStream, peer_addr: SocketAddr) -> anyhow::Result<()> {
         // 1. 读请求头（首个 \r\n\r\n 边界）
         let mut head_buf = Vec::with_capacity(4096);
         let mut tmp = [0u8; 4096];
@@ -178,7 +237,22 @@ impl LocalHaForwarder {
         let raw_headers = &head_buf[..header_end_pos];
         let leftover_payload = &head_buf[header_end_pos + 4..];
 
-        // 2. 选上游（若本地挂掉，经过后台探活，此处为 0 延时切远程！）
+        // 2. Authenticate before selecting or connecting to any upstream. The
+        // cluster ticket is intentionally not accepted as client auth.
+        if !self.client_request_allowed(peer_addr, raw_headers) {
+            let _ = inbound
+                .write_all(
+                    b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+                      proxy-authenticate: Basic realm=\"Pony Proxy\"\r\n\
+                      content-type: application/json\r\n\
+                      content-length: 43\r\n\r\n\
+                      {\"error\":\"proxy_authentication_required\"}",
+                )
+                .await;
+            return Ok(());
+        }
+
+        // 3. 选上游（若本地挂掉，经过后台探活，此处为 0 延时切远程！）
         let (mut outbound, is_remote) = match self.pick_upstream().await {
             Some(pair) => pair,
             None => {
@@ -257,6 +331,26 @@ fn sanitize_and_inject_ticket(
     out
 }
 
+fn parse_basic_token(value: &str) -> Option<String> {
+    let encoded = value.strip_prefix("Basic ").or_else(|| value.strip_prefix("basic "))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let (_, password) = decoded.split_once(':')?;
+    Some(password.to_owned())
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+
 #[inline]
 fn trim_byte_spaces(b: &[u8]) -> &[u8] {
     let mut start = 0;
@@ -307,5 +401,55 @@ mod tests {
         let n = client.read(&mut resp).await.unwrap();
         let body = String::from_utf8_lossy(&resp[..n]);
         assert!(body.contains("REMOTE_OK"), "failover response mismatch: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_local_ha_forwarder_auth_token_enforcement() {
+        let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote_addr = remote_listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = remote_listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK").await;
+            }
+        });
+
+        let bind = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fwd_addr = bind.local_addr().unwrap();
+        drop(bind);
+
+        let dead: SocketAddr = "127.0.0.1:65431".parse().unwrap();
+        let forwarder = Arc::new(
+            LocalHaForwarder::new(fwd_addr, dead, vec![remote_addr])
+                .with_client_token("test_secret_token_123")
+                .allow_loopback_without_token(false),
+        );
+        forwarder.start().await.unwrap();
+
+        // 1. 无 Token 请求 -> 期望 407
+        let mut client1 = TcpStream::connect(fwd_addr).await.unwrap();
+        client1.write_all(b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n").await.unwrap();
+        let mut resp1 = vec![0u8; 512];
+        let n1 = client1.read(&mut resp1).await.unwrap();
+        let body1 = String::from_utf8_lossy(&resp1[..n1]);
+        assert!(body1.contains("407 Proxy Authentication Required"), "expected 407, got: {body1}");
+
+        // 2. 带 X-Pony-Token -> 期望 200
+        let mut client2 = TcpStream::connect(fwd_addr).await.unwrap();
+        client2.write_all(b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nX-Pony-Token: test_secret_token_123\r\n\r\n").await.unwrap();
+        let mut resp2 = vec![0u8; 512];
+        let n2 = client2.read(&mut resp2).await.unwrap();
+        let body2 = String::from_utf8_lossy(&resp2[..n2]);
+        assert!(body2.contains("200 OK"), "expected 200, got: {body2}");
+
+        // 3. 带 Basic Auth Token -> 期望 200 (user:test_secret_token_123 -> dXNlcjp0ZXN0X3NlY3JldF90b2tlbl8xMjM=)
+        let mut client3 = TcpStream::connect(fwd_addr).await.unwrap();
+        client3.write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nProxy-Authorization: Basic dXNlcjp0ZXN0X3NlY3JldF90b2tlbl8xMjM=\r\n\r\n").await.unwrap();
+        let mut resp3 = vec![0u8; 512];
+        let n3 = client3.read(&mut resp3).await.unwrap();
+        let body3 = String::from_utf8_lossy(&resp3[..n3]);
+        assert!(body3.contains("200 OK"), "expected 200, got: {body3}");
     }
 }

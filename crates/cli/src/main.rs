@@ -80,6 +80,12 @@ enum Command {
         /// 集群备灾候选节点（逗号分隔 SocketAddr）
         #[arg(long)]
         peers: String,
+        /// 客户端强制鉴权 Token（设置后所有外部客户端请求必须携带该 Token）
+        #[arg(long)]
+        client_token: Option<String>,
+        /// 是否允许 loopback 免鉴权
+        #[arg(long, default_value_t = false)]
+        allow_loopback: bool,
     },
     /// 写入 ~/.pony/config.toml（或 --interactive 交互式引导）
     Init {
@@ -520,9 +526,20 @@ fn run(cli: Cli) -> Result<i32, RunError> {
     }
 
     // 1.0 ha-forwarder 独立高可用守护进程（由 serve 内部派生）
-    if let Command::HaForwarder { listen, local, peers } = &cli.command {
-        let listen_sock: std::net::SocketAddr = listen.parse().map_err(|e: std::net::AddrParseError| RunError::Msg(e.to_string()))?;
-        let local_sock: std::net::SocketAddr = local.parse().map_err(|e: std::net::AddrParseError| RunError::Msg(e.to_string()))?;
+    if let Command::HaForwarder {
+        listen,
+        local,
+        peers,
+        client_token,
+        allow_loopback,
+    } = &cli.command
+    {
+        let listen_sock: std::net::SocketAddr = listen
+            .parse()
+            .map_err(|e: std::net::AddrParseError| RunError::Msg(e.to_string()))?;
+        let local_sock: std::net::SocketAddr = local
+            .parse()
+            .map_err(|e: std::net::AddrParseError| RunError::Msg(e.to_string()))?;
         let peer_addrs: Vec<std::net::SocketAddr> = peers
             .split([',', ';'])
             .filter_map(|p| p.trim().parse().ok())
@@ -532,6 +549,11 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             .enable_all()
             .build()
             .map_err(|e| RunError::Msg(e.to_string()))?;
+
+        let client_tok = client_token
+            .clone()
+            .or_else(|| std::env::var("PPROXY_CLIENT_TOKEN").ok());
+        let allow_loop = *allow_loopback;
 
         let start_result = rt.block_on(async move {
             // ha-forwarder 独立进程：初始化 tracing 以便 failover 日志可观测（stderr）
@@ -544,10 +566,13 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             let node_id = std::env::var("PPROXY_CLUSTER_NODE_ID")
                 .or_else(|_| std::env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "node-local".into());
-            let ha = std::sync::Arc::new(
-                pproxy_core::LocalHaForwarder::new(listen_sock, local_sock, peer_addrs)
-                    .with_cluster_identity(cluster_key, node_id),
-            );
+            let mut ha = pproxy_core::LocalHaForwarder::new(listen_sock, local_sock, peer_addrs)
+                .with_cluster_identity(cluster_key, node_id)
+                .allow_loopback_without_token(allow_loop);
+            if let Some(tok) = client_tok {
+                ha = ha.with_client_token(tok);
+            }
+            let ha = std::sync::Arc::new(ha);
             ha.start().await.map_err(|e| e.to_string())?;
             // 常驻运行（start 内部已 spawn 转发循环，此处保持主协程存活）
             loop {
