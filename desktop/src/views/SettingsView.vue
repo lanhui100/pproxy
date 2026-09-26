@@ -3,8 +3,10 @@ import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Check,
+  ClipboardCheck,
   Copy,
   Download,
+  FolderOpen,
   LifeBuoy,
   Pencil,
   Plus,
@@ -636,6 +638,46 @@ async function handleCheckUpdate(): Promise<void> {
     toast.error('检查更新失败', updateError.value)
   } else if (!updateAvailable.value) {
     toast.success('已是最新版本', '当前版本已是最新')
+  }
+}
+
+// ---- 诊断与日志导出 ----
+const diagnosticCopied = ref(false)
+
+async function copyDiagnosticInfo(): Promise<void> {
+  try {
+    const diag: Record<string, unknown> = {
+      timestamp: new Date().toISOString(),
+      platform: isTauri() ? 'tauri-desktop' : 'web-browser',
+      mode: currentMode.value,
+      hasToken: tunnelHasToken.value,
+      fingerprint: tunnelFingerprint.value,
+      credError: tunnelCredError.value,
+      tunnelSource: tunnelCredSource.value,
+      dataDir: tunnelDataDir.value,
+      autoProxy: autoProxyEnabled.value,
+      whitelistCount: whitelistEntries.value.length,
+    }
+    await navigator.clipboard.writeText(JSON.stringify(diag, null, 2))
+    diagnosticCopied.value = true
+    toast.success('诊断信息已复制', '可直接粘贴发给运维技术支持')
+    setTimeout(() => { diagnosticCopied.value = false }, 2500)
+  } catch {
+    toast.error('复制失败，请重试')
+  }
+}
+
+async function openLogDir(): Promise<void> {
+  if (!isTauri()) {
+    toast.info('浏览器开发环境', '无本地日志目录')
+    return
+  }
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const path = await invoke<string>('proxy_open_log_dir')
+    toast.success('已打开日志目录', path)
+  } catch (e: any) {
+    toast.error('打开失败', typeof e === 'string' ? e : e?.message)
   }
 }
 
@@ -1344,6 +1386,35 @@ onMounted(async () => {
             >
               <RefreshCw v-if="checking" class="size-3.5 mr-1 animate-spin" />
               {{ checking ? '检查中…' : '检查更新' }}
+            </Button>
+          </div>
+        </div>
+
+        <!-- 诊断与日志 -->
+        <div class="border-t border-border/30 pt-3 flex items-center justify-between gap-4">
+          <div class="space-y-0.5">
+            <div class="text-xs font-medium text-foreground">诊断与日志</div>
+            <div class="text-[11px] text-muted-foreground">打开应用数据与日志目录，便于快速导出故障诊断材料</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              @click="copyDiagnosticInfo"
+              class="text-xs h-8 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+            >
+              <ClipboardCheck v-if="diagnosticCopied" class="size-3.5 mr-1 text-emerald-600" />
+              <Copy v-else class="size-3.5 mr-1" />
+              {{ diagnosticCopied ? '已复制诊断' : '复制诊断信息' }}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              @click="openLogDir"
+              class="text-xs h-8 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+            >
+              <FolderOpen class="size-3.5 mr-1" />
+              打开日志目录
             </Button>
           </div>
         </div>

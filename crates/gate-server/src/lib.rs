@@ -113,10 +113,43 @@ pub fn build_router(cfg: Arc<ServerConfig>) -> Router {
         .route("/api/ws", get(handle_ws))
         .route("/api/user/profile", get(handle_user_profile))
         .route("/api/user/revoke", post(handle_revoke))
+        .route("/api/client/telemetry", post(handle_telemetry))
         .route("/proxy", any(handle_proxy))
         .route("/api/proxy", any(handle_proxy))
         .route("/", get(handle_root))
         .with_state(cfg)
+}
+
+/// 客户端遥测数据收集：接收桌面端自动上报的连接与拨测错误诊断
+async fn handle_telemetry(
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let client_ip = headers
+        .get("x-real-ip")
+        .or_else(|| headers.get("x-forwarded-for"))
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let raw = String::from_utf8_lossy(&body);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let entry = format!("[ts={now}] [client_ip={client_ip}] {raw}\n");
+
+    tracing::warn!(target: "pproxy_telemetry", "{entry}");
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let log_path = std::path::Path::new(&home).join(".pony").join("client-telemetry.log");
+    let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(std::path::Path::new(".")));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log_path) {
+        use std::io::Write;
+        let _ = f.write_all(entry.as_bytes());
+    }
+
+    (StatusCode::OK, "{\"ok\":true}\n")
 }
 
 /// 管理端点：热更新撤销列表（受 `GATE_ADMIN_TOKEN` Bearer 鉴权）。

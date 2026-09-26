@@ -558,6 +558,14 @@ function latestText(history: LatencyPoint[]): string {
   return `${p.ms ?? 0}ms`
 }
 
+function latestTooltip(history: LatencyPoint[]): string {
+  if (!isRunning.value) return '加速已停用'
+  const p = latestPoint(history)
+  if (!p) return '暂无测速记录'
+  if (!p.ok) return p.err ? `测速失败原因: ${p.err}` : '测速失败（网络或服务端连接被拒绝）'
+  return `延迟: ${p.ms ?? 0}ms`
+}
+
 function latestClass(history: LatencyPoint[]): string {
   if (!isRunning.value) return 'text-muted-foreground'
   const p = latestPoint(history)
@@ -1197,7 +1205,11 @@ async function submitImportOrChained() {
             </div>
             <div class="flex items-center gap-3 shrink-0">
               <LatencyBars :history="userProxyRow.history" />
-              <span class="w-14 shrink-0 text-right text-xs font-mono tabular-nums" :class="latestClass(userProxyRow.history)">
+              <span
+                class="w-14 shrink-0 text-right text-xs font-mono tabular-nums cursor-help"
+                :class="latestClass(userProxyRow.history)"
+                :title="latestTooltip(userProxyRow.history)"
+              >
                 {{ latestText(userProxyRow.history) }}
               </span>
               <button
@@ -1257,7 +1269,11 @@ async function submitImportOrChained() {
             </div>
             <div class="flex items-center gap-3 shrink-0">
               <LatencyBars :history="row.history" />
-              <span class="w-14 shrink-0 text-right text-xs font-mono tabular-nums" :class="latestClass(row.history)">
+              <span
+                class="w-14 shrink-0 text-right text-xs font-mono tabular-nums cursor-help"
+                :class="latestClass(row.history)"
+                :title="latestTooltip(row.history)"
+              >
                 {{ latestText(row.history) }}
               </span>
               <button

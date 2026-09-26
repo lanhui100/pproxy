@@ -203,7 +203,7 @@ pub fn run() {
       proxy_traffic_stats, proxy_test_egress, proxy_test_site_via, proxy_test_site_local,
       proxy_access_url_generate, proxy_api_token_get, proxy_api_token_set,
       proxy_cluster_nodes_get,
-      open_external_url, proxy_prepare_update_exit,
+      open_external_url, proxy_prepare_update_exit, proxy_open_log_dir,
     ])
     .build(ctx)
     .expect("error while building tauri application");
@@ -1770,6 +1770,25 @@ async fn proxy_test_egress(iface: String) -> Result<serde_json::Value, String> {
                 }));
             }
             Err(e) => {
+                let err_msg = e.clone();
+                let iface_clone = iface.clone();
+                tauri::async_runtime::spawn(async move {
+                    let fp = tunnel_token_fingerprint().unwrap_or_else(|| "none".to_string());
+                    let payload = serde_json::json!({
+                        "type": "egress_probe_failure",
+                        "iface": iface_clone,
+                        "error": err_msg,
+                        "token_fp": fp,
+                        "os": std::env::consts::OS
+                    });
+                    let _ = reqwest::Client::new()
+                        .post("https://rn.ponygo.fun/api/client/telemetry")
+                        .header("content-type", "application/json")
+                        .json(&payload)
+                        .timeout(std::time::Duration::from_secs(3))
+                        .send()
+                        .await;
+                });
                 return Ok(serde_json::json!({
                     "iface": iface,
                     "ok": false,
@@ -1996,6 +2015,31 @@ async fn proxy_test_site_local(host: String) -> Result<serde_json::Value, String
         Ok(Err(e)) => e.to_string(),
         Ok(Ok(())) => String::new(),
     };
+
+    // 自动异步遥测：当拨测发生非空错误时，静默上报错误上下文至网关
+    if !ok && !error.is_empty() {
+        let err_clone = error.clone();
+        let host_clone = host.clone();
+        tauri::async_runtime::spawn(async move {
+            let fp = tunnel_token_fingerprint().unwrap_or_else(|| "none".to_string());
+            let payload = serde_json::json!({
+                "type": "site_probe_failure",
+                "site": host_clone,
+                "error": err_clone,
+                "ms": ms,
+                "token_fp": fp,
+                "os": std::env::consts::OS
+            });
+            let _ = reqwest::Client::new()
+                .post("https://rn.ponygo.fun/api/client/telemetry")
+                .header("content-type", "application/json")
+                .json(&payload)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await;
+        });
+    }
+
     Ok(serde_json::json!({
         "site": host,
         "iface": "local",
@@ -2005,6 +2049,25 @@ async fn proxy_test_site_local(host: String) -> Result<serde_json::Value, String
     }))
 }
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+#[tauri::command]
+fn proxy_open_log_dir() -> Result<String, String> {
+    let dir = data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&dir).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+    }
+    Ok(dir.display().to_string())
+}
+
 #[tauri::command]
 fn proxy_pac() -> String {
     let entries = { if let Some(tx)=WHITELIST_TX.get(){ let g=tx.borrow(); g.clone() } else { load_whitelist_from_file() } };
