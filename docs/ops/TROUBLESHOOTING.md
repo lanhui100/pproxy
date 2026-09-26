@@ -39,12 +39,14 @@
 - **原因**：项目 ssoProtection=all_except_custom_domains（vercel.app 域名有登录墙）
 - **解决**：始终使用自定义域名 vedge.example.com
 
-### 服务无响应
+### 服务无响应 / HA 端口排查
 ```bash
 systemctl status pproxy            # 进程状态
 journalctl -u pproxy -n 50         # 最近日志
-ss -tlnp | grep 8899               # 端口监听
-curl -s http://127.0.0.1:8899/     # 网关健康
+ss -tlnp | grep -E '8899|18899'    # 检查 8899 (HA 入口) 与 18899 (核心引擎) 监听
+curl -s http://127.0.0.1:8899/     # 网关健康（门面入口）
+curl -s http://127.0.0.1:18899/    # 引擎直连健康（仅部署了 HA Forwarder 时）
+pproxy cluster status              # 集群各节点连通大盘
 ```
 
 ### CF Worker 部署报 Authentication error (code 10000)

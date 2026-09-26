@@ -7,6 +7,7 @@
 自托管开发者出海代理与智能 API 网关：
 - **第一优先级（正向出海代理）**：基于 HTTP/HTTPS CONNECT 隧道与 WebSocket 待命连接池，提供 CLI 一键环境代理管理（`pproxy on / off / status / env`）、Windows 桌面端白名单代理与移动端/全平台 HTTP 节点接入，毫秒级出海。
 - **第二优先级（API 反向代理网关）**：LLM 优先的多上游智能分发（`/{token}/{route}/*`），按需代理，多节点出口（CF Worker / Vercel AWS IP），自带用量统计与 Token 鉴权。
+- **高可用与商业化（集群容灾与多租户）**：本地 Local HA Forwarder 守护本地业务永不断网；零配置对等集群网格（Zero-Touch Mesh）；Ed25519 非对称自包含多租户配额令牌（离线签发、客户端直显额度）。
 
 ## 架构总览
 
@@ -77,6 +78,56 @@ curl http://127.0.0.1:8900/api/health -H "Authorization: Bearer <admin_token>"
 
 - admin_token：首启日志打印一次，或以 `PPROXY_ADMIN_TOKEN` 环境变量注入。
 - 完整协议见 [docs/ops/API.md](docs/ops/API.md)。
+
+### 4. 分布式对等容灾与一键组网 (Zero-Touch Cluster Mesh)
+
+多节点之间通过一次性加入令牌（One-Time Join Token）自动组网，实现出海配置同步与无中心健康监控：
+
+```bash
+# 种子节点生成入网令牌（默认 10 分钟有效，可指定种子地址 -s 与有效时长 -m）
+pproxy cluster token-create -s 100.95.193.103:8899 -m 30
+
+# 新节点一键加入集群（自动同步出海端点配置与公钥，--auto-start 零配置拉起后台双模服务）
+pproxy cluster join -t <token> --auto-start
+
+# 实网探活毫秒级展示全网 Peer 状态与延迟
+pproxy cluster status
+```
+
+- **零手工编辑 (Zero-Touch Bootstrap)**：令牌自带出海网关 URL、凭证与验签公钥，新节点入网即自愈装配。
+- **实网探活大盘**：`cluster status` 毫秒级并发探测各节点健康状况，自动区分在线/离线/时延。
+
+### 5. 商业多租户自包含令牌体系 (Ed25519 Token & Quota)
+
+针对商业化出海代理与团队多租户场景，提供去中心化、非对称离线签发机制：
+
+```bash
+# 生成非对称密钥对（私钥仅留管理机 ~/.pony/cluster_signing_key.hex，公钥分发至网关节点）
+pproxy user keygen
+
+# 离线签发自包含租户令牌（支持 50G/100M，离线验签，客户端直显额度与并发限制）
+pproxy user add alice -q 50G -d 30 -c 3
+
+# 一键废止令牌或用户（实时加入黑名单，热推送全网网关拦截）
+pproxy user revoke usr_alice
+# 或废止指定具体令牌 ID
+pproxy user revoke tok-9f8e7d6c
+```
+
+- **非对称密钥隔离**：私钥永不上节点，避免单节点失陷导致假令牌伪造；边缘网关持公钥纯本地验签。
+- **自包含与直显**：令牌内置 `sub`、`quota_bytes`、`exp`、`max_conns`，桌面端与客户端无需查询中心库即可实时显示配额仪表盘。
+- **全网黑名单与热撤销**：执行 `pproxy user revoke` 实时写入黑名单并热推网关，后续连接与查询秒级 401/403 阻断。
+
+### 6. 本地 Local HA Forwarder (无感高可用分发桩)
+
+```bash
+# 运行 pproxy serve 时，若检测到集群候选节点，将自动派生独立的 Local HA Forwarder 守护进程
+pproxy serve
+```
+
+- **业务零感知断网**：常驻守护本地 `127.0.0.1:8899`，外部服务（如本地大模型网关 ponyllm、IDE、Shell 代理）连接永不中断。
+- **0 延时自动漂移**：后台异步零等待探针（Zero-Wait Prober）毫秒级监测本地主引擎状态；当本地主引擎崩溃、重启或滚动升级时，请求 0 延时自动漂移到远程集群备灾节点（如 RackNerd / 备灾机）。
+- **HMAC 票证安全认证**：节点间漂移流量自动注入带有时效性与签名的 `X-Pony-Cluster-Ticket`（基于集群机器密钥 HMAC 认证与回环放行保护），确保集群内部对等转发安全无虞。
 
 ## 当前路由 (API 反向网关)
 

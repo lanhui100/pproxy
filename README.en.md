@@ -7,6 +7,7 @@
 Self-hosted developer proxy for overseas access + intelligent API gateway:
 - **Priority 1 (forward proxy)**: HTTP/HTTPS CONNECT tunneling over a WebSocket standby connection pool — one-command environment proxy (`pproxy on / off / status / env`), Windows desktop whitelist proxy, and mobile/all-platform HTTP node access with millisecond-level latency.
 - **Priority 2 (reverse API gateway)**: LLM-first multi-upstream intelligent routing (`/{token}/{route}/*`), on-demand proxying, multi-node egress (CF Worker / Vercel AWS IPs), with usage accounting and token auth.
+- **High availability & commercialization (cluster failover & multi-tenancy)**: Local HA Forwarder shielding local workloads with zero outage; zero-touch cluster mesh; Ed25519 asymmetric self-contained multi-tenant quota tokens (offline issuance & instant client quota display).
 
 ## Architecture overview
 
@@ -77,6 +78,56 @@ curl http://127.0.0.1:8900/api/health -H "Authorization: Bearer <admin_token>"
 
 - admin_token: printed once on first start, or injected via the `PPROXY_ADMIN_TOKEN` env var.
 - Full protocol: [docs/ops/API.md](docs/ops/API.md).
+
+### 4. Zero-Touch Cluster Mesh (distributed failover & one-command mesh)
+
+Nodes automatically establish mesh networking via One-Time Join Tokens, enabling zero-config egress configuration sync and decentralized health monitoring:
+
+```bash
+# Generate a join token on the seed node (default 10m validity; seed addr -s and minutes -m configurable)
+pproxy cluster token-create -s 100.95.193.103:8899 -m 30
+
+# Join an existing cluster (auto-syncs egress endpoints and public key; --auto-start pulls up background daemon)
+pproxy cluster join -t <token> --auto-start
+
+# Inspect peer statuses and real-world latency in milliseconds
+pproxy cluster status
+```
+
+- **Zero-Touch Bootstrap**: The token payload embeds egress tunnel URLs, credentials, and verification keys — new nodes self-heal and configure automatically without manual editing.
+- **Live Mesh Dashboard**: `cluster status` concurrently probes peer reachability in real time, accurately displaying online/offline status and round-trip latency.
+
+### 5. Multi-Tenant Ed25519 Token & Quota System
+
+Designed for commercial proxy operations and team multi-tenancy with decentralized, asymmetric offline token issuance:
+
+```bash
+# Generate asymmetric keypair (private key stored strictly on management host at ~/.pony/cluster_signing_key.hex)
+pproxy user keygen
+
+# Issue a self-contained tenant token offline (supports 50G/100M, client displays quota and concurrency limits)
+pproxy user add alice -q 50G -d 30 -c 3
+
+# Revoke a token or user (added to blacklist with real-time hot-reloading across gateway nodes)
+pproxy user revoke usr_alice
+# Or revoke a specific token ID
+pproxy user revoke tok-9f8e7d6c
+```
+
+- **Asymmetric Key Isolation**: Private signing keys never leave the administrative workstation, preventing token forging even if an edge node is compromised; edge nodes verify signatures locally via the public key.
+- **Self-Contained & Instant Display**: Tokens embed `sub`, `quota_bytes`, `exp`, and `max_conns`. Desktop and CLI clients display user quotas directly without hitting a central database.
+- **Real-Time Revocation**: `pproxy user revoke` writes to disk and hot-pushes to the live gateway, instantly blocking subsequent connections and profiles with 401/403.
+
+### 6. Local HA Forwarder (transparent high-availability proxy stub)
+
+```bash
+# When running pproxy serve with remote peers configured, Local HA Forwarder is spawned automatically
+pproxy serve
+```
+
+- **Zero-Outage Shield for Local Workloads**: Exclusively guards `127.0.0.1:8899`, ensuring local services (e.g. LLM gateway ponyllm, IDEs, terminal proxies) never encounter connection drops.
+- **Zero-Latency Seamless Failover**: A background zero-wait health prober monitors the local engine; when the local engine crashes, restarts, or undergoes rolling upgrades, traffic instantly drifts to remote cluster peer nodes (e.g. RackNerd / remote nodes) with zero added delay.
+- **HMAC Ticket Verification**: Cluster-wide failover traffic is authenticated via time-bound `X-Pony-Cluster-Ticket` headers signed with cluster HMAC keys and hardened with loopback bypass checks.
 
 ## Current routes (reverse API gateway)
 

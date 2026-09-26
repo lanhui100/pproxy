@@ -48,6 +48,11 @@
 | `PPROXY_CONFIG` | server 配置文件路径（默认 `/etc/pproxy/config.json`） |
 | `PPROXY_TUNNEL_GATE_URL` / `PPROXY_TUNNEL_TOKEN` / `PPROXY_TUNNEL_ALLOWLIST` | 隧道端点/令牌/白名单（server 侧 `.pproxy.env`） |
 | `PPROXY_LISTEN_ADMIN` | 管理面监听地址（tailnet 重绑，systemd drop-in） |
+| `PPROXY_CLUSTER_PEERS` | 远端对等备灾节点地址列表（逗号分隔，如 `100.64.0.2:18899,100.64.0.3:18899`） |
+| `PPROXY_CLUSTER_KEY` | 集群间通信签名密钥（跨节点转发签发 `X-Pony-Cluster-Ticket` 鉴权） |
+| `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥 Hex（各节点本地无状态验签，只读注入） |
+| `GATE_ADMIN_TOKEN` | 轻量 Gate 服务管理接口 Bearer Token（用于黑名单撤销热推送） |
+| `GATE_ADMIN` | 网关管理端点地址（CLI 撤销热推送目标，默认 `http://127.0.0.1:3101`） |
 | `PPROXY_SERVICE_USER` | `m4_test.sh` 断言的服务运行用户（默认 `pproxy`） |
 
 ### 4. 桌面端配置
@@ -145,6 +150,8 @@ sudo systemctl restart pproxy
 |------|------|------|
 | 服务状态 | `systemctl is-active pproxy` | active |
 | 网关健康 | `curl -s http://127.0.0.1:8899/` | JSON 路由表 |
+| 内部引擎健康 | `curl -s http://127.0.0.1:18899/`（启用了 HA Forwarder 时） | JSON 路由表 |
+| 集群状态大盘 | `pproxy cluster status` | 节点列表与在线状态 |
 | 池状态 | `curl -s http://127.0.0.1:8900/stats` | JSON |
 | Worker 可达 | `curl -o /dev/null -w '%{http_code}' https://edge.example.com/` | 403（未带密钥） |
 | Vercel 可达 | `curl -o /dev/null -w '%{http_code}' https://vedge.example.com/api/proxy` | 400/403 |
@@ -213,3 +220,218 @@ git tag desktop-v0.3.x && git push origin desktop-v0.3.x
 - 排查口令：`journalctl -u pony-dsk-sync.service -n 20`、
   `cat /home/USER/pony-desktop-releases/.synced-tag`（应等于最新 tag）、
   `curl -s https://access.example.com/dsk/latest.json | grep version`
+
+## 多机分布式集群组网实操
+
+在跨机器、跨局域网（如 Tailnet 内部网络）或海外轻量备灾节点（如 RackNerd VPS）场景下，通过种子节点与自愈加入令牌（One-Time Join Token）完成多机零接触接入组网。
+
+### 1. 种子节点生成加入令牌
+
+在已正常运行的主节点（种子节点）上生成加入令牌。令牌内嵌种子节点监听地址、集群通讯密钥、出海隧道端点及多租户验签公钥：
+
+```bash
+# 使用本机默认检测地址（优先 TAILSCALE_IP / HOST，端口 8899），有效时长 30 分钟
+pproxy cluster token-create --valid-minutes 30
+
+# 或显式指定种子节点的内网/Tailnet 访问地址与端口
+pproxy cluster token-create --seed 100.64.0.1:8899 --valid-minutes 60
+```
+
+输出示例：
+```
+╔════════════════════════════════════════════════════════════════╗
+║   ✓ 节点全量配置自愈加入令牌 (Zero-Touch Token) 生成成功       ║
+╚════════════════════════════════════════════════════════════════╝
+  集群标识:     pproxy-mesh
+  种子节点:     100.64.0.1:8899
+  有效时长:     30 分钟 (单次使用 / 0600 安全约束)
+  自愈配置载荷: 出海端点=[已内嵌 ✓], 验签公钥=[已内嵌 ✓]
+  加入令牌:     eyJjbHVzdGVyX2lkIjoicHByb3h5LW1lc2giL...
+```
+
+### 2. 工作节点一键入网自启
+
+在全新服务器或备灾节点执行入网命令。`--auto-start` 参数将自动将配置写入 `~/.pony/cluster.json`（严格 `0600` 权限），自愈装配出海隧道配置与验签公钥，并在后台拉起局域网双模服务：
+
+```bash
+# 格式：pproxy cluster join --token "<TOKEN>" --auto-start
+pproxy cluster join --token "eyJjbHVzdGVyX2lkIjoicHByb3h5LW1lc2giL..." --auto-start
+```
+
+若需覆盖种子节点地址（例如特定 NAT 穿透端口）：
+```bash
+pproxy cluster join --token "<TOKEN>" --peer 100.64.0.1:8899 --auto-start
+```
+
+### 3. 验证集群拓扑与节点状态
+
+在集群内任意节点执行状态查询，查看全景健康大盘与对等节点连通性：
+
+```bash
+pproxy cluster status
+```
+
+期望输出包含当前节点角色、种子节点、已同步的出海网关与对等节点在线状态。
+
+---
+
+## 多租户管理运维
+
+系统采用非对称隔离架构：管理端持有离线私钥签发租户凭据，生产网关节点仅分发公钥用于本地毫秒级无状态验签。
+
+### 1. 私钥离线保存规范（`cluster_signing_key.hex` 0600）
+
+**运维红线**：
+- 严禁将签名私钥上传至生产网关节点、CI 构建机或写入 Git 仓库；
+- 签名私钥仅允许保存在管理员离线控制机 `~/.pony/cluster_signing_key.hex`，权限必须保持 `0600`；
+- 私钥丢失将无法签发新租户凭据；私钥泄露会导致未授权伪造租户令牌。
+
+在离线管理机上初始化多租户签名密钥对：
+```bash
+pproxy user keygen
+```
+
+输出展示生成的公钥 Hex，并自动将私钥以 `0600` 权限落盘至 `~/.pony/cluster_signing_key.hex`：
+```bash
+# 校验私钥权限是否合规
+ls -l ~/.pony/cluster_signing_key.hex
+# 期望权限输出: -rw------- 1 user user 64 ... /home/user/.pony/cluster_signing_key.hex
+```
+
+### 2. 公钥分发（`USER_VERIFYING_KEY`）
+
+公钥为 32 字节 Ed25519 公钥的 Hex 编码（64 字符十六进制）。将公钥分发至所有接入网关与代理节点，节点无需访问中心数据库即可实现无状态本地验签：
+
+- **环境变量注入**（systemd 服务或 `/etc/environment`）：
+  ```bash
+  # /etc/systemd/system/pproxy.service.d/override.conf 或 gate-server 环境
+  [Service]
+  Environment="USER_VERIFYING_KEY=8f14e45fceea167a5a36dedd4bea2543..."
+  ```
+- **配置生效验证**：
+  ```bash
+  # 验证轻量 gate-server 日志回显
+  journalctl -u gate-server -n 20 | grep "User Token Verifier enabled"
+  ```
+
+### 3. 租户令牌签发与撤销热生效
+
+#### 3.1 签发租户商业化令牌
+在离线管理机执行命令（私钥自动参与签名）：
+```bash
+# 签发 30 天有效、配额 50GB、最大 3 并发的租户令牌
+pproxy user add alice --quota 50G --expires-days 30 --max-conns 3
+```
+
+#### 3.2 撤销令牌 / 封禁租户热生效
+当租户逾期、滥用或凭据泄露时，执行撤销命令。系统支持传入完整令牌（`usr_live_...`）或指定用户名（`username`）：
+
+```bash
+# 导出网关管理鉴权口令（与网关部署环境变量 GATE_ADMIN_TOKEN 保持一致）
+export GATE_ADMIN_TOKEN="your_secure_gate_admin_token"
+export GATE_ADMIN="http://127.0.0.1:3101"   # 若网关在远端则配置对端地址
+
+# 执行撤销
+pproxy user revoke usr_live_3fa85f6476104b2f90a9866572e9d81a
+# 或按用户名撤销
+pproxy user revoke alice
+```
+
+#### 3.3 验证热生效
+1. **CLI 回显核验**：
+   ```
+   落盘路径:   /home/user/.pony/revoked_tokens.txt
+   网关热更新: 已生效 ✓ (http://127.0.0.1:3101)
+   ```
+2. **网关端点直接验证**：
+   向网关管理接口发起热撤销推送：
+   ```bash
+   curl -i -X POST http://127.0.0.1:3101/api/user/revoke \
+     -H "Authorization: Bearer ${GATE_ADMIN_TOKEN}" \
+     -H "Content-Type: application/json" \
+     -d '{"identifier": "usr_alice"}'
+   # 期望返回: HTTP/1.1 200 OK，{"ok":true,"identifier":"usr_alice"}
+   ```
+3. **数据面拦截验证**：
+   持已撤销令牌请求用户 Profile 或建立代理连接：
+   ```bash
+   curl -i http://127.0.0.1:3101/api/user/profile \
+     -H "Authorization: Bearer usr_live_..."
+   # 期望返回: HTTP/1.1 401 Unauthorized
+   ```
+
+---
+
+## Local HA Forwarder 运维指引
+
+Local HA Forwarder 是 pproxy 内置的原生本地高可用分发桩，用于彻底消除本地 AI 工具链（如 ponyllm、IDE 插件、自动化流水线）对单机 pproxy 进程重启、崩溃或升级时的单点故障敏感。
+
+### 1. 端口职责分工与架构设计
+
+| 端口 | 监听模式 | 进程属主 | 职责分工 |
+|------|---------|---------|---------|
+| `8899` | 外部稳定入口（`127.0.0.1:8899` 或 `0.0.0.0:8899`） | `ha-forwarder` 独立守护进程（PID 文件 `~/.pony/ha-forwarder.pid`） | **对外常驻统一门面**：ponyllm 与客户端配置唯一连接目标。与主引擎生命周期隔离，引擎重启或升级时端口永不关闭、连接不 reset。 |
+| `18899` | 内部核心数据面（`0.0.0.0:18899`） | `pproxy serve` 主服务进程 | **实际代理运算引擎**：承载真实路由转发、出海 WebSocket 隧道连接、SQLite 统计与限流逻辑；供本地 ha-forwarder 零延迟转发及集群对等节点跨机互联。 |
+
+### 2. 工作原理与故障转移（Failover）
+
+1. **零延迟直通（正常态）**：
+   `ha-forwarder` 维持后台异步探活（每 300ms 探测一次 `127.0.0.1:18899`）。正常情况下请求以 0ms 关键路径延迟直连本地 18899 引擎，零多余等待。
+2. **零毫秒故障转移（异常态）**：
+   当 `pproxy serve` 发生 SIGKILL、OOM 崩溃或热升级下线时，探活熔断器立即切断本地路由，后续接入请求 0 延迟秒级重定向至 `PPROXY_CLUSTER_PEERS` 或 `cluster.json` 内的远程备灾节点，同时注入带有 HMAC 签名的 `X-Pony-Cluster-Ticket` 凭据。
+3. **无缝自愈回切**：
+   本地引擎恢复监听后，熔断器自动重置，流量无缝回归本地，零人工介入。
+
+### 3. 环境变量配置与启动方式
+
+#### 3.1 环境变量与配置来源
+- **候选对等节点**：
+  优先读取环境变量 `PPROXY_CLUSTER_PEERS`（支持逗号/分号分隔的 SocketAddr，例如 `100.64.0.2:18899,100.64.0.3:18899`）；若未配置则回退至 `~/.pony/cluster.json` 中的 `seed_addr`。
+- **集群机器鉴权密钥**：
+  环境变量 `PPROXY_CLUSTER_KEY`（或从 `cluster.json` 读取 `cluster_auth_key`），用于跨节点故障转移时生成安全集群票证。
+
+#### 3.2 生产环境 systemd 配置示例
+在部署机创建 drop-in 配置 `/etc/systemd/system/pproxy.service.d/ha.conf`：
+```ini
+[Service]
+Environment="PPROXY_CLUSTER_PEERS=100.64.0.2:18899,100.64.0.3:18899"
+Environment="PPROXY_CLUSTER_KEY=0123456789abcdef0123456789abcdef"
+```
+
+加载配置并启动：
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart pproxy
+```
+
+### 4. 运行验证与故障演练
+
+#### 4.1 端口与进程双重检查
+```bash
+# 验证 8899 与 18899 同时处于 LISTEN 状态
+ss -tlnp | grep -E '8899|18899'
+# 期望：
+# LISTEN  0  512  127.0.0.1:8899   (pproxy ha-forwarder)
+# LISTEN  0  512  0.0.0.0:18899    (pproxy serve)
+
+# 验证 PID 记录文件
+cat ~/.pony/ha-forwarder.pid
+```
+
+#### 4.2 业务入口探活
+```bash
+# 请求对外 8899 入口，验证数据面返回
+curl -s http://127.0.0.1:8899/ | head -c 100
+```
+
+#### 4.3 模拟引擎下线演练（零停机验证）
+```bash
+# 1. 模拟杀掉 18899 主引擎进程（模拟崩溃或升级）
+fuser -k -9 18899/tcp
+
+# 2. 立即请求 8899 门面端口，验证自动 failover 到远端备灾节点（TCP 端口依然联通）
+curl -s -w "\nHTTP_CODE: %{http_code}\n" http://127.0.0.1:8899/
+
+# 3. 重启恢复主服务
+sudo systemctl restart pproxy
+```

@@ -96,6 +96,7 @@ Header: X-Proxy-Secret: <vercel secret>
 | 状态码 | 来源 | 含义 |
 |--------|------|------|
 | 401 unauthorized | 网关 | token 缺失/无效/撤销/过期（同体防枚举） |
+| 401 unauthorized | 轻量 Gate | 用户 Token 已被撤销或签名验签不匹配 |
 | 407 proxy_authentication_required | 正向代理 | CONNECT 隧道缺少或包含错误 Proxy-Authorization / Token |
 | 403 no_tunnel_route | 正向代理 | CONNECT 目标 host 未在 Allowlist 白名单中 |
 | 429 too_many_requests | 门禁 | 暴力破解多次失败触发 Gatekeeper IP 临时封锁 |
