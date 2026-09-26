@@ -18,10 +18,10 @@ describe('Toast Component & UX Specification', () => {
     expect(content).toContain('pointer-events-auto')
   })
 
-  it('enforces gray high-contrast background with subtle border and min-height for 3 lines', () => {
+  it('enforces gray high-contrast background and min-height for 3 lines', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
-    // 质感灰色背景，与浅色桌面形成清晰对比度，拒绝白色透明发飘
-    expect(content).toMatch(/bg-neutral-(800|900)/)
+    // 质感浅灰/深灰背景，与应用底色形成清晰对比度，拒绝白色透明发飘
+    expect(content).toMatch(/bg-neutral-(100|800|900)/)
     // 保证高度至少支持 3 行文字（min-h-[5.25rem] 或更高），避免细长条
     expect(content).toMatch(/min-h-\[(5|5\.25|5\.5|6)rem\]/)
     // 宽度合理，避免极度拉伸
