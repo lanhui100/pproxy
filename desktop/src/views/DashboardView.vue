@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
-  Check,
   Power,
   RefreshCw,
   Server,
@@ -10,7 +9,6 @@ import {
   Zap,
 } from '@lucide/vue'
 import LatencyBars from '@/components/common/LatencyBars.vue'
-import InfoTip from '@/components/common/InfoTip.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -54,7 +52,6 @@ const configInfo = ref<{
 // 新手向导状态
 const setupTab = ref<'direct' | 'chained'>('direct')
 const cfToken = ref('')
-const GATE_INPUT_TIP = '用于开通出口通道。支持粘贴 pony-gate:// 口令或授权码。由服务管理员提供。'
 const syncUriInput = ref('')
 const syncPassphrase = ref('')
 const remoteHost = ref('')
@@ -701,185 +698,128 @@ async function submitImportOrChained() {
 
 <template>
   <div class="h-full overflow-y-auto p-6 max-w-4xl mx-auto">
-    <!-- 初始设置向导：选方案 → 填凭据 → 开启 -->
-    <div v-if="!isConfigured" class="space-y-6 py-2">
+    <!-- 初始设置向导：极简接入（主输入令牌接入，下方弱化显示接入其他代理） -->
+    <div v-if="!isConfigured" class="space-y-6 py-6 max-w-lg mx-auto">
       <div class="text-center space-y-2">
         <span class="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
           <Sparkles class="h-3 w-3" />
-          初始设置
+          快速接入
         </span>
         <h1 class="text-2xl font-bold tracking-tight text-foreground">欢迎使用 Pony Proxy</h1>
-        <p class="text-sm text-muted-foreground">两步完成配置，立即开启加速</p>
+        <p class="text-sm text-muted-foreground">输入接入令牌，立即开启专属智能加速</p>
       </div>
 
-      <!-- 第 1 步：选择连接方式 -->
-      <div class="space-y-2">
-        <div class="text-xs font-medium text-muted-foreground">第 1 步 · 选择连接方式</div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <!-- 核心接入卡片：极简输入接入令牌 -->
+      <Card v-if="setupTab === 'direct'" class="border-border shadow-sm">
+        <CardContent class="pt-6 space-y-4">
+          <div class="space-y-2">
+            <Label class="text-xs font-medium flex items-center justify-between">
+              <span>接入令牌</span>
+              <span class="text-[11px] text-muted-foreground font-normal">支持 pony-gate:// 口令或授权码</span>
+            </Label>
+            <Input
+              v-model="cfToken"
+              type="password"
+              placeholder="粘贴接入令牌 / 授权码"
+              class="font-mono text-sm h-11"
+              autofocus
+              @keyup.enter="submitDirectSetup"
+            />
+          </div>
+
+          <p class="text-xs text-muted-foreground flex items-center gap-1.5">
+            <ShieldCheck class="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+            仅保存在本机系统凭据库，自动获取与同步出海隧道
+          </p>
+
+          <Button
+            @click="submitDirectSetup"
+            :disabled="isSubmitting || !cfToken.trim()"
+            class="w-full h-11 text-sm font-semibold"
+          >
+            <Zap v-if="!isSubmitting" class="h-4 w-4 mr-2" />
+            <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
+            {{ isSubmitting ? '正在连接…' : '立即开启加速' }}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <!-- 次级方案：接入其他远端代理（较弱显示） -->
+      <Card v-else class="border-border shadow-sm">
+        <CardHeader class="pb-3 flex flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle class="text-sm font-semibold">连接自建或远端代理</CardTitle>
+            <CardDescription class="text-xs mt-0.5">支持一键同步口令或手动输入服务器</CardDescription>
+          </div>
           <button
+            type="button"
             @click="setupTab = 'direct'"
-            :class="[
-              'relative rounded-xl border p-4 text-left transition-all',
-              setupTab === 'direct'
-                ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                : 'border-border bg-card hover:border-muted-foreground/40',
-            ]"
+            class="text-xs text-primary hover:underline cursor-pointer"
           >
-            <Check
-              v-if="setupTab === 'direct'"
-              class="absolute right-3 top-3 h-4 w-4 text-primary"
-            />
-            <div class="flex items-center gap-3">
-              <div
-                :class="[
-                  'rounded-lg p-2',
-                  setupTab === 'direct' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
-                ]"
-              >
-                <Sparkles class="h-4 w-4" />
-              </div>
-              <div>
-                <div class="text-sm font-semibold flex items-center gap-1.5">
-                  个人独立加速
-                  <span class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">推荐</span>
-                </div>
-                <div class="text-xs text-muted-foreground mt-0.5">粘贴授权码，开通 Cloudflare / Vercel 双出口</div>
-              </div>
-            </div>
+            返回令牌接入
           </button>
+        </CardHeader>
+        <CardContent class="space-y-4">
+          <div class="space-y-1.5">
+            <Label class="text-xs font-medium">一键连接口令</Label>
+            <Input
+              v-model="syncUriInput"
+              placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
+              class="font-mono text-xs"
+              @keyup.enter="submitImportOrChained"
+            />
+            <Input
+              v-model="syncPassphrase"
+              type="password"
+              placeholder="同步口令（可选）"
+              class="font-mono text-xs"
+              @keyup.enter="submitImportOrChained"
+            />
+          </div>
 
-          <button
-            @click="setupTab = 'chained'"
-            :class="[
-              'relative rounded-xl border p-4 text-left transition-all',
-              setupTab === 'chained'
-                ? 'border-primary bg-primary/5 ring-1 ring-primary'
-                : 'border-border bg-card hover:border-muted-foreground/40',
-            ]"
+          <div class="relative flex items-center">
+            <div class="flex-grow border-t border-border"></div>
+            <span class="flex-shrink mx-4 text-xs text-muted-foreground">或手动填写</span>
+            <div class="flex-grow border-t border-border"></div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div class="col-span-2 space-y-1.5">
+              <Label class="text-xs">服务器地址</Label>
+              <Input v-model="remoteHost" placeholder="IP 或域名 : 端口" class="text-sm" @keyup.enter="submitImportOrChained" />
+            </div>
+            <div class="space-y-1.5">
+              <Label class="text-xs">用户名</Label>
+              <Input v-model="remoteUser" placeholder="用户名" class="text-sm" @keyup.enter="submitImportOrChained" />
+            </div>
+            <div class="space-y-1.5">
+              <Label class="text-xs">密码</Label>
+              <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" @keyup.enter="submitImportOrChained" />
+            </div>
+          </div>
+
+          <Button
+            @click="submitImportOrChained"
+            :disabled="isSubmitting || (!syncUriInput.trim() && !remoteHost.trim())"
+            class="w-full h-10 text-sm font-medium"
           >
-            <Check
-              v-if="setupTab === 'chained'"
-              class="absolute right-3 top-3 h-4 w-4 text-primary"
-            />
-            <div class="flex items-center gap-3">
-              <div
-                :class="[
-                  'rounded-lg p-2',
-                  setupTab === 'chained' ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground',
-                ]"
-              >
-                <Server class="h-4 w-4" />
-              </div>
-              <div>
-                <div class="text-sm font-semibold">连接远端代理</div>
-                <div class="text-xs text-muted-foreground mt-0.5">粘贴同步口令，或连接自己的服务器</div>
-              </div>
-            </div>
-          </button>
-        </div>
-      </div>
+            <Server v-if="!isSubmitting" class="h-4 w-4 mr-2" />
+            <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
+            {{ isSubmitting ? '正在验证…' : '连接' }}
+          </Button>
+        </CardContent>
+      </Card>
 
-      <!-- 第 2 步：完成授权 -->
-      <div class="space-y-2">
-        <div class="text-xs font-medium text-muted-foreground">第 2 步 · 完成授权</div>
-
-        <!-- 方案 A：授权码（一枚令牌同时开通 CF / Vercel 双出口） -->
-        <Card v-if="setupTab === 'direct'" class="border-border shadow-sm">
-          <CardHeader class="pb-3">
-            <CardTitle class="text-base">个人独立加速</CardTitle>
-            <CardDescription>一枚授权码同时开通 Cloudflare 与 Vercel 双出口，自动故障切换</CardDescription>
-          </CardHeader>
-          <CardContent class="space-y-3">
-            <div class="space-y-1.5">
-              <div class="flex items-center justify-between">
-                <Label class="text-xs font-medium flex items-center gap-1">
-                  隧道令牌
-                  <InfoTip :text="GATE_INPUT_TIP" />
-                </Label>
-              </div>
-              <Input
-                v-model="cfToken"
-                type="password"
-                placeholder="粘贴 pony-gate:// 连接口令，或仅粘贴授权码"
-                class="font-mono text-sm"
-                @keyup.enter="submitDirectSetup"
-              />
-            </div>
-            <p class="text-xs text-muted-foreground flex items-center gap-1.5">
-              <ShieldCheck class="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-              仅保存在本机系统凭据管理器，绝不上传
-            </p>
-            <Button
-              @click="submitDirectSetup"
-              :disabled="isSubmitting || !cfToken.trim()"
-              class="w-full h-11 text-sm font-semibold"
-            >
-              <Zap v-if="!isSubmitting" class="h-4 w-4 mr-2" />
-              <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
-              {{ isSubmitting ? '正在初始化…' : '开启加速' }}
-            </Button>
-          </CardContent>
-        </Card>
-
-        <!-- 方案 B：口令导入或手动连接 -->
-        <Card v-if="setupTab === 'chained'" class="border-border shadow-sm">
-          <CardHeader class="pb-3">
-            <CardTitle class="text-base">连接远端代理</CardTitle>
-            <CardDescription>粘贴同步口令，或手动填写服务器参数</CardDescription>
-          </CardHeader>
-          <CardContent class="space-y-4">
-            <div class="space-y-1.5">
-              <Label class="text-xs font-medium">一键连接口令</Label>
-              <Input
-                v-model="syncUriInput"
-                placeholder="粘贴 pproxy-sync:// 或 pproxy:// 口令"
-                class="font-mono text-xs"
-                @keyup.enter="submitImportOrChained"
-              />
-              <Input
-                v-model="syncPassphrase"
-                type="password"
-                placeholder="同步口令（pproxy-sync:// 导出时生成，可留空）"
-                class="font-mono text-xs"
-                @keyup.enter="submitImportOrChained"
-              />
-              <p class="text-xs text-muted-foreground">
-                由 Linux Server 的 <code>pproxy user add</code> 或 <code>pproxy sync export</code> 导出
-              </p>
-            </div>
-
-            <div class="relative flex items-center">
-              <div class="flex-grow border-t border-border"></div>
-              <span class="flex-shrink mx-4 text-xs text-muted-foreground">或手动填写</span>
-              <div class="flex-grow border-t border-border"></div>
-            </div>
-
-            <div class="grid grid-cols-2 gap-3">
-              <div class="col-span-2 space-y-1.5">
-                <Label class="text-xs">服务器地址</Label>
-                <Input v-model="remoteHost" placeholder="IP 或域名 : 端口，如 192.168.1.100:8899" class="text-sm" @keyup.enter="submitImportOrChained" />
-              </div>
-              <div class="space-y-1.5">
-                <Label class="text-xs">用户名</Label>
-                <Input v-model="remoteUser" placeholder="用户名" class="text-sm" @keyup.enter="submitImportOrChained" />
-              </div>
-              <div class="space-y-1.5">
-                <Label class="text-xs">密码</Label>
-                <Input v-model="remotePass" type="password" placeholder="密码" class="text-sm" @keyup.enter="submitImportOrChained" />
-              </div>
-            </div>
-
-            <Button
-              @click="submitImportOrChained"
-              :disabled="isSubmitting || (!syncUriInput.trim() && !remoteHost.trim())"
-              class="w-full h-11 text-sm font-semibold"
-            >
-              <Server v-if="!isSubmitting" class="h-4 w-4 mr-2" />
-              <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
-              {{ isSubmitting ? '正在验证连接…' : '连接并开启加速' }}
-            </Button>
-          </CardContent>
-        </Card>
+      <!-- 较弱显示的接入其他代理入口 -->
+      <div v-if="setupTab === 'direct'" class="text-center pt-2">
+        <button
+          type="button"
+          @click="setupTab = 'chained'"
+          class="text-xs text-muted-foreground/75 hover:text-foreground inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+        >
+          <Server class="h-3.5 w-3.5" />
+          <span>接入自建服务器或其他远端代理</span>
+        </button>
       </div>
     </div>
 

@@ -32,11 +32,10 @@ describe('UI/UX Specification Checks', () => {
     expect(content).not.toContain('方案 A')
     expect(content).not.toContain('方案 B')
 
-    // 字段精简化
-    expect(content).toContain('隧道令牌')
+    // 字段精简化（设置页极净化改造：隧道由系统自动获取，不再需要单独展示与修改隧道端点）
+    expect(content).toContain('接入令牌')
     expect(content).not.toContain('连接口令 / 加速授权码')
-    expect(content).toContain('隧道端点')
-    expect(content).not.toContain('隧道中继端点与令牌')
+    expect(content).not.toContain('修改隧道端点')
     expect(content).toContain('同步口令')
     expect(content).not.toContain('口令一键导入 (多端同步)')
     expect(content).toContain('服务器配置')

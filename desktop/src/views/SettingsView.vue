@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   Check,
   Copy,
@@ -31,28 +32,23 @@ import {
   initCurrentVersion,
 } from '@/composables/useUpdater'
 import {
-  GATE_KIND_TEXT,
   clearTunnelToken,
   importConnectCode,
   isTauri,
-  isValidTunnelUrl,
   loadAutoProxyConfig,
   loadTunnelConfig,
   parseGateInput,
   saveAutoProxyConfig,
-  saveTunnelConfig,
   saveTunnelToken,
-  tunnelSelfCheck,
-  type TunnelSelfCheck,
 } from '@/lib/config'
 import InfoTip from '@/components/common/InfoTip.vue'
 import { buildAccessUrlDev, cleanDomainInput, type AccessUrlResult } from '@/lib/urls'
 
 const toast = useToast()
+const router = useRouter()
 
 // ---- Tooltip 简明说明（去技术黑话） ----
-const GATE_INPUT_TIP = '用于开通出口通道。支持粘贴 pony-gate:// 口令或授权码。由服务管理员提供。'
-const TUNNEL_URL_TIP = '出网通道接入点地址，默认已优化，通常保持默认即可。'
+const GATE_INPUT_TIP = '用于接入服务端或授权集群。支持粘贴接入令牌、授权码或连接口令。'
 const SYNC_URI_TIP = '粘贴 pproxy-sync:// 或 pproxy:// 口令，一键同步节点配置与凭据。'
 const REMOTE_PASS_TIP = '自建服务器认证密码，仅保存在本机系统凭据库。'
 const API_TOKEN_TIP = '用于调用本地 API 代理的访问密钥（形如 pony_xxx）。由服务提供方提供。'
@@ -60,7 +56,6 @@ const ACCESS_URL_TIP = '输入模型 base_url（如 api.openai.com/v1），自�
 
 // ---- 输入框 Ref 引用（用于进入编辑态时自动聚焦） ----
 const gateInputRef = ref<HTMLInputElement | null>(null)
-const tunnelUrlInputRef = ref<HTMLInputElement | null>(null)
 const importSyncInputRef = ref<HTMLInputElement | null>(null)
 const remoteHostInputRef = ref<HTMLInputElement | null>(null)
 const whitelistInputRef = ref<HTMLInputElement | null>(null)
@@ -78,7 +73,6 @@ const confirmingClearApiToken = ref(false)
 
 function closeAllEditing(): void {
   isEditingGate.value = false
-  isEditingTunnelUrl.value = false
   isImportingSync.value = false
   isEditingRemote.value = false
   isAddingWhitelist.value = false
@@ -319,13 +313,9 @@ async function copyAccessUrl(kind: 'local' | 'public'): Promise<void> {
 }
 
 // ---- 隧道通道与令牌 ----
-const tunnelUrlInput = ref('')
-const tunnelUrlEditInput = ref('')
-const isEditingTunnelUrl = ref(false)
 const tunnelHasToken = ref(false)
 const tunnelCredError = ref<string | null>(null)
 const tunnelFingerprint = ref<string | null>(null)
-const tunnelSaving = ref(false)
 // P0：常态隧道行扩展展示（分叉徽标 / 数据目录 / cleared 时间线）
 const tunnelFpFallback = ref<string | null>(null)
 const tunnelFpKeyring = ref<string | null>(null)
@@ -335,14 +325,9 @@ const tunnelDataDirTmpFallback = ref(false)
 const tunnelCredSource = ref<string | null>(null)
 const tunnelCredWriteTs = ref<number | null>(null)
 
-const tunnelDiverged = () =>
-  Boolean(tunnelFpFallback.value && tunnelFpKeyring.value && tunnelFpFallback.value !== tunnelFpKeyring.value)
-
 async function refreshTunnel(): Promise<void> {
   try {
     const c = await loadTunnelConfig()
-    tunnelUrlInput.value = c.url
-    tunnelUrlEditInput.value = c.url
     tunnelHasToken.value = c.hasToken
     tunnelCredError.value = c.credError ?? null
     tunnelFingerprint.value = c.fingerprint ?? null
@@ -366,44 +351,9 @@ function formatClearedTime(ts: number | null): string {
   }
 }
 
-function startEditTunnelUrl(): void {
-  closeAllEditing()
-  tunnelUrlEditInput.value = tunnelUrlInput.value
-  isEditingTunnelUrl.value = true
-  void nextTick(() => tunnelUrlInputRef.value?.focus())
-}
-
-function cancelEditTunnelUrl(): void {
-  tunnelUrlEditInput.value = tunnelUrlInput.value
-  isEditingTunnelUrl.value = false
-}
-
-async function saveTunnel(): Promise<void> {
-  if (tunnelSaving.value) return
-  const val = tunnelUrlEditInput.value.trim()
-  if (!isValidTunnelUrl(val)) {
-    toast.error('隧道端点必须以 wss:// 或 ws:// 开头且不含空白')
-    return
-  }
-  tunnelSaving.value = true
-  try {
-    await saveTunnelConfig(val, '')
-    tunnelUrlInput.value = val
-    isEditingTunnelUrl.value = false
-    await refreshTunnel()
-    toast.success('隧道端点已保存，重新开启代理后生效，建议跑一次通道自检')
-  } catch (e: any) {
-    toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message))
-  } finally {
-    tunnelSaving.value = false
-  }
-}
-
 const gateInput = ref('')
 const isEditingGate = ref(false)
 const gateSaving = ref(false)
-const selfCheck = ref<TunnelSelfCheck | null>(null)
-const selfChecking = ref(false)
 
 function startEditGate(): void {
   closeAllEditing()
@@ -444,7 +394,6 @@ async function submitGateInput(): Promise<void> {
     }
     gateInput.value = ''
     isEditingGate.value = false
-    selfCheck.value = null // 写后旧探测失效（旧 token 结果不得展示在新 token 下）
     await refreshTunnel()
   } catch (e: any) {
     toast.error('保存失败: ' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
@@ -453,32 +402,22 @@ async function submitGateInput(): Promise<void> {
   }
 }
 
-async function runSelfCheck(): Promise<void> {
-  if (selfChecking.value) return
-  if (!tunnelHasToken.value) {
-    toast.info('尚未配置隧道令牌', '请先配置并保存隧道令牌后再进行自检')
-    return
-  }
-  selfChecking.value = true
-  try {
-    selfCheck.value = await tunnelSelfCheck()
-  } catch (e: any) {
-    toast.error('自检失败: ' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
-  } finally {
-    selfChecking.value = false
-  }
-}
-
 async function clearTunnelTokenAction(): Promise<void> {
   try {
     await clearTunnelToken()
+    if (isTauri()) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('proxy_disable')
+      } catch {}
+    }
     gateInput.value = ''
     isEditingGate.value = false
     tunnelHasToken.value = false
     tunnelFingerprint.value = null
     confirmingClearTunnel.value = false
-    toast.success('已清除隧道令牌')
-    await refreshTunnel()
+    toast.success('已清除接入令牌，已返回接入页面')
+    await router.push('/')
   } catch (e: any) {
     confirmingClearTunnel.value = false
     toast.error('清除失败: ' + (typeof e === 'string' ? e : e?.message ?? '未知错误'))
@@ -770,84 +709,63 @@ onMounted(async () => {
           <div v-if="!isTauri()" class="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
             开发模拟·自检恒绿
           </div>
-          <!-- 隧道令牌 -->
+          <!-- 接入令牌（极简化，隧道端点由令牌内嵌/系统内置自动获取，不展示冗余端点） -->
           <div class="space-y-2">
             <!-- 常态展示：非输入态 -->
             <div v-if="!isEditingGate" class="flex items-center justify-between gap-4 py-1">
               <div class="space-y-0.5 min-w-0">
                 <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
-                  隧道令牌
+                  接入令牌
                   <InfoTip :text="GATE_INPUT_TIP" />
                 </div>
                 <div class="text-[11px] text-muted-foreground flex items-center gap-2 flex-wrap">
                   <span v-if="tunnelCredError" class="text-rose-500 font-mono">{{ tunnelCredError }}</span>
                   <span v-else-if="tunnelFingerprint" class="font-mono">指纹 sha256:{{ tunnelFingerprint }}…</span>
-                  <span v-else-if="tunnelHasToken">已配置</span>
+                  <span v-else-if="tunnelHasToken" class="text-emerald-600 dark:text-emerald-400 font-medium">已接入</span>
                   <span v-else class="text-muted-foreground/80">未配置</span>
-                  <span v-if="tunnelDiverged()" class="rounded bg-amber-500/15 border border-amber-500/30 px-1.5 py-px text-amber-600 dark:text-amber-400 font-mono">
-                    {{ tunnelCredWinner === 'fallback(diverged-unhealed)' ? '备份≠主，需人工裁决（未自动覆盖）' : '备份≠主，已按主修复' }}{{ tunnelCredWinner ? ` · ${tunnelCredWinner}` : '' }}
-                  </span>
                   <span v-if="tunnelCredSource && tunnelCredSource.includes('cleared')" class="font-mono">
                     已清除{{ tunnelCredWriteTs !== null ? `（${formatClearedTime(tunnelCredWriteTs)}）` : '' }}
                   </span>
                 </div>
-                <div v-if="tunnelDataDir" class="text-[11px] text-muted-foreground/80 font-mono truncate">
-                  {{ tunnelDataDir }}
-                </div>
-                <div v-if="tunnelDataDirTmpFallback" class="text-[11px] text-rose-500">
-                  数据目录走了临时回退，重启可能丢失，请检查 APPDATA
-                </div>
               </div>
               <div class="flex items-center gap-1 shrink-0">
-                <!-- 自检按钮：未配置时禁用并提示，避免未配置触发报红 -->
-                <button
-                  type="button"
-                  @click="runSelfCheck"
-                  :disabled="selfChecking || !tunnelHasToken"
-                  :title="tunnelHasToken ? '通道自检' : '请先配置隧道令牌'"
-                  aria-label="通道自检"
-                  class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-                >
-                  <RefreshCw class="size-3.5" :class="{ 'animate-spin': selfChecking }" />
-                </button>
-
-                <!-- 清除令牌：带二次确认，杜绝误触销毁凭据 -->
+                <!-- 清除/删除接入令牌：带二次确认，删除后立即回退到极简接入页面 -->
                 <div v-if="tunnelHasToken" class="inline-flex items-center">
                   <div v-if="confirmingClearTunnel" class="flex items-center gap-1.5 bg-background px-2 py-0.5 rounded-md border border-rose-500/30 text-[11px]">
-                    <span class="text-rose-500 font-medium">确定清除？</span>
+                    <span class="text-rose-500 font-medium">确定删除令牌？</span>
                     <button
                       type="button"
                       @click="clearTunnelTokenAction"
                       class="text-rose-600 font-medium hover:underline cursor-pointer focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
                     >
-                      是
+                      删除
                     </button>
                     <button
                       type="button"
                       @click="confirmingClearTunnel = false"
                       class="text-muted-foreground hover:underline cursor-pointer ml-0.5 focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
                     >
-                      否
+                      取消
                     </button>
                   </div>
                   <button
                     v-else
                     type="button"
                     @click="confirmingClearTunnel = true"
-                    title="清除令牌"
-                    aria-label="清除令牌"
+                    title="删除接入令牌"
+                    aria-label="删除接入令牌"
                     class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-rose-500 hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
                   >
                     <Trash2 class="size-3.5" />
                   </button>
                 </div>
 
-                <!-- 编辑按钮 -->
+                <!-- 编辑/更换令牌按钮 -->
                 <button
                   type="button"
                   @click="startEditGate"
-                  title="修改隧道令牌"
-                  aria-label="修改隧道令牌"
+                  title="更换接入令牌"
+                  aria-label="更换接入令牌"
                   class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
                 >
                   <Pencil class="size-3.5" />
@@ -858,7 +776,7 @@ onMounted(async () => {
             <!-- 编辑态：带自动聚焦、Enter 保存、Esc 取消 -->
             <div v-else class="space-y-2 py-1">
               <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
-                修改隧道令牌
+                输入接入令牌
                 <InfoTip :text="GATE_INPUT_TIP" />
               </div>
               <div class="flex items-center gap-2">
@@ -866,7 +784,7 @@ onMounted(async () => {
                   ref="gateInputRef"
                   v-model="gateInput"
                   type="password"
-                  placeholder="粘贴 pony-gate:// 连接口令，或直接粘贴授权码"
+                  placeholder="粘贴接入令牌 / 授权码"
                   class="font-mono text-xs h-8 bg-background"
                   @keyup.enter="submitGateInput"
                   @keydown.esc="cancelEditGate"
@@ -885,91 +803,6 @@ onMounted(async () => {
                 <button
                   type="button"
                   @click="cancelEditGate"
-                  title="取消 (Esc)"
-                  aria-label="取消"
-                  class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-                >
-                  <X class="size-3.5" />
-                </button>
-              </div>
-            </div>
-
-            <!-- 自检结果展示 -->
-            <div v-if="selfCheck" class="rounded-lg bg-background/50 px-3 py-2 space-y-1 text-[11px] font-mono">
-              <div v-if="selfCheck.credError" class="text-rose-500">{{ selfCheck.credError }}</div>
-              <div v-for="g in selfCheck.gates" :key="g.url" class="flex items-center justify-between gap-2">
-                <span class="text-muted-foreground">{{ g.name === 'rn' ? '出口R' : g.name === 'cf' ? '出口C' : '出口V' }}</span>
-                <span class="text-muted-foreground">{{ g.kind ? (GATE_KIND_TEXT[g.kind] ?? GATE_KIND_TEXT.other) : '' }}</span>
-                <span v-if="g.kindUpgrade || g.kindBind" class="text-muted-foreground">Upgrade:{{ g.kindUpgrade ?? '-' }} / 首帧:{{ g.kindBind ?? '-' }}</span>
-                <span v-if="g.ok" class="text-foreground">{{ typeof g.ms === 'number' ? `正常 · ${g.ms}ms` : '正常' }}</span>
-                <span v-else class="text-rose-500 truncate max-w-56" :title="g.error">失败 · {{ g.error }}</span>
-              </div>
-              <!-- P0/E4：本地凭据分叉告警（H2 实锤——fallback 与 keyring 不一致） -->
-              <div
-                v-if="selfCheck.fpFallback && selfCheck.fpKeyring && selfCheck.fpFallback !== selfCheck.fpKeyring"
-                class="text-amber-500"
-              >
-                本地凭据分叉：备份({{ selfCheck.fpFallback }})≠主({{ selfCheck.fpKeyring }})，{{ selfCheck.credWinner === 'fallback(diverged-unhealed)' ? '需人工裁决，未自动覆盖，重贴授权码可彻底统一' : '已按主修复，重贴授权码可彻底统一' }}
-              </div>
-              <div v-if="selfCheck.credMeta?.fp8" class="text-muted-foreground">
-                上次写入：{{ selfCheck.credMeta.source }} · {{ selfCheck.credMeta.fp8 }}
-              </div>
-            </div>
-          </div>
-
-          <!-- 隧道端点 -->
-          <div class="border-t border-border/30 pt-3">
-            <div v-if="!isEditingTunnelUrl" class="flex items-center justify-between gap-4 py-1">
-              <div class="space-y-0.5 min-w-0">
-                <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
-                  隧道端点
-                  <InfoTip :text="TUNNEL_URL_TIP" />
-                </div>
-                <div class="text-[11px] text-muted-foreground font-mono truncate">
-                  {{ tunnelUrlInput && !tunnelUrlInput.includes('example.com') && !tunnelUrlInput.includes('searchxai') ? tunnelUrlInput : '系统内置加速通道集群 (出口R / 出口C / 出口V 动态容灾)' }}
-                </div>
-              </div>
-              <div class="flex items-center gap-1 shrink-0">
-                <button
-                  type="button"
-                  @click="startEditTunnelUrl"
-                  title="修改隧道端点"
-                  aria-label="修改隧道端点"
-                  class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-                >
-                  <Pencil class="size-3.5" />
-                </button>
-              </div>
-            </div>
-
-            <div v-else class="space-y-2 py-1">
-              <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
-                修改隧道端点
-                <InfoTip :text="TUNNEL_URL_TIP" />
-              </div>
-              <div class="flex items-center gap-2">
-                <Input
-                  ref="tunnelUrlInputRef"
-                  v-model="tunnelUrlEditInput"
-                  placeholder="wss://gate.example.com/ws"
-                  class="font-mono text-xs h-8 bg-background"
-                  @keyup.enter="saveTunnel"
-                  @keydown.esc="cancelEditTunnelUrl"
-                />
-                <button
-                  type="button"
-                  @click="saveTunnel"
-                  :disabled="tunnelSaving || !tunnelUrlEditInput.trim()"
-                  title="保存 (Enter)"
-                  aria-label="保存"
-                  class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-                >
-                  <RefreshCw v-if="tunnelSaving" class="size-3.5 animate-spin" />
-                  <Check v-else class="size-3.5" />
-                </button>
-                <button
-                  type="button"
-                  @click="cancelEditTunnelUrl"
                   title="取消 (Esc)"
                   aria-label="取消"
                   class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
