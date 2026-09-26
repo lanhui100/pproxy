@@ -76,5 +76,26 @@ describe('UI/UX Specification Checks', () => {
     // 代理就绪后联动触发测速
     expect(content).toMatch(/!wasRunning && event\.payload\.on[\s\S]*?runAllTests/)
   })
+
+  it('DashboardView and App follow initial setup screen specifications', () => {
+    const dashContent = readFileSync(dashboardPath, 'utf-8')
+    const appContent = readFileSync(resolve(__dirname, '../App.vue'), 'utf-8')
+
+    // 1. 去除侧边栏，未配置时全屏居中展示
+    expect(appContent).toContain('v-if="isConfigured"')
+    expect(appContent).toContain(":class=\"isConfigured ? 'p-6 lg:p-8' : 'p-0 flex items-center justify-center'\"")
+
+    // 2. 极净化去除项
+    expect(dashContent).not.toContain('快速接入')
+    expect(dashContent).not.toContain('输入接入令牌，立即开启专属智能加速')
+    expect(dashContent).not.toContain('支持 pony-gate:// 口令或授权码')
+
+    // 3. 文案与引导占位
+    expect(dashContent).toContain('欢迎使用 Pony Proxy')
+    expect(dashContent).toContain('<span>粘贴令牌</span>')
+    expect(dashContent).toContain('placeholder="usr_live_***"')
+    expect(dashContent).toContain('立即接入')
+    expect(dashContent).not.toContain('立即开启加速')
+  })
 })
 

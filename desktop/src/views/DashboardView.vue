@@ -5,7 +5,6 @@ import {
   RefreshCw,
   Server,
   ShieldCheck,
-  Sparkles,
   Zap,
 } from '@lucide/vue'
 import LatencyBars from '@/components/common/LatencyBars.vue'
@@ -29,6 +28,7 @@ import {
   type SpeedSample,
 } from '@/lib/speedTracker'
 import { buildMergedUsageChart, formatBytes, localDateKey, localHourKey } from '@/lib/usageChart'
+import { isConfigured, setAppConfigured, refreshAppConfigured } from '@/composables/useAppConfig'
 
 const toast = useToast()
 
@@ -36,7 +36,6 @@ const toast = useToast()
 const isRunning = ref(false)
 const isToggling = ref(false)
 const proxyMode = ref<'whitelist' | 'global'>('whitelist')
-const isConfigured = ref(false)
 const configInfo = ref<{
   mode_type: string
   configured: boolean
@@ -636,7 +635,7 @@ onUnmounted(() => {
 
 async function refreshStatus() {
   if (!isTauri()) {
-    isConfigured.value = true
+    await refreshAppConfigured()
     isRunning.value = true
     return
   }
@@ -727,7 +726,7 @@ async function submitDirectSetup() {
         if (parsed.official === false) {
           // 非官方端点：只保留警示，不叠加成功 toast
           toast.info('已导入，但端点不是官方域名，请确认来源可信', res.url)
-          isConfigured.value = true
+          setAppConfigured(true)
           await refreshStatus()
           return
         }
@@ -741,7 +740,7 @@ async function submitDirectSetup() {
       })
     }
     toast.success('配置成功！已准备就绪。')
-    isConfigured.value = true
+    setAppConfigured(true)
     await refreshStatus()
     await toggleProxy()
   } catch (e: any) {
@@ -766,7 +765,7 @@ async function submitImportOrChained() {
       } else {
         toast.success('口令导入成功！')
       }
-      isConfigured.value = true
+      setAppConfigured(true)
       await refreshStatus()
       await toggleProxy()
     } catch (e: any) {
@@ -796,7 +795,7 @@ async function submitImportOrChained() {
         })
       }
       toast.success('远端代理已连接！')
-      isConfigured.value = true
+      setAppConfigured(true)
       await refreshStatus()
       await toggleProxy()
     } catch (e: any) {
@@ -811,16 +810,14 @@ async function submitImportOrChained() {
 </script>
 
 <template>
-  <div class="h-full overflow-y-auto p-6 max-w-4xl mx-auto">
+  <div
+    class="h-full overflow-y-auto"
+    :class="isConfigured ? 'p-6 max-w-4xl mx-auto' : 'p-6 w-full flex flex-col justify-center items-center'"
+  >
     <!-- 初始设置向导：极简接入（主输入令牌接入，下方弱化显示接入其他代理） -->
-    <div v-if="!isConfigured" class="space-y-6 py-6 max-w-lg mx-auto">
+    <div v-if="!isConfigured" class="w-full space-y-6 py-6 max-w-md mx-auto">
       <div class="text-center space-y-2">
-        <span class="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
-          <Sparkles class="h-3 w-3" />
-          快速接入
-        </span>
         <h1 class="text-2xl font-bold tracking-tight text-foreground">欢迎使用 Pony Proxy</h1>
-        <p class="text-sm text-muted-foreground">输入接入令牌，立即开启专属智能加速</p>
       </div>
 
       <!-- 核心接入卡片：极简输入接入令牌 -->
@@ -828,13 +825,12 @@ async function submitImportOrChained() {
         <CardContent class="pt-6 space-y-4">
           <div class="space-y-2">
             <Label class="text-xs font-medium flex items-center justify-between">
-              <span>接入令牌</span>
-              <span class="text-[11px] text-muted-foreground font-normal">支持 pony-gate:// 口令或授权码</span>
+              <span>粘贴令牌</span>
             </Label>
             <Input
               v-model="cfToken"
               type="password"
-              placeholder="粘贴接入令牌 / 授权码"
+              placeholder="usr_live_***"
               class="font-mono text-sm h-11"
               autofocus
               @keyup.enter="submitDirectSetup"
@@ -853,7 +849,7 @@ async function submitImportOrChained() {
           >
             <Zap v-if="!isSubmitting" class="h-4 w-4 mr-2" />
             <RefreshCw v-else class="h-4 w-4 mr-2 animate-spin" />
-            {{ isSubmitting ? '正在连接…' : '立即开启加速' }}
+            {{ isSubmitting ? '正在连接…' : '立即接入' }}
           </Button>
         </CardContent>
       </Card>

@@ -6,6 +6,7 @@ import { Gauge, Settings } from '@lucide/vue'
 
 import ToastHost from '@/components/common/ToastHost.vue'
 import { checkForUpdate, updateAvailable } from '@/composables/useUpdater'
+import { isConfigured, refreshAppConfigured } from '@/composables/useAppConfig'
 import { isTauri } from '@/lib/config'
 
 const route = useRoute()
@@ -30,6 +31,7 @@ function isActive(to: string): boolean {
 
 // M5 拓展：启动即检查更新（Tauri 环境；红点挂设置页签）
 void checkForUpdate()
+void refreshAppConfigured()
 
 onMounted(async () => {
   // 托盘隐藏气球已由 Rust 侧直接 show_balloon，前端仅可选监听 window-hidden-to-tray
@@ -46,7 +48,7 @@ onMounted(async () => {
 
 <template>
   <div class="flex h-screen">
-    <nav class="w-52 shrink-0 bg-card p-3">
+    <nav v-if="isConfigured" class="w-52 shrink-0 bg-card p-3">
       <div class="mb-5 px-2.5">
         <p class="text-sm font-semibold tracking-tight">Pony Proxy</p>
         <p class="mt-0.5 text-xs text-muted-foreground">个人代理网关</p>
@@ -71,8 +73,11 @@ onMounted(async () => {
         />
       </RouterLink>
     </nav>
-    <main class="flex-1 overflow-auto p-6 lg:p-8">
-      <div class="mx-auto max-w-4xl">
+    <main
+      class="flex-1 overflow-auto"
+      :class="isConfigured ? 'p-6 lg:p-8' : 'p-0 flex items-center justify-center'"
+    >
+      <div :class="isConfigured ? 'mx-auto max-w-4xl' : 'w-full h-full flex flex-col justify-center'">
         <RouterView />
       </div>
     </main>

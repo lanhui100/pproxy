@@ -41,6 +41,7 @@ import {
   saveAutoProxyConfig,
   saveTunnelToken,
 } from '@/lib/config'
+import { setAppConfigured } from '@/composables/useAppConfig'
 import InfoTip from '@/components/common/InfoTip.vue'
 import { buildAccessUrlDev, cleanDomainInput, type AccessUrlResult } from '@/lib/urls'
 
@@ -420,6 +421,7 @@ async function clearTunnelTokenAction(): Promise<void> {
     tunnelHasToken.value = false
     tunnelFingerprint.value = null
     confirmingClearTunnel.value = false
+    setAppConfigured(false)
     toast.success('已清除接入令牌，已返回接入页面')
     await router.push('/')
   } catch (e: any) {
