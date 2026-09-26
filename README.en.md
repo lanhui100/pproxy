@@ -193,6 +193,20 @@ The desktop (Tauri) needs no source changes: paste the **access code** (a `pony-
 - Rotation runbook for `GATE_TUNNEL_TOKEN` lives in `docs/ops/DEPLOY.md` (dual-gate parity + version trace + evidence before distributing codes), or the tunnel returns 401.
 - This repo's git history has been credential-scrubbed (filter-repo); **never introduce any real token/secret literal in future commits**.
 
+### 6. AI Agent Skill Installation (pproxy-ops)
+
+Install the `pproxy-ops` skill for Claude Code, DeepSeek Harness, and standard Agent toolchains to automate proxy environment and cluster management on **macOS** and **Linux** with a single command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lanhui100/pproxy/master/scripts/install-skill.sh | bash
+```
+
+Once installed, AI assistants natively recognize and execute:
+- Environment Proxy: `turn on proxy`, `turn off proxy`, `suspend/resume proxy env` (`pproxy on/off/status/env`);
+- Cluster Operations: `create join token`, `join cluster`, `inspect cluster health & latency` (`pproxy cluster`);
+- Multi-Tenant Quotas: `generate Ed25519 keypair`, `issue user token`, `revoke token` (`pproxy user`);
+- Mobile / Clash Ecosystem: `generate Clash Meta YAML config & terminal QR code` (`pproxy clash`).
+
 ## Documentation index
 
 | Doc | Content |

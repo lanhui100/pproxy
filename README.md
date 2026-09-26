@@ -195,6 +195,20 @@ pproxy serve
 - 轮换 `GATE_TUNNEL_TOKEN` 纪律见 `docs/ops/DEPLOY.md`（双端同源 + 版本留痕 + 取证验证后再分发口令），否则隧道 401。
 - 本仓库 git 历史已做凭据清洗（filter-repo）；**后续提交严禁引入任何真实 token / 密钥字面量**。
 
+### 6. AI Agent 技能安装 (pproxy-ops)
+
+为 Claude Code、DeepSeek Harness 及标准 Agent 工具提供自动管理 `pproxy` 代理与集群运维的 Skill。支持 **macOS** 与 **Linux**，一行命令安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lanhui100/pproxy/master/scripts/install-skill.sh | bash
+```
+
+安装后 AI 助手即可原生理解并执行：
+- 环境代理自管理：`开启代理`、`关闭代理`、`挂起/恢复代理环境` (`pproxy on/off/status/env`)；
+- 分布式集群组网：`生成入网令牌`、`加入集群`、`查看集群延迟大盘` (`pproxy cluster`)；
+- 商业多租户配额：`生成密钥对`、`签发用户令牌`、`吊销令牌` (`pproxy user`)；
+- 移动端扫码与配置：`生成 Clash 配置与二维码` (`pproxy clash`)。
+
 ## 文档索引
 
 | 文档 | 内容 |
