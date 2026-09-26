@@ -936,14 +936,16 @@ fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
 
     match iface {
         "rn" => urls.iter().find(|u| is_native_vps(u)).cloned().or(Some(RN_GATE_URL.to_string())),
-        // vercel/cf 拨测默认统一走多租户 rn 出口（Node gate 不验签 usr_live_，回退占位只会 401）
+        // 当配置中存在多端点时优先使用匹配项；若仅配置了多租户 rn 端点，则降级复用 rn 端点进行测速（避免连向只认单口令的 Node/CF 网关直接报 401）
         "vercel" => urls.iter().find(|u| u.contains("vercel") || u.contains("vgate"))
             .cloned()
             .or_else(|| urls.iter().find(|u| is_native_vps(u)).cloned())
+            .or_else(|| urls.first().cloned())
             .or(Some(RN_GATE_URL.to_string())),
         "cf" => urls.iter().find(|u| !u.contains("vercel") && !u.contains("vgate") && !is_native_vps(u))
             .cloned()
             .or_else(|| urls.iter().find(|u| is_native_vps(u)).cloned())
+            .or_else(|| urls.first().cloned())
             .or(Some(GATE_WS_URL.to_string())),
         _ => None,
     }
