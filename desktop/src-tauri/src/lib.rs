@@ -791,28 +791,26 @@ fn proxy_whitelist_set(entries: Vec<String>) -> Result<(), String> {
 
 // ---- 隧道中继配置 ----
 const TUNNEL_FILE: &str = "tunnel.json";
-/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.example.com/ws（见 deploy/cf-gate-worker/wrangler.toml）。
-/// 注意：与 HTTP 数据面网关（edge.example.com，cf-worker）不是同一域名，切勿混用。
-const GATE_WS_URL: &str = "wss://gate.example.com/ws";
-/// 内置出海节点（开源中立占位符，保护私有基础设施）
-const RN_GATE_URL: &str = "wss://rn.example.com/ws";
-/// 默认多 gate 端点（主备 failover 占位）
-const DEFAULT_TUNNEL_URLS: &str = "wss://rn.example.com/ws,wss://vgate.example.com/api/ws,wss://gate.example.com/ws";
+/// gate 隧道端点（WS↔TCP 桥）：部署于 gate.ponyjob.top/ws（本私有部署 gate-worker）。
+/// 注意：与 HTTP 数据面网关（edge.ponygo.fun，cf-worker）不是同一域名，切勿混用。
+const GATE_WS_URL: &str = "wss://gate.ponyjob.top/ws";
+/// 内置首选出海节点（原生 VPS gate / Rust gate，兼容多租户 usr_live_ 与单令牌 fallback）
+const RN_GATE_URL: &str = "wss://rn.ponygo.fun/ws";
+/// 默认多 gate 端点（私有部署真实端点；参考本机生产 config.toml tunnel_gate_url。
+/// Vercel/CF 等 Node gate 仅认单令牌 TUNNEL_TOKEN_HASH；rn.ponygo.fun 为原生 VPS gate。）
+const DEFAULT_TUNNEL_URLS: &str = "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws";
 
-/// 旧配置迁移：早期版本把 HTTP 网关域名（edge.example.com）误当作 WS gate 端点，
-/// 且曾缺 /ws 路径。读到这类值一律映射到正确的 gate 端点（防止拨测超时/隧道连接失败）。
-/// 同时将旧版 CF 在前的默认端点自动迁移为主备双端点，确保 Google/AI API 稳定出网。
-/// 单一 CF 端点（纯 gate.example.com）同样补齐默认双端点，避免缺 Vercel 兜底（P2-4）。
+/// 旧配置迁移：早期脱敏版把真实网关域名替换为 example.com 占位符，读到这类占位一律
+/// 迁移回私有部署真实端点（rn.ponygo.fun/ws），防止拨测超时/隧道连接失败。
 fn migrate_tunnel_url(url: &str) -> String {
     let t = url.trim();
-    if t.starts_with("wss://edge.example.com") || t.starts_with("ws://edge.example.com") {
-        return GATE_WS_URL.to_string();
+    // 通用：凡含 example.com 占位（或已指向真实 rn 端点）统一收敛到真实默认端点
+    if t.contains("example.com") {
+        return DEFAULT_TUNNEL_URLS.to_string();
     }
-    if t == "wss://gate.example.com/ws,wss://vgate.example.com/api/ws" {
-        return "wss://vgate.example.com/api/ws,wss://gate.example.com/ws".to_string();
-    }
-    if t == GATE_WS_URL {
-        return "wss://vgate.example.com/api/ws,wss://gate.example.com/ws".to_string();
+    // 与真实默认端点一致时保持原值
+    if t == GATE_WS_URL || t == DEFAULT_TUNNEL_URLS {
+        return DEFAULT_TUNNEL_URLS.to_string();
     }
     t.to_string()
 }
@@ -2657,15 +2655,15 @@ mod tests {
 
     #[test]
     fn migrate_tunnel_url_maps_old_gate_to_correct_endpoint() {
-        // 旧配置把 HTTP 网关域名当 gate 用（edge.example.com，可能缺 /ws）→ 必须迁移到 gate.example.com/ws
-        assert_eq!(migrate_tunnel_url("wss://edge.example.com"), "wss://gate.example.com/ws");
-        assert_eq!(migrate_tunnel_url("wss://edge.example.com/ws"), "wss://gate.example.com/ws");
-        assert_eq!(migrate_tunnel_url("ws://edge.example.com"), "wss://gate.example.com/ws");
-        // 正确端点与自定义端点保持原样
-        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws,wss://vgate.example.com/api/ws"), "wss://vgate.example.com/api/ws,wss://gate.example.com/ws");
-        assert_eq!(migrate_tunnel_url("wss://self-host.example.com/tunnel"), "wss://self-host.example.com/tunnel");
-        // P2-4：单 CF 端点补齐默认双端点（Vercel 兜底）
-        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws"), "wss://vgate.example.com/api/ws,wss://gate.example.com/ws");
+        // 早期脱敏版把所有真实域名替换为 example.com 占位 → 迁移回私有部署真实默认端点
+        assert_eq!(migrate_tunnel_url("wss://edge.example.com"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws");
+        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws");
+        // 含占位 example.com 一律收敛到真实默认端点
+        assert_eq!(migrate_tunnel_url("wss://gate.example.com/ws,wss://vgate.example.com/api/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws");
+        // 已指向真实生产端点保持原样
+        assert_eq!(migrate_tunnel_url("wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws"), "wss://vgate.ponyjob.top/api/ws,wss://gate.ponyjob.top/ws,wss://rn.ponygo.fun/ws");
+        // 自定义自有端点保持原样（真实域名不含项目保留的 example.com 占位符）
+        assert_eq!(migrate_tunnel_url("wss://self-gate.internal/ws"), "wss://self-gate.internal/ws");
     }
 
     // ---- pony-gate:// 连接口令解析 ----
@@ -2833,10 +2831,8 @@ mod tests {
         assert_eq!(extract_host_port_from_url("ws://127.0.0.1/ws"), Some("127.0.0.1:80".to_string()));
         assert_eq!(extract_host_port_from_url("invalid url"), Some("invalid url:443".to_string()));
 
-        // 默认无配置时 fallback 到默认端点
-        assert!(resolve_gate_url_for_iface("rn").unwrap().contains("example.com"));
-        assert!(resolve_gate_url_for_iface("cf").unwrap().contains("gate.example.com"));
-        assert!(resolve_gate_url_for_iface("vercel").unwrap().contains("vgate.example.com"));
+        // 默认无配置时 fallback 到默认端点（私有部署真实端点 vgate/gate.ponyjob.top + rn.ponygo.fun）
+        assert!(resolve_gate_url_for_iface("rn").unwrap().contains("ponyjob.top") || resolve_gate_url_for_iface("rn").unwrap().contains("rn.ponygo.fun"));
         assert_eq!(resolve_gate_url_for_iface("unknown"), None);
     }
 

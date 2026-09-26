@@ -53,3 +53,6 @@ ponyllm.pid
 ponyllm-serve.log
 ponyllm.toml.bak
 desktop/src-tauri/tauri.updater.json
+
+# 本地中继下载的桌面安装包（不入库，用户自行取用）
+desktop/releases/
