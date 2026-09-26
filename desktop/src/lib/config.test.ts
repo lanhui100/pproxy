@@ -136,6 +136,7 @@ describe('mapTunnelConfig', () => {
       dataDir: null,
       dataDirTmpFallback: false,
       effectiveUrl: null,
+      userClaims: null,
     })
   })
 
@@ -172,11 +173,13 @@ describe('mapTunnelConfig', () => {
       fp_keyring: 'aaaa1111',
       cred_winner: 'keyring(diverged)',
       cred_meta: { last_write_ts: 123, source: 'tunnel_token_save', fp8: 'aaaa1111' },
+      user_claims: null,
     })
     expect(c.fpFallback).toBe('bbbb2222')
     expect(c.fpKeyring).toBe('aaaa1111')
     expect(c.credWinner).toBe('keyring(diverged)')
     expect(c.credMeta).toEqual({ last_write_ts: 123, source: 'tunnel_token_save', fp8: 'aaaa1111' })
+    expect(c.userClaims).toBeNull()
   })
 
   it('凭据损坏时透传 cred_error（曾因字段名漂移静默失效）', async () => {
@@ -206,6 +209,7 @@ describe('mapTunnelConfig', () => {
       dataDir: null,
       dataDirTmpFallback: false,
       effectiveUrl: null,
+      userClaims: null,
     })
   })
 })

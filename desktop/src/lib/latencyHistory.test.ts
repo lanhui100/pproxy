@@ -19,18 +19,20 @@ vi.stubGlobal('localStorage', {
 })
 
 describe('getLatencyTone', () => {
-  it('正常延迟 <= 800ms 返回 ok (绿)', () => {
+  it('正常延迟 <= 2000ms 返回 ok (绿)', () => {
     expect(getLatencyTone({ ts: 1000, ok: true, ms: 120 })).toBe('ok')
     expect(getLatencyTone({ ts: 1000, ok: true, ms: 800 })).toBe('ok')
+    expect(getLatencyTone({ ts: 1000, ok: true, ms: 2000 })).toBe('ok')
   })
 
-  it('稍慢延迟 800ms ~ 2000ms 返回 warn (黄)', () => {
-    expect(getLatencyTone({ ts: 1000, ok: true, ms: 801 })).toBe('warn')
-    expect(getLatencyTone({ ts: 1000, ok: true, ms: 1999 })).toBe('warn')
+  it('稍慢延迟 2000ms ~ 5000ms 返回 warn (黄)', () => {
+    expect(getLatencyTone({ ts: 1000, ok: true, ms: 2001 })).toBe('warn')
+    expect(getLatencyTone({ ts: 1000, ok: true, ms: 4999 })).toBe('warn')
+    expect(getLatencyTone({ ts: 1000, ok: true, ms: 5000 })).toBe('warn')
   })
 
-  it('超时 > 2000ms 或探测失败返回 error (红)', () => {
-    expect(getLatencyTone({ ts: 1000, ok: true, ms: 2001 })).toBe('error')
+  it('超时 > 5000ms 或探测失败返回 error (红)', () => {
+    expect(getLatencyTone({ ts: 1000, ok: true, ms: 5001 })).toBe('error')
     expect(getLatencyTone({ ts: 1000, ok: false, err: 'timeout' })).toBe('error')
   })
 

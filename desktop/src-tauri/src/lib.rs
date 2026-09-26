@@ -843,6 +843,16 @@ fn proxy_tunnel_get() -> serde_json::Value {
   let meta = cred_meta_load(CREDENTIAL_USER_TUNNEL);
   // effective_url：引擎实际使用的端点串（含默认双端点回退），UI 与引擎不再分叉
   let (eff_url, _) = tunnel_config_load();
+  let user_claims = detail.value.as_deref().and_then(|tok| {
+    let trimmed = tok.trim();
+    if !trimmed.starts_with("usr_live_") { return None; }
+    let rest = &trimmed["usr_live_".len()..];
+    let dot_idx = rest.find('.')?;
+    let payload_b64 = &rest[..dot_idx];
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&decoded).ok()
+  });
+
   serde_json::json!({
     "url": url,
     "effective_url": eff_url.unwrap_or_default(),
@@ -855,6 +865,7 @@ fn proxy_tunnel_get() -> serde_json::Value {
     "cred_meta": { "last_write_ts": meta.last_write_ts, "source": meta.source, "fp8": meta.fp8 },
     "data_dir": data_dir().display().to_string(),
     "data_dir_tmp_fallback": data_dir_tmp_fallback(),
+    "user_claims": user_claims,
   })
 }
 #[tauri::command]

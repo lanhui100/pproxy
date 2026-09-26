@@ -14,7 +14,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useToast } from '@/composables/useToast'
-import { importConnectCode, isTauri, parseGateInput, saveTunnelToken } from '@/lib/config'
+import { importConnectCode, isTauri, loadTunnelConfig, parseGateInput, saveTunnelToken, type UserClaims } from '@/lib/config'
 import {
   appendLatencyPoint,
   loadLatencySeries,
@@ -87,6 +87,7 @@ interface TrafficStats {
 }
 const traffic = ref<TrafficStats | null>(null)
 const usageDimension = ref<'7d' | '24h'>('24h')
+const userClaims = ref<UserClaims | null>(null)
 
 function bucketBytes(b?: TrafficBucket): number {
   if (!b) return 0
@@ -184,6 +185,24 @@ const totalBytes = computed(() => {
 
 // ---- 出口R (VPS) 专属流量监控指标 (每月 500GB 额度) ----
 const VPS_MONTHLY_LIMIT_BYTES = 500 * 1024 * 1024 * 1024 // 500 GB
+
+const userQuotaDisplay = computed(() => {
+  if (!userClaims.value) return null
+  const quota = userClaims.value.quota_bytes
+  const used = totalBytes.value
+  const pct = quota > 0 ? Math.min(100, Math.max(0, (used / quota) * 100)) : 0
+  const expDate = new Date(userClaims.value.exp * 1000)
+  return {
+    sub: userClaims.value.sub,
+    name: userClaims.value.name || userClaims.value.sub,
+    usedBytes: used,
+    quotaBytes: quota,
+    maxConns: userClaims.value.max_conns,
+    percent: pct.toFixed(1),
+    expStr: expDate.toLocaleDateString(),
+    isExpired: Date.now() > userClaims.value.exp * 1000,
+  }
+})
 
 const vpsUsage = computed(() => {
   const t = traffic.value
@@ -332,9 +351,10 @@ const ifaceRows = ref<IfaceRow[]>([
 
 const siteRows = ref<SiteRow[]>([
   { name: 'Google', host: 'google.com', iface: 'vercel', history: [], testing: false },
+  { name: 'Anthropic', host: 'api.anthropic.com', iface: 'rn', history: [], testing: false },
   { name: 'GitHub', host: 'github.com', iface: 'cf', history: [], testing: false },
-  { name: 'X', host: 'x.com', iface: 'cf', history: [], testing: false },
   { name: 'OpenAI', host: 'openai.com', iface: 'vercel', history: [], testing: false },
+  { name: 'X', host: 'x.com', iface: 'cf', history: [], testing: false },
 ])
 
 function siteSeriesKey(host: string): string {
@@ -541,6 +561,9 @@ async function refreshStatus() {
     const cfg = (await invoke('proxy_get_current_config')) as typeof configInfo.value
     configInfo.value = cfg
     isConfigured.value = cfg.configured
+
+    const tunnel = await loadTunnelConfig()
+    userClaims.value = tunnel.userClaims ?? null
   } catch (e) {
     console.error('Failed to get status:', e)
   }
@@ -1005,8 +1028,35 @@ async function submitImportOrChained() {
             </div>
           </div>
 
-          <!-- VPS 月度用量指示（无卡片背景，直接置于图例下方） -->
-          <div class="pt-3.5 space-y-1.5 text-xs">
+          <!-- 用户专属配额指示（若接入了多租户令牌） -->
+          <div v-if="userQuotaDisplay" class="pt-3.5 space-y-1.5 text-xs">
+            <div class="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span class="flex items-center gap-1">
+                <span>用户配额 ({{ userQuotaDisplay.name }})</span>
+                <span v-if="userQuotaDisplay.isExpired" class="text-rose-500 font-medium">已过期</span>
+              </span>
+              <span class="font-mono tabular-nums">
+                {{ formatBytes(userQuotaDisplay.usedBytes) }} / {{ formatBytes(userQuotaDisplay.quotaBytes) }}
+                <span :class="['ml-1', Number(userQuotaDisplay.percent) > 90 ? 'text-rose-500 font-medium' : Number(userQuotaDisplay.percent) > 75 ? 'text-amber-500 font-medium' : 'text-foreground font-medium']">
+                  ({{ userQuotaDisplay.percent }}%)
+                </span>
+              </span>
+            </div>
+            <div class="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                class="h-full rounded-full transition-all duration-500"
+                :class="[Number(userQuotaDisplay.percent) > 90 ? 'bg-rose-500' : Number(userQuotaDisplay.percent) > 75 ? 'bg-amber-500' : 'bg-primary']"
+                :style="{ width: `${Math.max(1, Math.min(100, Number(userQuotaDisplay.percent)))}%` }"
+              ></div>
+            </div>
+            <div class="flex items-center justify-between text-[10px] text-muted-foreground/75 pt-0.5">
+              <span>到期时间：{{ userQuotaDisplay.expStr }}</span>
+              <span>最大并发：{{ userQuotaDisplay.maxConns }}</span>
+            </div>
+          </div>
+
+          <!-- VPS 月度用量指示（无用户令牌时回退展示默认 VPS 500GB） -->
+          <div v-else class="pt-3.5 space-y-1.5 text-xs">
             <div class="flex items-center justify-between text-[11px] text-muted-foreground">
               <span>VPS月度用量</span>
               <span class="font-mono tabular-nums">

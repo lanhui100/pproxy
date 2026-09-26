@@ -7,8 +7,8 @@ export interface LatencyPoint {
 
 export type LatencyTone = 'ok' | 'warn' | 'error' | 'empty'
 
-const DEFAULT_FAST_MS = 800
-const DEFAULT_WARN_MS = 2000
+const DEFAULT_FAST_MS = 2000
+const DEFAULT_WARN_MS = 5000
 const DEFAULT_MAX_SLOTS = 12
 
 /** 展示窗口：仅保留最近 2 小时的采样点（10 分钟轮询 → 12 根柱条） */
@@ -17,9 +17,9 @@ const STORAGE_PREFIX = 'pony-latency:'
 
 /**
  * 评估单个采样点的颜色状态
- * - <= 800ms: 绿色 (ok)
- * - 800ms ~ 2000ms: 黄色 (warn)
- * - > 2000ms 或失败: 红色 (error)
+ * - <= 2000ms: 绿色 (ok)
+ * - 2000ms ~ 5000ms: 黄色 (warn)
+ * - > 5000ms 或失败: 红色 (error)
  * - 空白/未探测: 灰色 (empty)
  */
 export function getLatencyTone(

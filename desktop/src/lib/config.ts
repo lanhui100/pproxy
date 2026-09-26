@@ -7,6 +7,42 @@ export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
+export interface UserClaims {
+  jti: string
+  sub: string
+  name: string
+  quota_bytes: number
+  lease_bytes: number
+  exp: number
+  iat: number
+  max_conns: number
+}
+
+/**
+ * 从多租户自包含令牌 (usr_live_<payload>.<sig>) 解析 Claims
+ */
+export function parseUserTokenClaims(tokenStr: string): UserClaims | null {
+  const trimmed = tokenStr.trim()
+  if (!trimmed.startsWith('usr_live_')) return null
+  const rest = trimmed.slice('usr_live_'.length)
+  const dotIdx = rest.indexOf('.')
+  if (dotIdx === -1) return null
+  const payloadB64 = rest.slice(0, dotIdx)
+  try {
+    // base64url decode
+    const b64 = payloadB64.replace(/-/g, '+').replace(/_/g, '/')
+    const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : ''
+    const jsonStr = atob(b64 + pad)
+    const parsed = JSON.parse(jsonStr)
+    if (parsed && typeof parsed.sub === 'string' && typeof parsed.quota_bytes === 'number') {
+      return parsed as UserClaims
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
 // ---- 隧道中继配置（2026-08 审计整改：端点/令牌 opt-in，令牌仅进 OS 凭据库）----
 
 export interface TunnelConfig {
@@ -27,6 +63,8 @@ export interface TunnelConfig {
   dataDirTmpFallback?: boolean
   /** 引擎实际使用的端点串（含默认双端点回退；A-P1-8 口径统一） */
   effectiveUrl?: string | null
+  /** 用户令牌 Claims 信息（若为多租户 usr_live_ 令牌） */
+  userClaims?: UserClaims | null
 }
 
 /** 读取隧道配置（Rust 侧文件 + 凭据库探测，不回传令牌明文）。 */
@@ -53,6 +91,7 @@ export function mapTunnelConfig(raw: Record<string, unknown>): TunnelConfig {
     dataDir: raw.data_dir != null ? String(raw.data_dir) : null,
     dataDirTmpFallback: raw.data_dir_tmp_fallback === true,
     effectiveUrl: raw.effective_url != null ? String(raw.effective_url) : null,
+    userClaims: (raw.user_claims as UserClaims) ?? null,
   }
 }
 

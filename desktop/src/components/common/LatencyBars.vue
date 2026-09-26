@@ -16,8 +16,8 @@ const props = withDefaults(
   }>(),
   {
     history: () => [],
-    fastThreshold: 800,
-    warnThreshold: 2000,
+    fastThreshold: 2000,
+    warnThreshold: 5000,
   },
 )
 
