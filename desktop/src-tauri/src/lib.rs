@@ -934,9 +934,20 @@ fn resolve_gate_url_for_iface(iface: &str) -> Option<String> {
         .unwrap_or_else(|| DEFAULT_TUNNEL_URLS.to_string());
     let urls: Vec<String> = url_raw.split([',', ';', '\n']).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
 
+    let is_user_token = cred_get_impl(CREDENTIAL_USER_TUNNEL)
+        .ok()
+        .flatten()
+        .map(|t| t.trim().starts_with("usr_live_"))
+        .unwrap_or(false);
+
+    // 若当前使用的是多租户令牌 (usr_live_)，目前全网仅 Rust 原生出口 (rn.ponygo.fun) 启用了非对称 Ed25519 验签；
+    // 外部 Node/CF/Vercel 网关仅认单令牌哈希，会无条件返回 401。因此多租户模式下，所有接口拨测均统一定向至可验签的 rn 端点。
+    if is_user_token {
+        return urls.iter().find(|u| is_native_vps(u)).cloned().or(Some(RN_GATE_URL.to_string()));
+    }
+
     match iface {
         "rn" => urls.iter().find(|u| is_native_vps(u)).cloned().or(Some(RN_GATE_URL.to_string())),
-        // 当配置中存在多端点时优先使用匹配项；若仅配置了多租户 rn 端点，则降级复用 rn 端点进行测速（避免连向只认单口令的 Node/CF 网关直接报 401）
         "vercel" => urls.iter().find(|u| u.contains("vercel") || u.contains("vgate"))
             .cloned()
             .or_else(|| urls.iter().find(|u| is_native_vps(u)).cloned())

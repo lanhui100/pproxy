@@ -41,10 +41,8 @@ pub fn collect_bypass_hosts() -> BTreeSet<String> {
             }
         }
     }
-    // 2. updater.endpoints (tauri.conf.json 静态值)
-    // Keep in sync with desktop/src-tauri/tauri.conf.json plugins.updater.endpoints
+    // 2. updater.endpoints (tauri.conf.json 静态值，仅包含私有分发域名，绝对不能包含 github.com，否则会导致 GitHub 站点走直连而超时)
     for ep in [
-        "https://github.com/lanhui100/pproxy/releases/latest/download/latest.json",
         "https://dl.ponygo.fun/latest.json",
         "https://access.ponygo.fun/dsk/latest.json",
         "https://access.example.com/dsk/latest.json",
