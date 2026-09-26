@@ -56,6 +56,7 @@ pproxy off
 * **手机 Clash Meta 扫码一键导入（最便捷）**：
   ```bash
   pproxy clash         # 自动生成配置并在终端打印二维码，手机 Clash 扫码即用
+  pproxy client clash  # 客户端子命令，支持 --url-only 仅输出订阅链接
   ```
 * **手机系统 Wi-Fi 代理**：Wi-Fi 设置中配置 HTTP 代理 `http://<电脑局域网IP>:8899`，输入账号密码（Basic Auth 或 Token）。
 * **手机 VPN 客户端（Clash Meta / Shadowrocket / Surge 等）**：添加 HTTP 代理节点指向 `pproxy`，通过手机端 TUN 虚拟网卡实现**全局 VPN**或**基于规则的智能分流**。

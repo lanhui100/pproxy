@@ -10,6 +10,7 @@ import {
   LifeBuoy,
   Pencil,
   Plus,
+  QrCode,
   RefreshCw,
   Trash2,
   X,
@@ -46,6 +47,13 @@ import {
 import { setAppConfigured } from '@/composables/useAppConfig'
 import InfoTip from '@/components/common/InfoTip.vue'
 import { buildAccessUrlDev, cleanDomainInput, type AccessUrlResult } from '@/lib/urls'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 
 const toast = useToast()
 const router = useRouter()
@@ -681,6 +689,93 @@ async function openLogDir(): Promise<void> {
   }
 }
 
+// ---- Clash Meta 客户端配置与二维码 ----
+interface ClashConfigData {
+  lan_ip: string
+  port: number
+  has_token: boolean
+  token: string | null
+  subscription_url: string
+  yaml: string
+  qr_svg: string
+}
+
+const clashConfig = ref<ClashConfigData | null>(null)
+const loadingClash = ref(false)
+const showClashDialog = ref(false)
+const clashUrlCopied = ref(false)
+const clashYamlCopied = ref(false)
+
+async function fetchClashConfig(): Promise<void> {
+  loadingClash.value = true
+  if (!isTauri()) {
+    clashConfig.value = {
+      lan_ip: '192.168.1.100',
+      port: 8899,
+      has_token: true,
+      token: 'pony_dev_mock',
+      subscription_url: 'http://192.168.1.100:8899/clash.yaml',
+      yaml: '# Dev mock Clash configuration\nmixed-port: 7890\nproxies:\n  - name: Pony-Proxy\n    type: http\n    server: 192.168.1.100\n    port: 8899',
+      qr_svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#f0f0f0"/><text x="100" y="105" text-anchor="middle" font-size="12" fill="#666">二维码开发模拟</text></svg>',
+    }
+    loadingClash.value = false
+    return
+  }
+
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const res = await invoke<ClashConfigData>('proxy_clash_config_get', {})
+    clashConfig.value = res
+  } catch (e: any) {
+    toast.error('获取 Clash 配置失败', typeof e === 'string' ? e : e?.message)
+  } finally {
+    loadingClash.value = false
+  }
+}
+
+async function openClashModal(): Promise<void> {
+  await fetchClashConfig()
+  showClashDialog.value = true
+}
+
+async function copyClashUrl(): Promise<void> {
+  if (!clashConfig.value?.subscription_url) return
+  try {
+    await navigator.clipboard.writeText(clashConfig.value.subscription_url)
+    clashUrlCopied.value = true
+    toast.success('已复制订阅链接', clashConfig.value.subscription_url)
+    setTimeout(() => { clashUrlCopied.value = false }, 2500)
+  } catch {
+    toast.error('复制失败')
+  }
+}
+
+async function copyClashYaml(): Promise<void> {
+  if (!clashConfig.value?.yaml) return
+  try {
+    await navigator.clipboard.writeText(clashConfig.value.yaml)
+    clashYamlCopied.value = true
+    toast.success('已复制完整配置内容', '可直接在客户端中新建配置并粘贴')
+    setTimeout(() => { clashYamlCopied.value = false }, 2500)
+  } catch {
+    toast.error('复制失败')
+  }
+}
+
+async function exportClashFile(): Promise<void> {
+  if (!isTauri()) {
+    toast.info('开发模式', '已模拟保存 ~/.pony/clash.yaml')
+    return
+  }
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const savedPath = await invoke<string>('proxy_clash_export', {})
+    toast.success('配置已保存至本机', savedPath)
+  } catch (e: any) {
+    toast.error('保存失败', typeof e === 'string' ? e : e?.message)
+  }
+}
+
 onMounted(async () => {
   void initCurrentVersion()
   void refreshTunnel()
@@ -1274,6 +1369,47 @@ onMounted(async () => {
       </div>
     </section>
 
+    <!-- 客户端与移动端生态 (Clash Meta 等) -->
+    <section class="space-y-2.5">
+      <div>
+        <h2 class="text-sm font-bold text-foreground flex items-center gap-1.5">
+          客户端与移动端接入
+          <InfoTip text="生成适用于手机 Clash Meta、Flclash、小火箭及第三方客户端的代理配置与订阅二维码。" />
+        </h2>
+        <p class="text-xs text-muted-foreground mt-0.5">一键生成标准 Clash Meta / Mihomo 配置文件与扫码订阅</p>
+      </div>
+
+      <div class="rounded-xl bg-muted/60 dark:bg-muted/25 border border-border/20 p-4 space-y-4">
+        <div class="flex items-center justify-between gap-4">
+          <div class="space-y-0.5">
+            <div class="text-xs font-medium text-foreground">Clash Meta / Mihomo 移动端与桌面配置</div>
+            <div class="text-[11px] text-muted-foreground">内置智能分流与免流保护规则，支持扫码导入与本地导出</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              @click="exportClashFile"
+              class="text-xs h-8 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+            >
+              <Download class="size-3.5 mr-1" />
+              导出本地文件
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              @click="openClashModal"
+              :disabled="loadingClash"
+              class="text-xs h-8 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
+            >
+              <QrCode class="size-3.5 mr-1" />
+              二维码与配置
+            </Button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 启动偏好 -->
     <section class="space-y-2.5">
       <div>
@@ -1420,5 +1556,72 @@ onMounted(async () => {
         </div>
       </div>
     </section>
+
+    <!-- Clash Meta 配置与二维码弹窗 -->
+    <Dialog :open="showClashDialog" @update:open="showClashDialog = $event">
+      <DialogContent class="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Clash Meta / 移动端配置导入</DialogTitle>
+          <DialogDescription>
+            使用手机 Clash Meta、Flclash 或小火箭扫描二维码，或复制订阅链接进行导入。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div v-if="clashConfig" class="space-y-4 pt-2">
+          <!-- 二维码展示区 -->
+          <div class="flex flex-col items-center justify-center p-4 bg-white rounded-xl border shadow-inner">
+            <div
+              class="w-48 h-48 flex items-center justify-center overflow-hidden"
+              v-html="clashConfig.qr_svg"
+            />
+            <span class="text-[11px] text-zinc-500 mt-2">手机与电脑连接同一局域网 WiFi 扫码即用</span>
+          </div>
+
+          <!-- 订阅链接复制 -->
+          <div class="space-y-1.5">
+            <Label class="text-xs text-muted-foreground">订阅 URL</Label>
+            <div class="flex items-center gap-2">
+              <Input
+                readonly
+                :model-value="clashConfig.subscription_url"
+                class="font-mono text-xs h-8 bg-muted/50"
+              />
+              <Button
+                variant="secondary"
+                size="sm"
+                @click="copyClashUrl"
+                class="h-8 shrink-0 text-xs"
+              >
+                <Check v-if="clashUrlCopied" class="size-3.5 mr-1 text-emerald-600" />
+                <Copy v-else class="size-3.5 mr-1" />
+                {{ clashUrlCopied ? '已复制' : '复制' }}
+              </Button>
+            </div>
+          </div>
+
+          <!-- 操作按钮组 -->
+          <div class="flex items-center justify-between pt-2 border-t border-border/20">
+            <Button
+              variant="outline"
+              size="sm"
+              @click="copyClashYaml"
+              class="text-xs h-8"
+            >
+              <Copy class="size-3.5 mr-1" />
+              {{ clashYamlCopied ? '已复制 YAML' : '复制配置全文' }}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              @click="exportClashFile"
+              class="text-xs h-8"
+            >
+              <Download class="size-3.5 mr-1" />
+              保存到本机
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>

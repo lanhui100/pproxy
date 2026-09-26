@@ -199,6 +199,11 @@ enum Command {
         #[arg(long)]
         url_only: bool,
     },
+    /// 客户端与生态配置（生成 Clash Meta 客户端配置、终端二维码或导出各类集成片段）
+    Client {
+        #[command(subcommand)]
+        cmd: ClientCmd,
+    },
     /// 云服务一键初始化与账户迁移（支持 Vercel 和 Cloudflare）
     Migrate {
         #[command(subcommand)]
@@ -462,6 +467,40 @@ enum ConfigCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ClientCmd {
+    /// 一键生成 Clash Meta 客户端配置、终端二维码与订阅 URL
+    Clash {
+        /// 覆盖访问令牌（缺省自动使用或创建）
+        #[arg(long)]
+        token: Option<String>,
+        /// 覆盖局域网 IP（缺省自动探测本机局域网 IP）
+        #[arg(long)]
+        lan_ip: Option<String>,
+        /// 覆盖代理端口（默认 8899）
+        #[arg(long, short = 'p')]
+        port: Option<u16>,
+        /// 仅打印订阅 URL 链接
+        #[arg(long)]
+        url_only: bool,
+    },
+    /// 导出第三方客户端配置片段（支持 clash / cursor / surge / subconverter / openai / claude / env）
+    Export {
+        /// 目标客户端类型: clash | cursor | openai | claude | surge | subconverter | env
+        #[arg(default_value = "clash")]
+        service: String,
+        /// 关联路由名称（缺省自动导出全部可用路由）
+        #[arg(long)]
+        route: Option<String>,
+        /// 数据面明文 token（缺省自动使用第一个有效 token）
+        #[arg(long)]
+        token: Option<String>,
+        /// 生成终端二维码并保存本地配置文件（针对 clash）
+        #[arg(long)]
+        qr: bool,
+    },
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
@@ -590,6 +629,26 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         let cfg = config::load().unwrap_or_default();
         return cmd::clash::run(&cfg, token.as_deref(), lan_ip.as_deref(), *port, *url_only)
             .map_err(RunError::Msg);
+    }
+
+    // 1.2 client 客户端生态支持（Clash / 导出等）
+    if let Command::Client { cmd } = &cli.command {
+        let cfg = config::load().unwrap_or_default();
+        return match cmd {
+            ClientCmd::Clash { token, lan_ip, port, url_only } => {
+                cmd::clash::run(&cfg, token.as_deref(), lan_ip.as_deref(), *port, *url_only)
+                    .map_err(RunError::Msg)
+            }
+            ClientCmd::Export { service, route, token, qr } => {
+                if service.eq_ignore_ascii_case("clash") && *qr {
+                    cmd::clash::run(&cfg, token.as_deref(), None, None, false)
+                        .map_err(RunError::Msg)
+                } else {
+                    cmd::export_cmd::run(&cfg, service, route.as_deref(), token.as_deref())
+                        .map_err(RunError::Msg)
+                }
+            }
+        };
     }
 
     // 2. user 用户管理
@@ -847,6 +906,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Serve { .. }
         | Command::HaForwarder { .. }
         | Command::Clash { .. }
+        | Command::Client { .. }
         | Command::User { .. }
         | Command::Sync { .. }
         | Command::Cluster { .. }

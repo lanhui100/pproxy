@@ -56,6 +56,7 @@ pproxy off
 * **Clash Meta one-scan import (easiest)**:
   ```bash
   pproxy clash         # generates config and prints a QR code; scan with Clash
+  pproxy client clash  # client subcommand, supports --url-only for subscription link
   ```
 * **System Wi-Fi proxy**: set HTTP proxy `http://<PC-LAN-IP>:8899` in Wi-Fi settings and enter credentials (Basic Auth or Token).
 * **VPN clients (Clash Meta / Shadowrocket / Surge)**: add an HTTP proxy node pointing to `pproxy` for **global VPN** or **rule-based smart routing** via the TUN virtual NIC.

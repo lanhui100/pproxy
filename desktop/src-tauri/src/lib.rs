@@ -202,6 +202,7 @@ pub fn run() {
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
       proxy_traffic_stats, proxy_test_egress, proxy_test_site_via, proxy_test_site_local,
       proxy_access_url_generate, proxy_api_token_get, proxy_api_token_set,
+      proxy_clash_config_get, proxy_clash_export,
       proxy_cluster_nodes_get,
       open_external_url, proxy_prepare_update_exit, proxy_open_log_dir,
     ])
@@ -2427,6 +2428,181 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// 获取当前局域网 IP
+fn get_desktop_lan_ip() -> String {
+    let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(_) => return "127.0.0.1".to_string(),
+    };
+    if socket.connect("8.8.8.8:80").is_ok() || socket.connect("1.1.1.1:80").is_ok() {
+        if let Ok(addr) = socket.local_addr() {
+            return addr.ip().to_string();
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
+/// 生成标准 Clash Meta / Mihomo 配置文件 YAML
+fn build_clash_meta_yaml(server_ip: &str, port: u16, token: Option<&str>) -> String {
+    let auth_section = match token {
+        Some(t) if !t.trim().is_empty() => format!("    username: \"{}\"\n    password: \"{}\"\n", t.trim(), t.trim()),
+        _ => String::new(),
+    };
+
+    format!(
+        r#"# ================================================================
+#  Pony Proxy — Clash Meta / Mihomo 移动端与客户端智能代理配置
+# ================================================================
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+
+proxies:
+  - name: "Pony-Proxy"
+    type: http
+    server: {server_ip}
+    port: {port}
+{auth_section}
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    url: "http://cp.cloudflare.com/generate_204"
+    interval: 300
+    proxies:
+      - "Pony-Proxy"
+      - DIRECT
+
+rules:
+  # 1. 服务端公网与局域网直连保护
+  - DOMAIN-SUFFIX,ponygo.fun,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+
+  # 2. 系统与客户端探活直连保护
+  - DOMAIN,connectivitycheck.gstatic.com,DIRECT
+  - DOMAIN,connectivitycheck.android.com,DIRECT
+  - DOMAIN,clients3.google.com,DIRECT
+  - DOMAIN,msftconnecttest.com,DIRECT
+  - DOMAIN,captive.apple.com,DIRECT
+  - DOMAIN,cp.cloudflare.com,DIRECT
+
+  # 3. 核心海外大模型与 AI 平台
+  - DOMAIN-SUFFIX,openai.com,PROXY
+  - DOMAIN-SUFFIX,chatgpt.com,PROXY
+  - DOMAIN-SUFFIX,oaistatic.com,PROXY
+  - DOMAIN-SUFFIX,oaiusercontent.com,PROXY
+  - DOMAIN-SUFFIX,anthropic.com,PROXY
+  - DOMAIN-SUFFIX,claude.ai,PROXY
+  - DOMAIN-SUFFIX,claudeusercontent.com,PROXY
+  - DOMAIN-SUFFIX,deepmind.google,PROXY
+  - DOMAIN-SUFFIX,perplexity.ai,PROXY
+  - DOMAIN-SUFFIX,huggingface.co,PROXY
+  # Google 与 Android / 开发者服务
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-SUFFIX,googleapis.com,PROXY
+  - DOMAIN-SUFFIX,gstatic.com,PROXY
+  - DOMAIN-SUFFIX,googleusercontent.com,PROXY
+  - DOMAIN-SUFFIX,android.com,PROXY
+  - DOMAIN-SUFFIX,golang.org,PROXY
+  # 影音流媒体 (YouTube)
+  - DOMAIN-SUFFIX,youtube.com,PROXY
+  - DOMAIN-SUFFIX,googlevideo.com,PROXY
+  - DOMAIN-SUFFIX,ytimg.com,PROXY
+  - DOMAIN-SUFFIX,youtu.be,PROXY
+  # 社交与通讯 (X / Twitter / Telegram)
+  - DOMAIN-SUFFIX,x.com,PROXY
+  - DOMAIN-SUFFIX,twitter.com,PROXY
+  - DOMAIN-SUFFIX,twimg.com,PROXY
+  - DOMAIN-SUFFIX,t.co,PROXY
+  - DOMAIN-SUFFIX,telegram.org,PROXY
+  - DOMAIN-SUFFIX,t.me,PROXY
+  - DOMAIN-SUFFIX,telegram.me,PROXY
+  - DOMAIN-SUFFIX,telegra.ph,PROXY
+  # 开发者平台与通用知识库
+  - DOMAIN-SUFFIX,github.com,PROXY
+  - DOMAIN-SUFFIX,githubusercontent.com,PROXY
+  - DOMAIN-SUFFIX,github.io,PROXY
+  - DOMAIN-SUFFIX,githubassets.com,PROXY
+  - DOMAIN-SUFFIX,gitlab.com,PROXY
+  - DOMAIN-SUFFIX,docker.com,PROXY
+  - DOMAIN-SUFFIX,docker.io,PROXY
+  - DOMAIN-SUFFIX,stackoverflow.com,PROXY
+  - DOMAIN-SUFFIX,wikipedia.org,PROXY
+  - DOMAIN-SUFFIX,wikimedia.org,PROXY
+  # 国内直连与 GEOIP 兜底
+  - DOMAIN-SUFFIX,cn,DIRECT
+  - GEOIP,CN,DIRECT
+  # 兜底规则：未匹配项默认直连
+  - MATCH,DIRECT
+"#
+    )
+}
+
+/// 渲染 SVG 格式二维码
+fn render_qr_svg(content: &str) -> Result<String, String> {
+    use qrcode::render::svg;
+    let code = qrcode::QrCode::new(content.as_bytes()).map_err(|e| format!("生成二维码失败: {e}"))?;
+    let svg = code.render::<svg::Color>()
+        .min_dimensions(200, 200)
+        .dark_color(svg::Color("#000000"))
+        .light_color(svg::Color("#ffffff"))
+        .build();
+    Ok(svg)
+}
+
+/// 查询或合成 Clash Meta 配置及二维码信息
+#[tauri::command]
+fn proxy_clash_config_get(custom_lan_ip: Option<String>, custom_port: Option<u16>) -> Result<serde_json::Value, String> {
+    let lan_ip = custom_lan_ip
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(get_desktop_lan_ip);
+    let port = custom_port.unwrap_or(8899);
+
+    // 优先取 API token 或隧道 token 作为客户端鉴权
+    let token = get_api_proxy_token_impl()
+        .or_else(|| cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten())
+        .filter(|t| !t.trim().is_empty());
+
+    let yaml = build_clash_meta_yaml(&lan_ip, port, token.as_deref());
+    let subscription_url = format!("http://{lan_ip}:{port}/clash.yaml");
+
+    // 生成二维码：手机扫描订阅链接最为通用
+    let qr_svg = render_qr_svg(&subscription_url)?;
+
+    Ok(serde_json::json!({
+        "lan_ip": lan_ip,
+        "port": port,
+        "has_token": token.is_some(),
+        "token": token,
+        "subscription_url": subscription_url,
+        "yaml": yaml,
+        "qr_svg": qr_svg,
+    }))
+}
+
+/// 导出并保存 clash.yaml 到本地文件（如 ~/.pony/clash.yaml）
+#[tauri::command]
+fn proxy_clash_export(custom_lan_ip: Option<String>, custom_port: Option<u16>) -> Result<String, String> {
+    let conf = proxy_clash_config_get(custom_lan_ip, custom_port)?;
+    let yaml = conf.get("yaml").and_then(|v| v.as_str()).unwrap_or("");
+    
+    // 写入 ~/.pony/clash.yaml 以及桌面端 data_dir/clash.yaml
+    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_else(|_| ".".into());
+    let pony_dir = std::path::PathBuf::from(home).join(".pony");
+    let _ = std::fs::create_dir_all(&pony_dir);
+    let file_path = pony_dir.join("clash.yaml");
+    std::fs::write(&file_path, yaml).map_err(|e| format!("保存 clash.yaml 失败: {e}"))?;
+
+    let desktop_file = data_dir().join("clash.yaml");
+    let _ = std::fs::write(&desktop_file, yaml);
+
+    Ok(file_path.display().to_string())
+}
+
 /// 终极网络急救箱：一键无条件恢复直连
 #[tauri::command]
 fn proxy_rescue(app: tauri::AppHandle) -> Result<String, String> {
@@ -3031,5 +3207,21 @@ mod tests {
         // B-S-4：双 None 与 Rust“至少提供一项”口径一致（直接 Err）
         let res = tunnel_config_set(None, None);
         assert!(res.is_err(), "双 None 必须 Err，实际: {res:?}");
+    }
+
+    #[test]
+    fn test_clash_meta_yaml_and_qr_svg_generation() {
+        let yaml = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"));
+        assert!(yaml.contains("server: 192.168.1.50"));
+        assert!(yaml.contains("port: 8899"));
+        assert!(yaml.contains("username: \"token_abc\""));
+        assert!(yaml.contains("password: \"token_abc\""));
+        assert!(yaml.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
+
+        let qr = render_qr_svg("http://192.168.1.50:8899/clash.yaml");
+        assert!(qr.is_ok());
+        let svg = qr.unwrap();
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("</svg>"));
     }
 }
