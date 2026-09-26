@@ -409,7 +409,11 @@ async function clearTunnelTokenAction(): Promise<void> {
       try {
         const { invoke } = await import('@tauri-apps/api/core')
         await invoke('proxy_disable')
+        await invoke('app_config_set', { patch: { configured: false } })
       } catch {}
+    } else {
+      localStorage.removeItem('pony-dev-tunnel-token')
+      localStorage.removeItem('pony-app-config')
     }
     gateInput.value = ''
     isEditingGate.value = false

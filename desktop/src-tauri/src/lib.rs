@@ -1087,6 +1087,8 @@ fn tunnel_token_clear() -> Result<(), String> {
   // A-P1-12：显式清除直发广播，绕过防毒化守卫——清除是用户安全意图，
   // 即使 keyring 瞬时故障也不得让旧凭据在引擎续命（与瞬时故障的旧值续命严格区分）
   let _ = ensure_tunnel_watch().send(tunnel_config_load());
+  // 清除令牌时，重置 configured 状态为 false，确保前端回到初始接入状态
+  let _ = app_config_set(serde_json::json!({ "configured": false }));
   Ok(())
 }
 /// 端点+凭据原子设置：url/secret 均为 Option（None=沿用）；任一失败即 Err 且不广播。

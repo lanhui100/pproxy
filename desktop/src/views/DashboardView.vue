@@ -196,10 +196,29 @@ const totalBytes = computed(() => {
 // ---- 出口R (VPS) 专属流量监控指标 (每月 500GB 额度) ----
 const VPS_MONTHLY_LIMIT_BYTES = 500 * 1024 * 1024 * 1024 // 500 GB
 
+function getUserStorageKey(sub: string): string {
+  return `pony-user-base-bytes:${sub}`
+}
+
+function getUserBaselineBytes(sub: string, currentTotal: number): number {
+  if (typeof localStorage === 'undefined') return 0
+  const k = getUserStorageKey(sub)
+  const saved = localStorage.getItem(k)
+  if (saved !== null) {
+    const num = Number(saved)
+    return isNaN(num) ? 0 : num
+  }
+  // 初次接入该用户时，记录当前机器已产生的 total 作为此用户的起始基线
+  localStorage.setItem(k, String(currentTotal))
+  return currentTotal
+}
+
 const userQuotaDisplay = computed(() => {
   if (!userClaims.value) return null
   const quota = userClaims.value.quota_bytes
-  const used = totalBytes.value
+  const currentTotal = totalBytes.value
+  const baseline = getUserBaselineBytes(userClaims.value.sub, currentTotal)
+  const used = Math.max(0, currentTotal - baseline)
   const pct = quota > 0 ? Math.min(100, Math.max(0, (used / quota) * 100)) : 0
   const expDate = new Date(userClaims.value.exp * 1000)
   return {
@@ -369,6 +388,10 @@ const userProxyRow = ref<IfaceRow>({
 
 async function testUserProxyRow(): Promise<void> {
   if (userProxyRow.value.testing) return
+  if (!isRunning.value) {
+    // 代理未开启时无需发起探测
+    return
+  }
   userProxyRow.value.testing = true
   try {
     const point = await probeSite('google.com')
@@ -529,6 +552,7 @@ function latestPoint(history: LatencyPoint[]): LatencyPoint | undefined {
 }
 
 function latestText(history: LatencyPoint[]): string {
+  if (!isRunning.value) return '—'
   const p = latestPoint(history)
   if (!p) return '—'
   if (!p.ok) return '失败'
@@ -536,6 +560,7 @@ function latestText(history: LatencyPoint[]): string {
 }
 
 function latestClass(history: LatencyPoint[]): string {
+  if (!isRunning.value) return 'text-muted-foreground'
   const p = latestPoint(history)
   if (!p) return 'text-muted-foreground'
   if (!p.ok) return 'text-rose-600'
