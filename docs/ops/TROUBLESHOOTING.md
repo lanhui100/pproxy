@@ -23,6 +23,15 @@
 - **原因**：X-Proxy-Secret 不匹配
 - **排查**：config.json worker_secret / upstreams.*.secret 与 Worker vars / Vercel env 是否一致
 
+### 经 HA Forwarder 转发的 POST 上游收到空 body（`Model  is not supported` / 空 model）
+- **原因**：Forwarder 头部重建 `sanitize_and_inject_ticket` 曾静默丢弃末行请求头
+  （POST 的 `Content-Length` 常居末位）→ 上游收不到 body → 后端报 model 为空
+  （2026-09-27 修复，ADR `.agents/notes/implemented/bug-fix/2026-09-27-ha-forwarder-drops-last-header-line.md`）
+- **排查**：同一 POST 把 `Content-Length` 手工置首 vs 置末，结果从"空 model"变为
+  "body 正常送达"即命中；`cargo test -p pproxy-core ha_forwarder` 含回归用例
+- **解决**：升级含修复的 pproxy 二进制（≥ commit 70341aa）；所有带 forwarder 的
+  部署（k3s 出口节点、桌面端 LocalHaForwarder）同样升级
+
 ### Google 429
 - **原因**：CF 出口 IP 被 Google 限流（瞬时）
 - **解决**：重试；持续出现则考虑该路由切 vercel
