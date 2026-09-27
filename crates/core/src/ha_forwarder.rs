@@ -320,6 +320,24 @@ fn sanitize_and_inject_ticket(
         out.extend_from_slice(b"\r\n");
     }
 
+    // FIX(SEC-P0-02 回归): 循环只消费带尾随 \r\n 的行，最后一个头（无尾随
+    // \r\n）此前被静默丢弃，导致每个经 Forwarder 转发的请求都会丢一个头
+    // （POST 的 Content-Length 常在末位 → 上游收不到 body，表现为
+    // "Model  is not supported"/空 model）。末行同样执行票证头剔除检查后写回。
+    if !cursor.is_empty() {
+        let trimmed_line = trim_byte_spaces(cursor);
+        let keep = if let Some(colon_pos) = trimmed_line.iter().position(|&b| b == b':') {
+            let key = trim_byte_spaces(&trimmed_line[..colon_pos]);
+            !key.eq_ignore_ascii_case(header_name)
+        } else {
+            true
+        };
+        if keep {
+            out.extend_from_slice(cursor);
+            out.extend_from_slice(b"\r\n");
+        }
+    }
+
     // 注入由 Forwarder 官方签署的合法集群票证
     if let Some(ticket) = ticket_val {
         out.extend_from_slice(header_name);
@@ -451,5 +469,27 @@ mod tests {
         let n3 = client3.read(&mut resp3).await.unwrap();
         let body3 = String::from_utf8_lossy(&resp3[..n3]);
         assert!(body3.contains("200 OK"), "expected 200, got: {body3}");
+    }
+
+    #[test]
+    fn sanitize_preserves_last_header_line() {
+        // 回归：末行无尾随 \r\n，此前被静默丢弃（POST 的 Content-Length 常居末位，
+        // 丢失后上游收不到 body → "Model  is not supported"/空 model）。
+        let head = b"POST /opencode/zen/v1/responses HTTP/1.1\r\nHost: pproxy-host\r\nContent-Length: 71\r\nX-Fake: v";
+        let out = sanitize_and_inject_ticket(head, b"x-pony-cluster-ticket", None);
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("Content-Length: 71"), "last header dropped: {s:?}");
+        assert!(s.contains("X-Fake: v"), "last header dropped: {s:?}");
+        assert!(s.ends_with("\r\n\r\n"), "terminator broken: {s:?}");
+    }
+
+    #[test]
+    fn sanitize_strips_ticket_header_anywhere_including_last_line() {
+        let head = b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nX-Pony-Cluster-Ticket: forged";
+        let out = sanitize_and_inject_ticket(head, b"x-pony-cluster-ticket", Some("official-ticket"));
+        let s = String::from_utf8_lossy(&out);
+        assert!(!s.contains("forged"), "forged ticket not stripped: {s:?}");
+        assert!(s.contains("x-pony-cluster-ticket: official-ticket"), "official ticket missing: {s:?}");
+        assert!(s.ends_with("\r\n\r\n"), "terminator broken: {s:?}");
     }
 }
