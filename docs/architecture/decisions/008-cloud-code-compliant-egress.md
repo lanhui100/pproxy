@@ -53,6 +53,10 @@ Error ID: ab8b023b-7b45-4039-b861-450368d935ad-4
   两份 CONNECT 实现统一改走 `ordered_gate_urls`，池化 `checkout_ordered` 同步按序取会话；
   桌面端经 `order_endpoints` 自动生效。
 - 保留 CF 端点作为兜底：单端点硬钉会把 Vercel 侧抖动放大成 Antigravity 全挂。
+- 修订（2026-09-29，决策记录 `.agents/notes/implemented/feature/2026-09-29-compliant-egress-poolable-sessions.md`）：
+  合规 host 端点列表含 NativeVps（如 `rn.`，原生美区固定 IP）时允许命中待命池——
+  冷建连（~1.3s）降为池化首帧绑定（~0.15s）；端点仅为 Vercel（vgate）时维持冷建连 +
+  fail-closed 语义，CF 端点始终零触碰（`checkout` 只遍历 ordered 端点，不越界回退）。
 
 **C. 顺带修 gate worker 的"半死隧道"bug**
 

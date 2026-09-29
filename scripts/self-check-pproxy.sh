@@ -5,7 +5,7 @@
 #   1. 端口归属：8899/8900 若被监听，必须属于 systemd 的 pproxy.service，
 #      绝不允许 nohup/裸起实例（P0-2 复发）。
 #   2. 合规出口计数：统计最近窗口内 `tunnel established host=...pooled=false`
-#      的 Cloud Code 系冷建连次数（= Vercel Fluid 调用次数，Vercel 有限额，
+#      的 Cloud Code 系冷建连次数（超阈值视为异常冷建连抖动或额度过耗）；
 #      P1-6 可观测性）；超出阈值硬失败。
 #   3. journal 哨兵：Address already in use（端口战争/循环崩溃）与
 #      no_compliant_egress（配置漂移 → 合规 host fail-closed）为硬失败；
@@ -39,16 +39,17 @@ for port in 8899 8900; do
     fi
 done
 
-# ---- 2. 合规出口（Vercel Fluid）冷建连计数 ----
-# Cloud Code 系 host 走 vgate 冷建连（pooled=false）= 每次 Vercel Fluid 调用。
-# 阈值：600/小时（10 次/分钟）——超过视为异常流量尖峰（正常 agent 循环远低于此）。
+# ---- 2. 合规出口冷建连计数 ----
+# 注（2026-09-29）：合规出口 host 在配置了可池化端点（如 NativeVps/RackNerd）时
+# 已允许命中待命池复用；若回退至仅 vgate 或池 miss 仍会发生冷建连（pooled=false）。
+# 阈值：600/小时（10 次/分钟）——超过视为异常冷建连流量尖峰（若走 vgate 则可能消耗 Vercel Fluid 额度）。
 WINDOW_MIN=${PPROXY_SELFCHECK_WINDOW_MIN:-60}
 THRESHOLD=${PPROXY_SELFCHECK_THRESHOLD:-600}
 count=$(journalctl -u pproxy.service --since "${WINDOW_MIN} min ago" --no-pager 2>/dev/null \
     | grep -c "tunnel established host=\(daily-cloudcode-pa\|cloudcode-pa\|cloudaicompanion\)\.googleapis\.com.*pooled=false" || true)
 [ "$VERBOSE" = 1 ] && echo "INFO: 近 ${WINDOW_MIN}min 合规出口冷建连 = ${count} (阈值 ${THRESHOLD})"
 if [ "$count" -gt "$THRESHOLD" ]; then
-    echo "FAIL: 近 ${WINDOW_MIN}min 合规出口冷建连 ${count} 超阈值 ${THRESHOLD} —— Vercel Fluid 额度可能被烧穿"
+    echo "FAIL: 近 ${WINDOW_MIN}min 合规出口冷建连 ${count} 超阈值 ${THRESHOLD} —— 频繁冷建连可能增加延迟或消耗出口额度"
     FAIL=1
 fi
 

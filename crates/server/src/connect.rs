@@ -454,9 +454,12 @@ pub async fn handle_connect_raw(
     // 先 establish（R4）：写 200 前可重试；denied 不重试；绝不静默回落直连
     // 池化（性能专项）：第一次尝试优先取待命会话（省 TCP+TLS+Upgrade ~4 RTT），
     // 待命会话 bind 失败（静默死亡）按 Network 重试，第二次尝试全新建连兜底。
+    // 性能架构优化（对齐 engine da82bd1）：若可用端点中包含可池化物理出口（如 NativeVps / RackNerd），
+    // 即使为 compliant_egress 也允许优先命中待命池，由 5 RTT (~1.5s) 冷建连降为 1 RTT (~150ms) 首帧绑定！
+    let has_poolable_endpoint = ordered_refs.iter().any(|ep| !pproxy_transport::is_vercel_endpoint(ep));
     let establish_started = tokio::time::Instant::now();
     for attempt in 0..MAX_ATTEMPTS {
-        let pooled_session = if attempt == 0 && !compliant_egress {
+        let pooled_session = if attempt == 0 && (!compliant_egress || has_poolable_endpoint) {
             pool.checkout_ordered(&ordered_refs)
         } else {
             None
@@ -1361,5 +1364,48 @@ mod tests {
             "认证类 host 应保持 CF 优先"
         );
         assert_eq!(vgate.conns.load(Ordering::SeqCst), 0);
+    }
+
+    /// 性能架构优化回归（2026-09-29，对齐 engine da82bd1）：
+    /// 当合规出口 host 配置中包含 NativeVps（如 rn.）等可池化物理出口时，
+    /// 允许命中待命池（减少 5 RTT 冷建连为 1 RTT 首帧绑定），并且绝不越界回退到 CF 会话。
+    #[tokio::test]
+    async fn compliant_host_with_native_vps_uses_pool() {
+        let cf = spawn_stub_worker(&[]).await;
+        let rn = spawn_stub_worker_at(&[], "/ws").await;
+        // 构造 NativeVps 端点：保留 127.0.0.1 可直连，同时带 ?rn. 匹配 is_native_vps_endpoint
+        let rn_url = format!("{}/?rn.vps", rn.url);
+        let vgate = spawn_stub_worker_at(&[], "/api/ws").await;
+        let cfg = TunnelConfig {
+            gate_url: format!("{},{},{}", rn_url, vgate.url, cf.url),
+            token: "tok".into(),
+            allowlist: entries(&["googleapis.com"]),
+        };
+
+        let pool = TunnelPool::new(cfg);
+        // 等待后台 maintain 任务把 rn 和 cf 端点都预热到稳定状态
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_len() < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "池化未在 5s 内预建 rn 和 cf 会话");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let cf_conns_before = cf.conns.load(Ordering::SeqCst);
+        let rn_conns_before = rn.conns.load(Ordering::SeqCst);
+
+        let mut state = gw_state(None, "compliant-rn-pool");
+        state.tunnel = Some(pool);
+        let addr = start_gateway(state).await;
+
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(b"CONNECT daily-cloudcode-pa.googleapis.com:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let (status, _head, _) = read_response(&mut c).await;
+        assert_eq!(status, 200, "合规 host 应建连成功");
+        // 请求阶段：CF 端点绝对没有发生新的建连（没有借出 CF 或冷建连 CF）
+        assert_eq!(cf.conns.load(Ordering::SeqCst), cf_conns_before, "合规 host 绝不得触碰 CF 端点");
+        // rn 必须参与过建连
+        assert!(rn_conns_before >= 1, "rn 必须被预热建连");
     }
 }
