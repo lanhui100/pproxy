@@ -1,0 +1,162 @@
+ts_epoch_ms,route,ok,status,latency_ms,error
+1790671621732,openai,False|402|95|edge 自身错误（status 402），未到达源站
+1790671621732,anthropic,False|404|310|edge 自身错误（status 404），未到达源站
+1790671621732,opencode,True|200|389|
+1790671621732,xai,False|402|74|edge 自身错误（status 402），未到达源站
+1790671621732,github,False|200|259|edge 自身错误（status 200），未到达源站
+1790671621732,bai,False|403|1111|edge 自身错误（status 403），未到达源站
+1790671621732,opencode-cf,False|200|345|edge 自身错误（status 200），未到达源站
+1790671688912,openai,False|402|74|edge 自身错误（status 402），未到达源站
+1790671688912,anthropic,False|404|262|edge 自身错误（status 404），未到达源站
+1790671688912,opencode,True|200|890|
+1790671688912,xai,False|402|73|edge 自身错误（status 402），未到达源站
+1790671688912,github,False|200|288|edge 自身错误（status 200），未到达源站
+1790671688912,bai,False|403|941|edge 自身错误（status 403），未到达源站
+1790671688912,opencode-cf,False|200|304|edge 自身错误（status 200），未到达源站
+1790671755861,openai,False|402|73|edge 自身错误（status 402），未到达源站
+1790671755861,anthropic,False|404|318|edge 自身错误（status 404），未到达源站
+1790671755861,opencode,True|200|952|
+1790671755861,xai,False|402|74|edge 自身错误（status 402），未到达源站
+1790671755861,github,False|200|269|edge 自身错误（status 200），未到达源站
+1790671755861,bai,False|403|529|edge 自身错误（status 403），未到达源站
+1790671755861,opencode-cf,False|200|367|edge 自身错误（status 200），未到达源站
+1790671822237,openai,False|402|77|edge 自身错误（status 402），未到达源站
+1790671822237,anthropic,False|404|371|edge 自身错误（status 404），未到达源站
+1790671822237,opencode,True|200|365|
+1790671822237,xai,False|402|79|edge 自身错误（status 402），未到达源站
+1790671822237,github,False|200|315|edge 自身错误（status 200），未到达源站
+1790671822237,bai,False|403|430|edge 自身错误（status 403），未到达源站
+1790671822237,opencode-cf,False|200|412|edge 自身错误（status 200），未到达源站
+1790671889699,openai,False|402|74|edge 自身错误（status 402），未到达源站
+1790671889699,anthropic,False|404|257|edge 自身错误（status 404），未到达源站
+1790671889699,opencode,True|200|369|
+1790671889699,xai,False|402|74|edge 自身错误（status 402），未到达源站
+1790671889699,github,False|200|326|edge 自身错误（status 200），未到达源站
+1790671889699,bai,False|403|441|edge 自身错误（status 403），未到达源站
+1790671889699,opencode-cf,False|200|316|edge 自身错误（status 200），未到达源站
+1790671955887,openai,False|402|84|edge 自身错误（status 402），未到达源站
+1790671955887,anthropic,False|404|257|edge 自身错误（status 404），未到达源站
+1790671955887,opencode,True|200|390|
+1790671955887,xai,False|402|73|edge 自身错误（status 402），未到达源站
+1790671955887,github,False|200|302|edge 自身错误（status 200），未到达源站
+1790671955887,bai,False|403|463|edge 自身错误（status 403），未到达源站
+1790671955887,opencode-cf,False|200|316|edge 自身错误（status 200），未到达源站
+1790672022502,openai,False|402|77|edge 自身错误（status 402），未到达源站
+1790672022502,anthropic,False|404|256|edge 自身错误（status 404），未到达源站
+1790672022502,opencode,True|200|337|
+1790672022502,xai,False|402|74|edge 自身错误（status 402），未到达源站
+1790672022502,github,False|200|264|edge 自身错误（status 200），未到达源站
+1790672022502,bai,False|403|539|edge 自身错误（status 403），未到达源站
+1790672022502,opencode-cf,False|200|489|edge 自身错误（status 200），未到达源站
+1790672089853,openai,False|402|80|edge 自身错误（status 402），未到达源站
+1790672089853,anthropic,False|404|260|edge 自身错误（status 404），未到达源站
+1790672089853,opencode,True|200|347|
+1790672089853,xai,False|402|74|edge 自身错误（status 402），未到达源站
+1790672089853,github,False|429|246|edge 自身错误（status 429），未到达源站
+1790672089853,bai,False|403|548|edge 自身错误（status 403），未到达源站
+1790672089853,opencode-cf,False|200|479|edge 自身错误（status 200），未到达源站
+1790672156140,openai,False|402|74|edge 自身错误（status 402），未到达源站
+1790672156140,anthropic,False|404|412|edge 自身错误（status 404），未到达源站
+1790672156140,opencode,True|200|670|
+1790672156140,xai,False|402|74|edge 自身错误（status 402），未到达源站
+1790672156140,github,False|200|339|edge 自身错误（status 200），未到达源站
+1790672156140,bai,False|403|540|edge 自身错误（status 403），未到达源站
+1790672156140,opencode-cf,False|200|353|edge 自身错误（status 200），未到达源站
+1790672224237,openai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672224237,anthropic,False|404|294|edge 自身错误（status 404），未到达源站
+1790672224237,opencode,True|200|427|
+1790672224237,xai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672224237,github,False|200|326|edge 自身错误（status 200），未到达源站
+1790672224237,bai,False|403|457|edge 自身错误（status 403），未到达源站
+1790672224237,opencode-cf,False|200|288|edge 自身错误（status 200），未到达源站
+1790672291346,openai,False|402|81|edge 自身错误（status 402），未到达源站
+1790672291346,anthropic,False|404|261|edge 自身错误（status 404），未到达源站
+1790672291346,opencode,True|200|980|
+1790672291346,xai,False|402|77|edge 自身错误（status 402），未到达源站
+1790672291346,github,False|200|311|edge 自身错误（status 200），未到达源站
+1790672291346,bai,False|403|501|edge 自身错误（status 403），未到达源站
+1790672291346,opencode-cf,False|200|305|edge 自身错误（status 200），未到达源站
+1790672366950,openai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672366950,anthropic,False|404|417|edge 自身错误（status 404），未到达源站
+1790672366950,opencode,True|200|422|
+1790672366950,xai,False|402|74|edge 自身错误（status 402），未到达源站
+1790672366950,github,False|200|322|edge 自身错误（status 200），未到达源站
+1790672366950,bai,False|403|508|edge 自身错误（status 403），未到达源站
+1790672366950,opencode-cf,False|200|465|edge 自身错误（status 200），未到达源站
+1790672434143,openai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672434143,anthropic,False|404|438|edge 自身错误（status 404），未到达源站
+1790672434143,opencode,True|200|382|
+1790672434143,xai,False|402|78|edge 自身错误（status 402），未到达源站
+1790672434143,github,False|200|401|edge 自身错误（status 200），未到达源站
+1790672434143,bai,False|403|546|edge 自身错误（status 403），未到达源站
+1790672434143,opencode-cf,False|200|470|edge 自身错误（status 200），未到达源站
+1790672502538,openai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672502538,anthropic,False|404|293|edge 自身错误（status 404），未到达源站
+1790672502538,opencode,True|200|916|
+1790672502538,xai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672502538,github,False|200|407|edge 自身错误（status 200），未到达源站
+1790672502538,bai,False|403|490|edge 自身错误（status 403），未到达源站
+1790672502538,opencode-cf,False|200|805|edge 自身错误（status 200），未到达源站
+1790672571886,openai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672571886,anthropic,False|404|331|edge 自身错误（status 404），未到达源站
+1790672571886,opencode,True|200|956|
+1790672571886,xai,False|402|77|edge 自身错误（status 402），未到达源站
+1790672571886,github,False|200|321|edge 自身错误（status 200），未到达源站
+1790672571886,bai,False|403|485|edge 自身错误（status 403），未到达源站
+1790672571886,opencode-cf,False|200|342|edge 自身错误（status 200），未到达源站
+1790672638732,openai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672638732,anthropic,False|404|270|edge 自身错误（status 404），未到达源站
+1790672638732,opencode,True|200|417|
+1790672638732,xai,False|402|82|edge 自身错误（status 402），未到达源站
+1790672638732,github,False|200|279|edge 自身错误（status 200），未到达源站
+1790672638732,bai,False|403|494|edge 自身错误（status 403），未到达源站
+1790672638732,opencode-cf,False|200|804|edge 自身错误（status 200），未到达源站
+1790672706625,openai,False|402|76|edge 自身错误（status 402），未到达源站
+1790672706625,anthropic,False|404|310|edge 自身错误（status 404），未到达源站
+1790672706625,opencode,True|200|387|
+1790672706625,xai,False|402|91|edge 自身错误（status 402），未到达源站
+1790672706625,github,False|200|324|edge 自身错误（status 200），未到达源站
+1790672706625,bai,False|403|508|edge 自身错误（status 403），未到达源站
+1790672706625,opencode-cf,False|200|796|edge 自身错误（status 200），未到达源站
+1790672774542,openai,False|402|81|edge 自身错误（status 402），未到达源站
+1790672774542,anthropic,False|404|372|edge 自身错误（status 404），未到达源站
+1790672774542,opencode,True|200|358|
+1790672774542,xai,False|402|80|edge 自身错误（status 402），未到达源站
+1790672774542,github,False|200|283|edge 自身错误（status 200），未到达源站
+1790672774542,bai,False|403|488|edge 自身错误（status 403），未到达源站
+1790672774542,opencode-cf,False|200|332|edge 自身错误（status 200），未到达源站
+1790672840660,openai,False|402|83|edge 自身错误（status 402），未到达源站
+1790672840660,anthropic,False|404|383|edge 自身错误（status 404），未到达源站
+1790672840660,opencode,True|200|415|
+1790672840660,xai,False|402|83|edge 自身错误（status 402），未到达源站
+1790672840660,github,False|200|298|edge 自身错误（status 200），未到达源站
+1790672840660,bai,False|403|819|edge 自身错误（status 403），未到达源站
+1790672840660,opencode-cf,False|200|445|edge 自身错误（status 200），未到达源站
+1790672907843,openai,False|402|119|edge 自身错误（status 402），未到达源站
+1790672907843,anthropic,False|404|427|edge 自身错误（status 404），未到达源站
+1790672907843,opencode,True|200|377|
+1790672907843,xai,False|402|75|edge 自身错误（status 402），未到达源站
+1790672907843,github,False|200|337|edge 自身错误（status 200），未到达源站
+1790672907843,bai,False|403|526|edge 自身错误（status 403），未到达源站
+1790672907843,opencode-cf,False|200|350|edge 自身错误（status 200），未到达源站
+1790672975471,openai,False|402|83|edge 自身错误（status 402），未到达源站
+1790672975471,anthropic,False|404|267|edge 自身错误（status 404），未到达源站
+1790672975471,opencode,True|200|869|
+1790672975471,xai,False|402|83|edge 自身错误（status 402），未到达源站
+1790672975471,github,False|200|352|edge 自身错误（status 200），未到达源站
+1790672975471,bai,False|403|469|edge 自身错误（status 403），未到达源站
+1790672975471,opencode-cf,False|200|346|edge 自身错误（status 200），未到达源站
+1790673043927,openai,False|402|82|edge 自身错误（status 402），未到达源站
+1790673043927,anthropic,False|404|343|edge 自身错误（status 404），未到达源站
+1790673043927,opencode,True|200|377|
+1790673043927,xai,False|402|83|edge 自身错误（status 402），未到达源站
+1790673043927,github,False|200|428|edge 自身错误（status 200），未到达源站
+1790673043927,bai,False|403|563|edge 自身错误（status 403），未到达源站
+1790673043927,opencode-cf,False|200|404|edge 自身错误（status 200），未到达源站
+1790673111700,openai,False|402|82|edge 自身错误（status 402），未到达源站
+1790673111700,anthropic,False|404|279|edge 自身错误（status 404），未到达源站
+1790673111700,opencode,True|200|374|
+1790673111700,xai,False|402|86|edge 自身错误（status 402），未到达源站
+1790673111700,github,False|200|308|edge 自身错误（status 200），未到达源站
+1790673111700,bai,False|403|440|edge 自身错误（status 403），未到达源站
+1790673111700,opencode-cf,False|200|308|edge 自身错误（status 200），未到达源站

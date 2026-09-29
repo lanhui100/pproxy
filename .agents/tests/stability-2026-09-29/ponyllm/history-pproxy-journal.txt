@@ -1,0 +1,70 @@
+=== pproxy.service journal 24h analysis ===
+generated_at_epoch_ms=1790671909622
+total_log_lines=4634
+tunnel_established_total=2248
+establish_ms_p50=300 p90=1471 p95=1583 p99=2311 max=25864
+establish_ms_mean=731.6
+pooled_false_count=516
+pooled_false_samples (time,host,ms):
+  ('2026-09-28T17:24:48+08:00 devserver ppro', 'daily-cloudcode-pa.googleapis.com', 1392)
+  ('2026-09-28T17:25:08+08:00 devserver ppro', 'daily-cloudcode-pa.googleapis.com', 1200)
+  ('2026-09-28T17:25:15+08:00 devserver ppro', 'daily-cloudcode-pa.googleapis.com', 1240)
+  ('2026-09-28T17:25:21+08:00 devserver ppro', 'daily-cloudcode-pa.googleapis.com', 1343)
+  ('2026-09-28T17:25:28+08:00 devserver ppro', 'daily-cloudcode-pa.googleapis.com', 1308)
+  ('2026-09-28T17:25:34+08:00 devserver ppro', 'daily-cloudcode-pa.googleapis.com', 1331)
+  ('2026-09-28T17:25:39+08:00 devserver ppro', 'cloudcode-pa.googleapis.com', 1382)
+  ('2026-09-28T17:25:45+08:00 devserver ppro', 'daily-cloudcode-pa.googleapis.com', 1566)
+  ('2026-09-28T17:26:00+08:00 devserver ppro', 'daily-cloudcode-pa.googleapis.com', 1301)
+  ('2026-09-28T17:26:04+08:00 devserver ppro', 'cloudcode-pa.googleapis.com', 1281)
+top_tunnel_hosts:
+  herdr.dev: 964
+  daily-cloudcode-pa.googleapis.com: 253
+  api.github.com: 103
+  www.google.com: 83
+  models.opencode.ai: 56
+  oauth2.googleapis.com: 56
+  opencode.ai: 49
+  edith.xiaohongshu.com: 46
+  sns-webpic-qc.xhscdn.com: 36
+  optimizationguide-pa.googleapis.com: 33
+  clients2.google.com: 30
+  redirector.gvt1.com: 29
+  mobile.events.data.microsoft.com: 27
+  fe-static.xhscdn.com: 24
+  sns-avatar-qc.xhscdn.com: 24
+error_class_counts:
+  error: 31
+  timeout: 42
+  denied: 69
+  retry: 24
+  failover: 0
+  refused: 0
+  reset: 1
+  unreachable: 0
+error_class_samples:
+  [error]
+    2026-09-28T17:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T09:25:25.671358Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+    2026-09-28T18:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T10:25:25.510581Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+    2026-09-28T19:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T11:25:25.758844Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+    2026-09-28T20:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T12:25:25.715975Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+    2026-09-28T21:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T13:25:25.726973Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+  [timeout]
+    2026-09-28T17:13:10+08:00 devserver pproxy-server[694697]: 2026-09-28T09:13:10.120311Z  WARN pproxy_transport::pool: tunnel pool refill wss://gate.ponygo.fun/ws failed: dial timeout after 8s
+    2026-09-28T17:13:24+08:00 devserver pproxy-server[694697]: 2026-09-28T09:13:24.168250Z  WARN pproxy_transport::pool: tunnel pool refill wss://gate.ponygo.fun/ws failed: dial timeout after 8s
+    2026-09-28T17:32:02+08:00 devserver pproxy-server[694697]: 2026-09-28T09:32:02.399127Z  WARN pproxy_transport::pool: tunnel pool refill wss://gate.ponygo.fun/ws failed: dial timeout after 8s
+    2026-09-28T18:57:55+08:00 devserver pproxy-server[694697]: 2026-09-28T10:57:55.732659Z  WARN pproxy_transport::pool: tunnel pool refill wss://gate.ponygo.fun/ws failed: dial timeout after 8s
+    2026-09-28T18:58:09+08:00 devserver pproxy-server[694697]: 2026-09-28T10:58:09.728643Z  WARN pproxy_transport::pool: tunnel pool refill wss://gate.ponygo.fun/ws failed: dial timeout after 8s
+  [denied]
+    2026-09-28T22:58:31+08:00 devserver pproxy-server[694697]: 2026-09-28T14:58:31.711847Z  WARN pproxy_server::connect: gate bind failed, trying next endpoint endpoint="wss://gate.ponygo.fun/ws" host="herdr.dev" port=443 er
+    2026-09-28T23:44:32+08:00 devserver pproxy-server[694697]: 2026-09-28T15:44:32.406721Z  INFO pproxy_server::connect: connect denied: port not allowed host=0.0.0.0 port=44383
+    2026-09-28T23:44:32+08:00 devserver pproxy-server[694697]: 2026-09-28T15:44:32.518047Z  INFO pproxy_server::connect: connect denied: port not allowed host=0.0.0.0 port=44383
+    2026-09-28T23:44:32+08:00 devserver pproxy-server[694697]: 2026-09-28T15:44:32.519167Z  INFO pproxy_server::connect: connect denied: port not allowed host=0.0.0.0 port=44383
+    2026-09-29T13:15:59+08:00 devserver pproxy-server[694697]: 2026-09-29T05:15:59.309155Z  INFO pproxy_server::connect: connect denied: port not allowed host=mtalk.google.com port=5228
+  [retry]
+    2026-09-28T17:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T09:25:25.671358Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+    2026-09-28T18:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T10:25:25.510581Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+    2026-09-28T19:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T11:25:25.758844Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+    2026-09-28T20:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T12:25:25.715975Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+    2026-09-28T21:25:25+08:00 devserver pproxy-server[694697]: 2026-09-28T13:25:25.726973Z  WARN pproxy_server::monitor: monitor: vercel collect failed (retry next tick) error=http status 400
+  [reset]
+    2026-09-29T02:15:24+08:00 devserver pproxy-server[694697]: 2026-09-28T18:15:24.359675Z  WARN pproxy_transport::pool: tunnel pool refill wss://gate.ponygo.fun/ws failed: IO error: Connection reset by peer (os error 104)

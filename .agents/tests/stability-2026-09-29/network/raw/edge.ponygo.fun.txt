@@ -1,0 +1,89 @@
+##### edge.ponygo.fun @ 2026-09-29 16:51:26 #####
+----- DNS local resolver (dig +short +time=3) x5 -----
+run1 24ms ips=[172.67.174.120 104.21.47.232 ]
+run2 24ms ips=[104.21.47.232 172.67.174.120 ]
+run3 25ms ips=[104.21.47.232 172.67.174.120 ]
+run4 23ms ips=[104.21.47.232 172.67.174.120 ]
+run5 23ms ips=[104.21.47.232 172.67.174.120 ]
+----- DNS @114.114.114.114 x3 (对照) -----
+114run1 486ms ips=[104.21.47.232 172.67.174.120 ]
+114run2 39ms ips=[172.67.174.120 104.21.47.232 ]
+114run3 37ms ips=[172.67.174.120 104.21.47.232 ]
+----- DNS @8.8.8.8 x3 (对照) -----
+88run1 224ms ips=[172.67.174.120 104.21.47.232 ]
+88run2 285ms ips=[104.21.47.232 172.67.174.120 ]
+88run3 276ms ips=[172.67.174.120 104.21.47.232 ]
+----- TCP :443 x15 (bash /dev/tcp) -----
+run1 ok 237ms
+run2 ok 265ms
+run3 ok 221ms
+run4 ok 262ms
+run5 ok 285ms
+run6 ok 300ms
+run7 ok 258ms
+run8 ok 277ms
+run9 ok 261ms
+run10 ok 258ms
+run11 ok 254ms
+run12 ok 232ms
+run13 ok 281ms
+run14 ok 245ms
+run15 ok 226ms
+----- TLS handshake x10 (openssl s_client) -----
+run1 722ms cert=1
+run2 713ms cert=1
+run3 877ms cert=1
+run4 949ms cert=1
+run5 922ms cert=1
+run6 786ms cert=1
+run7 932ms cert=1
+run8 830ms cert=1
+run9 803ms cert=1
+run10 673ms cert=1
+----- CERT (showcerts x509 -noout) -----
+subject=CN = ponygo.fun
+issuer=C = US, O = Google Trust Services, CN = WE1
+notBefore=Sep 25 00:06:49 2026 GMT
+notAfter=Dec 24 01:06:46 2026 GMT
+----- HTTP x10 (curl -m 15 direct --noproxy) -----
+run1 code=404 total=0.664896s
+run2 code=404 total=0.812020s
+run3 code=404 total=0.741529s
+run4 code=404 total=0.743860s
+run5 code=404 total=0.693772s
+run6 code=404 total=0.784391s
+run7 code=404 total=0.777634s
+run8 code=404 total=0.640129s
+run9 code=404 total=0.711884s
+run10 code=404 total=0.842511s
+----- ICMP ping -c 10 -W 2 -----
+PING edge.ponygo.fun (2606:4700:3035::6815:2fe8) 56 data bytes
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=1 ttl=54 time=190 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=2 ttl=54 time=188 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=3 ttl=54 time=188 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=4 ttl=54 time=189 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=5 ttl=54 time=185 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=6 ttl=54 time=184 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=7 ttl=54 time=191 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=8 ttl=54 time=185 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=9 ttl=54 time=190 ms
+64 bytes from 2606:4700:3035::6815:2fe8: icmp_seq=10 ttl=54 time=184 ms
+
+--- edge.ponygo.fun ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9012ms
+rtt min/avg/max/mdev = 184.032/187.374/191.037/2.402 ms
+----- mtr -r -c 10 (wide) -----
+Start: 2026-09-29T16:51:57+0800
+HOST: devserver                 Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- 2408:8220:8f17:1570::1     0.0%    10    0.5   0.6   0.5   0.9   0.1
+  2.|-- 2408:8001:500:509::1       0.0%    10    3.1   9.3   3.1  18.7   5.7
+  3.|-- 2408:8001:500:1221::2     50.0%    10    7.0   4.3   3.0   7.0   1.6
+  4.|-- ???                       100.0    10    0.0   0.0   0.0   0.0   0.0
+  5.|-- ???                       100.0    10    0.0   0.0   0.0   0.0   0.0
+  6.|-- 2408:8000:2:8055::1        0.0%    10   34.9  35.4  34.9  36.0   0.4
+  7.|-- 2408:8000:2:671::1         0.0%    10   33.4  35.2  33.4  42.4   3.0
+  8.|-- 2408:8000:2:56f::1        40.0%    10  186.1 185.7 184.5 186.6   0.7
+  9.|-- 2408:8000:3::641           0.0%    10  192.7 193.6 192.7 196.1   1.0
+ 10.|-- 2400:cb00:12:3::           0.0%    10  205.8 206.0 197.9 219.2   7.2
+ 11.|-- 2606:4700:3035::6815:2fe8  0.0%    10  184.1 186.8 184.1 190.3   2.4
+RESULT_HOST (stats computed in summary.md)

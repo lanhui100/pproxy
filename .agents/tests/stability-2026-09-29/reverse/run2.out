@@ -1,0 +1,14 @@
+[finalize] window start=1790671593180 end=1790673123180 now=1790671848072 waiting...
+[finalize] window over, freezing probes
+[finalize] sample counts:
+  3166 /home/dm/pproxy/.agents/tests/stability-2026-09-29/reverse/probe_routes.csv
+    70 /home/dm/pproxy/.agents/tests/stability-2026-09-29/reverse/control_direct.csv
+   162 /home/dm/pproxy/.agents/tests/stability-2026-09-29/reverse/control_route_test.csv
+  3398 total
+[finalize] analyze.py rc=0
+
+总体判定: ⚠️ **总体不通过**，存在不稳定项
+
+### opencode failover 观察
+探测窗口内 opencode 主上游 rn.ponygo.fun 全程可达(直连 200), 网关 opencode 路由零异常, **未触发 vps→backup worker failover**。
+[finalize] done. summary.md written at 17:12:05

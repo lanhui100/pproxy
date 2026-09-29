@@ -1,0 +1,4 @@
+=== measure.sh start 2026-09-29 16:50:01 CST ===
+resolver: nameserver 127.0.0.53
+RESULT egress done
+=== measure.sh DONE 2026-09-29 17:09:11 CST ===

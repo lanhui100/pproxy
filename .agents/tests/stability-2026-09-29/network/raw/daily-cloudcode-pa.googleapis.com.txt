@@ -1,0 +1,85 @@
+##### daily-cloudcode-pa.googleapis.com @ 2026-09-29 16:53:42 #####
+----- DNS local resolver (dig +short +time=3) x5 -----
+run1 54ms ips=[172.217.115.4 172.217.118.4 172.217.113.4 172.217.119.4 172.217.112.4 172.217.114.4 172.217.116.4 172.217.117.4 ]
+run2 24ms ips=[172.217.117.4 172.217.116.4 172.217.118.4 172.217.114.4 172.217.112.4 172.217.119.4 172.217.113.4 172.217.115.4 ]
+run3 23ms ips=[172.217.112.4 172.217.116.4 172.217.113.4 172.217.115.4 172.217.114.4 172.217.117.4 172.217.118.4 172.217.119.4 ]
+run4 24ms ips=[172.217.116.4 172.217.118.4 172.217.117.4 172.217.114.4 172.217.112.4 172.217.113.4 172.217.119.4 172.217.115.4 ]
+run5 24ms ips=[172.217.113.4 172.217.115.4 172.217.118.4 172.217.116.4 172.217.114.4 172.217.117.4 172.217.112.4 172.217.119.4 ]
+----- DNS @114.114.114.114 x3 (对照) -----
+114run1 40ms ips=[172.217.119.4 172.217.118.4 172.217.115.4 ]
+114run2 24ms ips=[172.217.116.4 172.217.119.4 172.217.118.4 ]
+114run3 39ms ips=[172.217.119.4 172.217.118.4 172.217.113.4 ]
+----- DNS @8.8.8.8 x3 (对照) -----
+88run1 246ms ips=[172.217.117.4 172.217.119.4 172.217.114.4 172.217.118.4 172.217.116.4 172.217.112.4 172.217.113.4 172.217.115.4 ]
+88run2 2026ms ips=[;; communications error to 8.8.8.8#53: timed out ;; no servers could be reached ]
+88run3 241ms ips=[172.217.114.4 172.217.112.4 172.217.113.4 172.217.117.4 172.217.115.4 172.217.118.4 172.217.119.4 172.217.116.4 ]
+----- TCP :443 x15 (bash /dev/tcp) -----
+run1 FAIL(6005ms)
+run2 FAIL(6006ms)
+run3 FAIL(6006ms)
+run4 FAIL(6006ms)
+run5 FAIL(6005ms)
+run6 FAIL(6005ms)
+run7 FAIL(6004ms)
+run8 FAIL(6004ms)
+run9 FAIL(6004ms)
+run10 FAIL(6006ms)
+run11 FAIL(6004ms)
+run12 FAIL(6004ms)
+run13 FAIL(6004ms)
+run14 FAIL(6004ms)
+run15 FAIL(6004ms)
+----- TLS handshake x10 (openssl s_client) -----
+run1 12007ms cert=0
+  (no cert -> handshake fail)
+run2 12005ms cert=0
+  (no cert -> handshake fail)
+run3 12006ms cert=0
+  (no cert -> handshake fail)
+run4 12007ms cert=0
+  (no cert -> handshake fail)
+run5 12004ms cert=0
+  (no cert -> handshake fail)
+run6 12005ms cert=0
+  (no cert -> handshake fail)
+run7 12004ms cert=0
+  (no cert -> handshake fail)
+run8 12005ms cert=0
+  (no cert -> handshake fail)
+run9 12006ms cert=0
+  (no cert -> handshake fail)
+run10 12005ms cert=0
+  (no cert -> handshake fail)
+----- CERT (showcerts x509 -noout) -----
+----- HTTP x10 (curl -m 15 direct --noproxy) -----
+run1 code=000 total=15.002023s
+run2 code=000 total=15.001607s
+run3 code=000 total=15.002094s
+run4 code=000 total=15.001763s
+run5 code=000 total=15.002174s
+run6 code=000 total=15.002401s
+run7 code=000 total=15.002338s
+run8 code=000 total=15.001669s
+run9 code=000 total=15.001887s
+run10 code=000 total=15.001586s
+----- ICMP ping -c 10 -W 2 -----
+PING daily-cloudcode-pa.googleapis.com (2001:4860:4840:400::) 56 data bytes
+
+--- daily-cloudcode-pa.googleapis.com ping statistics ---
+10 packets transmitted, 0 received, 100% packet loss, time 9222ms
+
+----- mtr -r -c 10 (wide) -----
+Start: 2026-09-29T17:00:09+0800
+HOST: devserver                                                  Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- 2408:8220:8f17:1570::1                                      0.0%    10    0.5   0.5   0.5   0.6   0.0
+  2.|-- 2408:8001:500:509::1                                        0.0%    10    3.5   3.0   2.5   4.4   0.6
+  3.|-- 2408:8001:500:223b::2                                      30.0%    10   11.1   7.3   4.6  14.6   3.9
+  4.|-- ???                                                        100.0    10    0.0   0.0   0.0   0.0   0.0
+  5.|-- ???                                                        100.0    10    0.0   0.0   0.0   0.0   0.0
+  6.|-- 2408:8000:2:804b::1                                        90.0%    10   17.2  17.2  17.2  17.2   0.0
+  7.|-- 2408:8000:2:584::1                                          0.0%    10   18.5  20.8  18.1  28.1   3.8
+  8.|-- ???                                                        100.0    10    0.0   0.0   0.0   0.0   0.0
+  9.|-- xe-8-0-3.edge2.SanJose3.Level3.net (2001:1900:2100:32::11)  0.0%    10  183.0 181.4 180.1 184.7   1.5
+ 10.|-- 2001:1900::3:208                                            0.0%    10  189.1 191.0 187.9 204.1   5.2
+ 11.|-- ???                                                        100.0    10    0.0   0.0   0.0   0.0   0.0
+RESULT_HOST (stats computed in summary.md)

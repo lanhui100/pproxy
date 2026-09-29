@@ -1,0 +1,51 @@
+##### tailnet node 100.105.241.39 @ 2026-09-29 17:08:41 #####
+----- tailscale status (确认链路) -----
+100.105.241.39   tencent     lanhui100@                   linux    active; direct 175.24.73.251:41641, tx 2462656336 rx 675219852                              
+----- tailscale ping x3 -----
+pong from tencent (100.105.241.39) via 175.24.73.251:41641 in 24ms
+----- ping -c 20 -W 2 -----
+PING 100.105.241.39 (100.105.241.39) 56(84) bytes of data.
+64 bytes from 100.105.241.39: icmp_seq=1 ttl=64 time=23.2 ms
+64 bytes from 100.105.241.39: icmp_seq=2 ttl=64 time=23.4 ms
+64 bytes from 100.105.241.39: icmp_seq=3 ttl=64 time=23.5 ms
+64 bytes from 100.105.241.39: icmp_seq=4 ttl=64 time=23.5 ms
+64 bytes from 100.105.241.39: icmp_seq=6 ttl=64 time=23.6 ms
+64 bytes from 100.105.241.39: icmp_seq=7 ttl=64 time=24.0 ms
+64 bytes from 100.105.241.39: icmp_seq=8 ttl=64 time=24.5 ms
+64 bytes from 100.105.241.39: icmp_seq=9 ttl=64 time=24.1 ms
+64 bytes from 100.105.241.39: icmp_seq=10 ttl=64 time=23.9 ms
+64 bytes from 100.105.241.39: icmp_seq=11 ttl=64 time=24.3 ms
+64 bytes from 100.105.241.39: icmp_seq=12 ttl=64 time=23.9 ms
+64 bytes from 100.105.241.39: icmp_seq=13 ttl=64 time=23.5 ms
+64 bytes from 100.105.241.39: icmp_seq=14 ttl=64 time=24.4 ms
+64 bytes from 100.105.241.39: icmp_seq=15 ttl=64 time=26.7 ms
+64 bytes from 100.105.241.39: icmp_seq=16 ttl=64 time=24.0 ms
+64 bytes from 100.105.241.39: icmp_seq=17 ttl=64 time=23.4 ms
+64 bytes from 100.105.241.39: icmp_seq=18 ttl=64 time=23.6 ms
+64 bytes from 100.105.241.39: icmp_seq=19 ttl=64 time=24.0 ms
+
+--- 100.105.241.39 ping statistics ---
+20 packets transmitted, 18 received, 10% packet loss, time 19074ms
+rtt min/avg/max/mdev = 23.212/23.967/26.726/0.762 ms
+----- TCP :8899 x20 (bash /dev/tcp) -----
+run1 ok 29ms (port 8899)
+run2 ok 31ms (port 8899)
+run3 ok 30ms (port 8899)
+run4 ok 32ms (port 8899)
+run5 ok 31ms (port 8899)
+run6 ok 30ms (port 8899)
+run7 ok 29ms (port 8899)
+run8 ok 30ms (port 8899)
+run9 ok 32ms (port 8899)
+run10 ok 31ms (port 8899)
+run11 ok 32ms (port 8899)
+run12 ok 31ms (port 8899)
+run13 ok 29ms (port 8899)
+run14 ok 31ms (port 8899)
+run15 ok 30ms (port 8899)
+run16 ok 32ms (port 8899)
+run17 ok 31ms (port 8899)
+run18 ok 32ms (port 8899)
+run19 ok 29ms (port 8899)
+run20 ok 30ms (port 8899)
+RESULT_HOST 100.105.241.39 tcp=

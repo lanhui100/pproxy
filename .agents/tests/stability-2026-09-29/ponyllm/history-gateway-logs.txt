@@ -1,0 +1,58 @@
+=== ponyllm-gateway 24h logs analysis (kubectl logs --since=24h) ===
+total_lines=12634
+count[error]=491
+count[timeout]=205
+count[stall]=3
+count[retry]=140
+count[failover]=2
+count[failed]=82
+count[\b502\b]=0
+count[\b503\b]=12
+count[\b504\b]=0
+
+--- samples: timeout ---
+  [2m2026-09-29T04:29:13.120255Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:29:34.423120Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:29:50.987236Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:30:35.644104Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:30:35.660577Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:30:35.660621Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_server::route
+  [2m2026-09-29T04:30:35.677322Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:30:38.895515Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+
+--- samples: stall ---
+  [2m2026-09-29T04:51:37.690104Z[0m [33m WARN[0m [2mponyllm_core::telemetry::recorder[0m[2m:[0m flight recorder error frame: [timeout:tail-stall] upstream transport error: upstream stream stalled after 120s without
+  [2m2026-09-29T05:51:50.436975Z[0m [33m WARN[0m [2mponyllm_core::telemetry::recorder[0m[2m:[0m flight recorder error frame: [timeout:tail-stall] upstream stream stalled after 120s without bytes [3mrequest_id[0m
+  [2m2026-09-29T08:12:55.176093Z[0m [33m WARN[0m [2mponyllm_core::telemetry::recorder[0m[2m:[0m flight recorder error frame: [timeout:tail-stall] upstream transport error: upstream stream stalled after 120s without
+
+--- samples: failover ---
+  [2m2026-09-29T06:46:55.173655Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_server::route
+  [2m2026-09-29T06:56:32.911665Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_server::route
+
+--- samples: retry ---
+          "@type": "type.googleapis.com/google.rpc.RetryInfo",
+          "retryDelay": "75842.424328809s"
+          "@type": "type.googleapis.com/google.rpc.RetryInfo",
+          "retryDelay": "76037.280814125s"
+          "@type": "type.googleapis.com/google.rpc.RetryInfo",
+          "retryDelay": "75394.046548476s"
+          "@type": "type.googleapis.com/google.rpc.RetryInfo",
+          "retryDelay": "181570.293238941s"
+
+--- samples: error (first 8) ---
+  ⚠️ 写入 pidfile 失败: Read-only file system (os error 30)
+  [2m2026-09-29T04:26:47.195007Z[0m [33m WARN[0m [2mponyllm_server::state[0m[2m:[0m Transient error refreshing Antigravity token during keepalive cycle; skipping this round [3mprovider[0m[2m=[0mantigravity [3m
+  [2m2026-09-29T04:26:51.566528Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:28:49.764250Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:29:13.120255Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:29:34.423120Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:29:50.987236Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+  [2m2026-09-29T04:30:18.347982Z[0m [33m WARN[0m [1mrequest[0m[1m{[0m[3mmethod[0m[2m=[0mPOST [3muri[0m[2m=[0m/v1/chat/completions [3mversion[0m[2m=[0mHTTP/1.1[1m}[0m[2m:[0m [2mponyllm_core::telemet
+
+=== addendum: antigravity empty-STOP transparent retry events (24h) ===
+count=49 (all between 2026-09-29 06:00-07:59 UTC = 14:00-16:00 CST)
+attempt distribution: 1x5, 2x5, 3x5, 4x4, 5x4, 6x4, 7x4, 8x4, 9x4, 10x4, 11x4
+single request worst: stream_attempt=11 (0706Z, backoff_ms=2460)
+sample:
+  2026-09-29T07:06:35Z WARN ... Antigravity stream preamble completed with empty STOP! Triggering transparent gateway retry. provider=antigravity frames=1 stream_attempt=11 max_stream_attempts=10
+tail-stall events: 3x "[timeout:tail-stall] upstream stream stalled after 120s without bytes" (04:51Z, 05:51Z, 08:12Z = 12:51/13:51/16:12 CST)

@@ -1,0 +1,92 @@
+##### rn.ponygo.fun @ 2026-09-29 16:50:01 #####
+----- DNS local resolver (dig +short +time=3) x5 -----
+run1 28ms ips=[192.210.231.8 ]
+run2 36ms ips=[192.210.231.8 ]
+run3 32ms ips=[192.210.231.8 ]
+run4 34ms ips=[192.210.231.8 ]
+run5 23ms ips=[192.210.231.8 ]
+----- DNS @114.114.114.114 x3 (对照) -----
+114run1 490ms ips=[192.210.231.8 ]
+114run2 660ms ips=[192.210.231.8 ]
+114run3 42ms ips=[192.210.231.8 ]
+----- DNS @8.8.8.8 x3 (对照) -----
+88run1 265ms ips=[192.210.231.8 ]
+88run2 244ms ips=[192.210.231.8 ]
+88run3 281ms ips=[192.210.231.8 ]
+----- TCP :443 x15 (bash /dev/tcp) -----
+run1 ok 233ms
+run2 ok 231ms
+run3 ok 253ms
+run4 ok 237ms
+run5 ok 268ms
+run6 ok 277ms
+run7 ok 292ms
+run8 ok 301ms
+run9 ok 265ms
+run10 ok 228ms
+run11 ok 291ms
+run12 ok 271ms
+run13 ok 245ms
+run14 ok 276ms
+run15 ok 243ms
+----- TLS handshake x10 (openssl s_client) -----
+run1 1036ms cert=1
+run2 723ms cert=1
+run3 838ms cert=1
+run4 841ms cert=1
+run5 788ms cert=1
+run6 834ms cert=1
+run7 755ms cert=1
+run8 753ms cert=1
+run9 712ms cert=1
+run10 788ms cert=1
+----- CERT (showcerts x509 -noout) -----
+subject=CN = rn.ponygo.fun
+issuer=C = US, O = Let's Encrypt, CN = YE2
+notBefore=Sep 25 00:47:45 2026 GMT
+notAfter=Dec 24 00:47:44 2026 GMT
+----- HTTP x10 (curl -m 15 direct --noproxy) -----
+run1 code=200 total=0.688336s
+run2 code=200 total=0.772079s
+run3 code=200 total=0.727957s
+run4 code=200 total=0.891526s
+run5 code=200 total=0.856124s
+run6 code=200 total=0.690082s
+run7 code=200 total=0.811041s
+run8 code=200 total=0.677685s
+run9 code=200 total=0.669396s
+run10 code=200 total=0.846879s
+----- ICMP ping -c 10 -W 2 -----
+PING rn.ponygo.fun (192.210.231.8) 56(84) bytes of data.
+64 bytes from 192.210.231.8: icmp_seq=1 ttl=45 time=256 ms
+64 bytes from 192.210.231.8: icmp_seq=2 ttl=45 time=253 ms
+64 bytes from 192.210.231.8: icmp_seq=3 ttl=45 time=253 ms
+64 bytes from 192.210.231.8: icmp_seq=4 ttl=45 time=254 ms
+64 bytes from 192.210.231.8: icmp_seq=5 ttl=45 time=254 ms
+64 bytes from 192.210.231.8: icmp_seq=6 ttl=45 time=254 ms
+64 bytes from 192.210.231.8: icmp_seq=7 ttl=45 time=254 ms
+64 bytes from 192.210.231.8: icmp_seq=8 ttl=45 time=254 ms
+64 bytes from 192.210.231.8: icmp_seq=9 ttl=45 time=253 ms
+64 bytes from 192.210.231.8: icmp_seq=10 ttl=45 time=253 ms
+
+--- rn.ponygo.fun ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9621ms
+rtt min/avg/max/mdev = 253.407/253.909/256.196/0.800 ms
+----- mtr -r -c 10 (wide) -----
+Start: 2026-09-29T16:50:33+0800
+HOST: devserver                                                       Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- _gateway (192.168.101.1)                                         0.0%    10    0.5   0.6   0.4   1.7   0.4
+  2.|-- ???                                                             100.0    10    0.0   0.0   0.0   0.0   0.0
+  3.|-- ???                                                             100.0    10    0.0   0.0   0.0   0.0   0.0
+  4.|-- ???                                                             100.0    10    0.0   0.0   0.0   0.0   0.0
+  5.|-- ???                                                             100.0    10    0.0   0.0   0.0   0.0   0.0
+  6.|-- 219.158.8.210                                                   40.0%    10   27.1  26.9  26.7  27.1   0.2
+  7.|-- 219.158.8.178                                                    0.0%    10   24.7  23.4  23.0  24.7   0.5
+  8.|-- 219.158.116.238                                                  0.0%    10  155.4 155.1 153.6 156.2   0.8
+  9.|-- te0-16-1-4.ccr41.sjc03.atlas.cogentco.com (38.142.245.9)        10.0%    10  193.2 189.8 184.8 193.8   3.9
+ 10.|-- be6009.ccr81.sjc13.atlas.cogentco.com (154.54.169.37)           60.0%    10  190.4 186.4 181.8 190.4   4.3
+ 11.|-- be8314.rcr71.b069852-0.sjc13.atlas.cogentco.com (154.54.165.14) 20.0%    10  177.3 179.1 177.2 183.3   2.2
+ 12.|-- 38.120.133.51                                                    0.0%    10  226.2 226.3 226.0 226.7   0.2
+ 13.|-- ???                                                             100.0    10    0.0   0.0   0.0   0.0   0.0
+ 14.|-- 192.210.231.8                                                    0.0%    10  253.6 253.8 253.6 254.1   0.1
+RESULT_HOST (stats computed in summary.md)

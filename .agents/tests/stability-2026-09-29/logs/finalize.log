@@ -1,0 +1,45 @@
+2026-09-29 17:21:10 finalize started (START=1790671521 target=1790673021 hard=1790673471)
+2026-09-29 17:21:10 window done: past target, ml=176
+2026-09-29 17:21:10 dumping journal window (since @1790671521)
+2026-09-29 17:21:10 journal lines: 1670
+2026-09-29 17:21:10 running finalize_analyze.py
+{
+  "overall_n": 704,
+  "overall_fail": 0,
+  "overall_fail_rate": 0.0,
+  "verdict": "\u7a33\u5b9a",
+  "timeouts_rc28": 0,
+  "per_host": {
+    "cloudcode": {
+      "ok": 176,
+      "fail": 0,
+      "p95": 2426.0,
+      "fail_rate": 0.0,
+      "verdict": "\u7a33\u5b9a"
+    },
+    "google204": {
+      "ok": 176,
+      "fail": 0,
+      "p95": 1239.0,
+      "fail_rate": 0.0,
+      "verdict": "\u7a33\u5b9a"
+    },
+    "github": {
+      "ok": 176,
+      "fail": 0,
+      "p95": 2194.25,
+      "fail_rate": 0.0,
+      "verdict": "\u7a33\u5b9a"
+    },
+    "opencode": {
+      "ok": 176,
+      "fail": 0,
+      "p95": 2973.75,
+      "fail_rate": 0.0,
+      "verdict": "\u7a33\u5b9a"
+    }
+  }
+}
+summary.md written: /home/dm/pproxy/.agents/tests/stability-2026-09-29/forward/summary.md
+2026-09-29 17:21:10 finalize_analyze exit=0
+2026-09-29 17:21:10 FINALIZE_DONE: summary.md ready

@@ -1,0 +1,94 @@
+##### vedge.ponygo.fun @ 2026-09-29 16:50:52 #####
+----- DNS local resolver (dig +short +time=3) x5 -----
+run1 344ms ips=[cname.vercel-dns.com. 66.33.60.194 76.76.21.93 ]
+run2 26ms ips=[cname.vercel-dns.com. 66.33.60.194 76.76.21.93 ]
+run3 26ms ips=[cname.vercel-dns.com. 66.33.60.194 76.76.21.93 ]
+run4 27ms ips=[cname.vercel-dns.com. 76.76.21.93 66.33.60.194 ]
+run5 27ms ips=[cname.vercel-dns.com. 76.76.21.93 66.33.60.194 ]
+----- DNS @114.114.114.114 x3 (对照) -----
+114run1 230ms ips=[cname.vercel-dns.com. 76.76.21.98 66.33.60.67 ]
+114run2 40ms ips=[cname.vercel-dns.com. 66.33.60.67 76.76.21.98 ]
+114run3 39ms ips=[cname.vercel-dns.com. 76.76.21.98 66.33.60.67 ]
+----- DNS @8.8.8.8 x3 (对照) -----
+88run1 287ms ips=[cname.vercel-dns.com. 76.76.21.93 66.33.60.194 ]
+88run2 285ms ips=[cname.vercel-dns.com. 76.76.21.123 66.33.60.35 ]
+88run3 350ms ips=[cname.vercel-dns.com. 66.33.60.35 76.76.21.123 ]
+----- TCP :443 x15 (bash /dev/tcp) -----
+run1 ok 110ms
+run2 ok 79ms
+run3 ok 82ms
+run4 ok 88ms
+run5 ok 88ms
+run6 ok 83ms
+run7 ok 82ms
+run8 ok 79ms
+run9 ok 81ms
+run10 ok 83ms
+run11 ok 75ms
+run12 ok 79ms
+run13 ok 77ms
+run14 ok 87ms
+run15 ok 91ms
+----- TLS handshake x10 (openssl s_client) -----
+run1 265ms cert=1
+run2 263ms cert=1
+run3 299ms cert=1
+run4 248ms cert=1
+run5 254ms cert=1
+run6 261ms cert=1
+run7 255ms cert=1
+run8 245ms cert=1
+run9 274ms cert=1
+run10 262ms cert=1
+----- CERT (showcerts x509 -noout) -----
+subject=CN = vedge.ponygo.fun
+issuer=C = US, O = Let's Encrypt, CN = YR1
+notBefore=Sep 25 00:07:35 2026 GMT
+notAfter=Dec 24 00:07:34 2026 GMT
+----- HTTP x10 (curl -m 15 direct --noproxy) -----
+run1 code=402 total=0.227749s
+run2 code=402 total=0.244407s
+run3 code=402 total=0.249191s
+run4 code=402 total=0.239826s
+run5 code=402 total=0.253859s
+run6 code=402 total=0.219002s
+run7 code=402 total=0.250107s
+run8 code=402 total=0.244049s
+run9 code=402 total=0.245106s
+run10 code=402 total=0.230739s
+----- ICMP ping -c 10 -W 2 -----
+PING cname.vercel-dns.com (66.33.60.194) 56(84) bytes of data.
+64 bytes from 66.33.60.194: icmp_seq=1 ttl=245 time=87.1 ms
+64 bytes from 66.33.60.194: icmp_seq=2 ttl=245 time=86.9 ms
+64 bytes from 66.33.60.194: icmp_seq=3 ttl=245 time=87.2 ms
+64 bytes from 66.33.60.194: icmp_seq=4 ttl=245 time=87.0 ms
+64 bytes from 66.33.60.194: icmp_seq=5 ttl=245 time=86.8 ms
+64 bytes from 66.33.60.194: icmp_seq=6 ttl=245 time=86.7 ms
+64 bytes from 66.33.60.194: icmp_seq=7 ttl=245 time=87.0 ms
+64 bytes from 66.33.60.194: icmp_seq=8 ttl=245 time=86.9 ms
+64 bytes from 66.33.60.194: icmp_seq=9 ttl=245 time=86.9 ms
+64 bytes from 66.33.60.194: icmp_seq=10 ttl=245 time=87.0 ms
+
+--- cname.vercel-dns.com ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 9000ms
+rtt min/avg/max/mdev = 86.733/86.957/87.173/0.133 ms
+----- mtr -r -c 10 (wide) -----
+Start: 2026-09-29T16:51:09+0800
+HOST: devserver                  Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- _gateway (192.168.101.1)    0.0%    10    0.5   0.5   0.4   0.7   0.1
+  2.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+  3.|-- hn.163.ppp (221.14.27.181) 90.0%    10    9.1   9.1   9.1   9.1   0.0
+  4.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+  5.|-- 219.158.102.9              90.0%    10   35.6  35.6  35.6  35.6   0.0
+  6.|-- 219.158.103.218            90.0%    10   44.3  44.3  44.3  44.3   0.0
+  7.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+  8.|-- 219.158.3.102              80.0%    10   81.2  81.2  81.2  81.2   0.0
+  9.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+ 10.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+ 11.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+ 12.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+ 13.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+ 14.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+ 15.|-- ???                        100.0    10    0.0   0.0   0.0   0.0   0.0
+ 16.|-- 66.33.60.194                0.0%    10   87.0  87.7  86.9  90.6   1.1
+RESULT_HOST (stats computed in summary.md)

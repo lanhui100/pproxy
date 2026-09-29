@@ -1,0 +1,80 @@
+##### api.openai.com @ 2026-09-29 17:01:15 #####
+----- DNS local resolver (dig +short +time=3) x5 -----
+run1 54ms ips=[103.228.130.27 ]
+run2 22ms ips=[103.228.130.27 ]
+run3 23ms ips=[103.228.130.27 ]
+run4 23ms ips=[103.228.130.27 ]
+run5 24ms ips=[103.228.130.27 ]
+----- DNS @114.114.114.114 x3 (对照) -----
+114run1 37ms ips=[162.125.17.131 ]
+114run2 36ms ips=[162.125.17.131 ]
+114run3 39ms ips=[162.125.17.131 ]
+----- DNS @8.8.8.8 x3 (对照) -----
+88run1 56ms ips=[128.242.240.253 ]
+88run2 54ms ips=[128.242.245.29 ]
+88run3 57ms ips=[199.59.148.209 ]
+----- TCP :443 x15 (bash /dev/tcp) -----
+run1 FAIL(6005ms)
+run2 FAIL(6003ms)
+run3 FAIL(6005ms)
+run4 FAIL(6005ms)
+run5 FAIL(6005ms)
+run6 FAIL(6004ms)
+run7 FAIL(6004ms)
+run8 FAIL(6004ms)
+run9 FAIL(6004ms)
+run10 FAIL(6004ms)
+run11 FAIL(6004ms)
+run12 FAIL(6004ms)
+run13 FAIL(6003ms)
+run14 FAIL(6004ms)
+run15 FAIL(6003ms)
+----- TLS handshake x10 (openssl s_client) -----
+run1 12006ms cert=0
+  (no cert -> handshake fail)
+run2 12005ms cert=0
+  (no cert -> handshake fail)
+run3 12004ms cert=0
+  (no cert -> handshake fail)
+run4 12004ms cert=0
+  (no cert -> handshake fail)
+run5 12005ms cert=0
+  (no cert -> handshake fail)
+run6 12004ms cert=0
+  (no cert -> handshake fail)
+run7 12005ms cert=0
+  (no cert -> handshake fail)
+run8 12005ms cert=0
+  (no cert -> handshake fail)
+run9 12005ms cert=0
+  (no cert -> handshake fail)
+run10 12007ms cert=0
+  (no cert -> handshake fail)
+----- CERT (showcerts x509 -noout) -----
+----- HTTP x10 (curl -m 15 direct --noproxy) -----
+run1 code=000 total=15.002018s
+run2 code=000 total=15.002013s
+run3 code=000 total=15.002190s
+run4 code=000 total=15.002315s
+run5 code=000 total=15.002815s
+run6 code=000 total=15.002059s
+run7 code=000 total=15.002746s
+run8 code=000 total=15.002863s
+run9 code=000 total=15.002126s
+run10 code=000 total=15.002194s
+----- ICMP ping -c 10 -W 2 -----
+PING api.openai.com (2a03:2880:f10f:83:face:b00c:0:25de) 56 data bytes
+
+--- api.openai.com ping statistics ---
+10 packets transmitted, 0 received, 100% packet loss, time 9230ms
+
+----- mtr -r -c 10 (wide) -----
+Start: 2026-09-29T17:07:39+0800
+HOST: devserver              Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- 2408:8220:8f17:1570::1  0.0%    10    0.9   0.8   0.5   1.0   0.2
+  2.|-- 2408:8001:500:509::1    0.0%    10    6.3   5.3   2.5  18.2   4.7
+  3.|-- 2408:8001:500:2222::2  10.0%    10   10.0   6.2   4.9  10.0   1.8
+  4.|-- ???                    100.0    10    0.0   0.0   0.0   0.0   0.0
+  5.|-- 2408:8000:2:8f5::      90.0%    10   27.0  27.0  27.0  27.0   0.0
+  6.|-- ???                    100.0    10    0.0   0.0   0.0   0.0   0.0
+RESULT_HOST (stats computed in summary.md)

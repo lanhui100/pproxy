@@ -1,0 +1,16 @@
+# HELP ponyllm_synthetic_probe_success Synthetic inference probe success (1=yes, 0=no)
+# TYPE ponyllm_synthetic_probe_success gauge
+ponyllm_synthetic_probe_success{service="ponyllm",target="https://tokens.ponyjob.top/v1/chat/completions"} 1
+# HELP ponyllm_synthetic_probe_duration_seconds Synthetic inference latency in seconds
+# TYPE ponyllm_synthetic_probe_duration_seconds gauge
+ponyllm_synthetic_probe_duration_seconds{service="ponyllm",target="https://tokens.ponyjob.top/v1/chat/completions"} 1.1903
+# HELP ponyllm_synthetic_probe_last_timestamp_seconds Last probe execution epoch
+# TYPE ponyllm_synthetic_probe_last_timestamp_seconds gauge
+ponyllm_synthetic_probe_last_timestamp_seconds{service="ponyllm",target="https://tokens.ponyjob.top/v1/chat/completions"} 1790579624
+# HELP ponyllm_synthetic_probe_total Total number of synthetic probes executed
+# TYPE ponyllm_synthetic_probe_total counter
+ponyllm_synthetic_probe_total{service="ponyllm"} 1
+# HELP ponyllm_synthetic_probe_failures_total Total number of synthetic probe failures
+# TYPE ponyllm_synthetic_probe_failures_total counter
+ponyllm_synthetic_probe_failures_total{service="ponyllm"} 0
+

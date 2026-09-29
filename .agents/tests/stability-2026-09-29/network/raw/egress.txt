@@ -1,0 +1,105 @@
+##### egress identity @ 2026-09-29 17:09:02 #####
+----- local proxy -x 127.0.0.1:8899 -> ipinfo.io/json x3 -----
+--- run1 ---
+{
+  "ip": "192.210.231.8",
+  "city": "Santa Clara",
+  "region": "California",
+  "country": "US",
+  "loc": "37.3541,-121.9552",
+  "org": "AS36352 HostPapa",
+  "postal": "95050",
+  "timezone": "America/Los_Angeles",
+  "readme": "https://ipinfo.io/missingauth"
+}
+--- run2 ---
+{
+  "ip": "192.210.231.8",
+  "city": "Santa Clara",
+  "region": "California",
+  "country": "US",
+  "loc": "37.3541,-121.9552",
+  "org": "AS36352 HostPapa",
+  "postal": "95050",
+  "timezone": "America/Los_Angeles",
+  "readme": "https://ipinfo.io/missingauth"
+}
+--- run3 ---
+{
+  "ip": "192.210.231.8",
+  "city": "Santa Clara",
+  "region": "California",
+  "country": "US",
+  "loc": "37.3541,-121.9552",
+  "org": "AS36352 HostPapa",
+  "postal": "95050",
+  "timezone": "America/Los_Angeles",
+  "readme": "https://ipinfo.io/missingauth"
+}
+----- rn.ponygo.fun /api/proxy -> ipinfo.io/json x3 -----
+--- run1 ---
+{
+  "ip": "192.210.231.8",
+  "city": "Santa Clara",
+  "region": "California",
+  "country": "US",
+  "loc": "37.3541,-121.9552",
+  "org": "AS36352 HostPapa",
+  "postal": "95050",
+  "timezone": "America/Los_Angeles",
+  "readme": "https://ipinfo.io/missingauth"
+}
+--- run2 ---
+{
+  "ip": "192.210.231.8",
+  "city": "Santa Clara",
+  "region": "California",
+  "country": "US",
+  "loc": "37.3541,-121.9552",
+  "org": "AS36352 HostPapa",
+  "postal": "95050",
+  "timezone": "America/Los_Angeles",
+  "readme": "https://ipinfo.io/missingauth"
+}
+--- run3 ---
+{
+  "ip": "192.210.231.8",
+  "city": "Santa Clara",
+  "region": "California",
+  "country": "US",
+  "loc": "37.3541,-121.9552",
+  "org": "AS36352 HostPapa",
+  "postal": "95050",
+  "timezone": "America/Los_Angeles",
+  "readme": "https://ipinfo.io/missingauth"
+}
+----- vedge.ponygo.fun /api/proxy x2 (已知 402 DEPLOYMENT_DISABLED) -----
+--- run1 ---
+Payment required
+
+DEPLOYMENT_DISABLED
+
+sin1::v6n87-1790672949579-622b308faa6f
+
+--- run2 ---
+Payment required
+
+DEPLOYMENT_DISABLED
+
+sin1::wtdwk-1790672949827-5e054880de03
+
+----- edge/gate 是否存在 /api/proxy（单次探测）-----
+--- edge ---
+{
+  "ip": "172.71.31.54",
+  "city": "Atlanta",
+  "region": "Georgia",
+  "country": "US",
+  "loc": "33.7490,-84.3880",
+  "org": "AS13335 Cloudflare, Inc.",
+  "postal": "30303",
+  "timezone": "America/New_York",
+  "readme": "https://ipinfo.io/missingauth"
+} [HTTP=200 t=0.931461s]
+--- gate ---
+not found [HTTP=404 t=0.980417s]

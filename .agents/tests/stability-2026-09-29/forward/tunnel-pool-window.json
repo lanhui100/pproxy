@@ -1,0 +1,187 @@
+{
+  "establishes_total": 835,
+  "pooled_true": 641,
+  "pooled_false": 194,
+  "advisory_events": 835,
+  "advisory_allowlisted_true": 553,
+  "establish_ms_all": {
+    "min": 220,
+    "p50": 290,
+    "p90": 1415.8000000000002,
+    "p95": 1481.3,
+    "p99": 1714.5599999999995,
+    "max": 6296
+  },
+  "by_host": {
+    "vedge.ponygo.fun": {
+      "establishes": 29,
+      "pooled_false": 0,
+      "establish_ms": {
+        "min": 235,
+        "p50": 278,
+        "p90": 1321.3999999999999,
+        "p95": 1455.0,
+        "p99": 4947.239999999994,
+        "max": 6296
+      }
+    },
+    "daily-cloudcode-pa.googleapis.com": {
+      "establishes": 185,
+      "pooled_false": 185,
+      "establish_ms": {
+        "min": 1085,
+        "p50": 1327,
+        "p90": 1465.0,
+        "p95": 1498.6000000000001,
+        "p99": 1567.1199999999997,
+        "max": 2276
+      }
+    },
+    "www.google.com": {
+      "establishes": 176,
+      "pooled_false": 0,
+      "establish_ms": {
+        "min": 220,
+        "p50": 267.0,
+        "p90": 297.0,
+        "p95": 307.0,
+        "p99": 320.0,
+        "max": 1311
+      }
+    },
+    "api.github.com": {
+      "establishes": 192,
+      "pooled_false": 3,
+      "establish_ms": {
+        "min": 243,
+        "p50": 289.5,
+        "p90": 1191.8,
+        "p95": 1309.25,
+        "p99": 1550.6100000000001,
+        "max": 1704
+      }
+    },
+    "opencode.ai": {
+      "establishes": 176,
+      "pooled_false": 1,
+      "establish_ms": {
+        "min": 225,
+        "p50": 276.0,
+        "p90": 1380.5,
+        "p95": 1505.75,
+        "p99": 1752.5,
+        "max": 1854
+      }
+    },
+    "rn.ponygo.fun": {
+      "establishes": 24,
+      "pooled_false": 1,
+      "establish_ms": {
+        "min": 232,
+        "p50": 285.5,
+        "p90": 1117.0999999999995,
+        "p95": 1422.55,
+        "p99": 1482.21,
+        "max": 1499
+      }
+    },
+    "edge.ponygo.fun": {
+      "establishes": 23,
+      "pooled_false": 3,
+      "establish_ms": {
+        "min": 233,
+        "p50": 311,
+        "p90": 1744.0,
+        "p95": 1772.6,
+        "p99": 1804.2,
+        "max": 1813
+      }
+    },
+    "herdr.dev": {
+      "establishes": 20,
+      "pooled_false": 1,
+      "establish_ms": {
+        "min": 242,
+        "p50": 287.5,
+        "p90": 1534.8,
+        "p95": 1565.0000000000002,
+        "p99": 1777.7999999999997,
+        "max": 1831
+      }
+    },
+    "default.exp-tas.com": {
+      "establishes": 2,
+      "pooled_false": 0,
+      "establish_ms": {
+        "min": 257,
+        "p50": 285.0,
+        "p90": 307.4,
+        "p95": 310.2,
+        "p99": 312.44,
+        "max": 313
+      }
+    },
+    "exp.individual.githubcopilot.com": {
+      "establishes": 1,
+      "pooled_false": 0,
+      "establish_ms": {
+        "min": 282,
+        "p50": 282,
+        "p90": 282,
+        "p95": 282,
+        "p99": 282,
+        "max": 282
+      }
+    },
+    "mobile.events.data.microsoft.com": {
+      "establishes": 1,
+      "pooled_false": 0,
+      "establish_ms": {
+        "min": 293,
+        "p50": 293,
+        "p90": 293,
+        "p95": 293,
+        "p99": 293,
+        "max": 293
+      }
+    },
+    "models.opencode.ai": {
+      "establishes": 2,
+      "pooled_false": 0,
+      "establish_ms": {
+        "min": 308,
+        "p50": 955.0,
+        "p90": 1472.6000000000001,
+        "p95": 1537.3,
+        "p99": 1589.06,
+        "max": 1602
+      }
+    },
+    "productionresultssa17.blob.core.windows.net": {
+      "establishes": 1,
+      "pooled_false": 0,
+      "establish_ms": {
+        "min": 306,
+        "p50": 306,
+        "p90": 306,
+        "p95": 306,
+        "p99": 306,
+        "max": 306
+      }
+    },
+    "ipinfo.io": {
+      "establishes": 3,
+      "pooled_false": 0,
+      "establish_ms": {
+        "min": 251,
+        "p50": 277,
+        "p90": 1160.2,
+        "p95": 1270.6,
+        "p99": 1358.92,
+        "max": 1381
+      }
+    }
+  },
+  "error_class_total": 0,
+  "error_keywords": {}
+}

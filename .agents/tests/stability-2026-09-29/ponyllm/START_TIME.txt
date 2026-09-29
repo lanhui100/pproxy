@@ -1,0 +1,3 @@
+2026-09-29 16:44:56 CST
+epoch_ms=1790671496998
+window_minutes=25

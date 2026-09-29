@@ -1,0 +1,88 @@
+##### api.anthropic.com @ 2026-09-29 17:07:56 #####
+----- DNS local resolver (dig +short +time=3) x5 -----
+run1 50ms ips=[160.79.104.10 ]
+run2 23ms ips=[160.79.104.10 ]
+run3 25ms ips=[160.79.104.10 ]
+run4 23ms ips=[160.79.104.10 ]
+run5 23ms ips=[160.79.104.10 ]
+----- DNS @114.114.114.114 x3 (对照) -----
+114run1 36ms ips=[160.79.104.10 ]
+114run2 39ms ips=[160.79.104.10 ]
+114run3 38ms ips=[160.79.104.10 ]
+----- DNS @8.8.8.8 x3 (对照) -----
+88run1 225ms ips=[160.79.104.10 ]
+88run2 219ms ips=[160.79.104.10 ]
+88run3 216ms ips=[160.79.104.10 ]
+----- TCP :443 x15 (bash /dev/tcp) -----
+run1 ok 222ms
+run2 ok 201ms
+run3 ok 201ms
+run4 ok 203ms
+run5 ok 199ms
+run6 ok 193ms
+run7 ok 199ms
+run8 ok 202ms
+run9 ok 207ms
+run10 ok 200ms
+run11 ok 190ms
+run12 ok 208ms
+run13 ok 198ms
+run14 ok 198ms
+run15 ok 193ms
+----- TLS handshake x10 (openssl s_client) -----
+run1 569ms cert=1
+run2 624ms cert=1
+run3 622ms cert=1
+run4 626ms cert=1
+run5 628ms cert=1
+run6 603ms cert=1
+run7 621ms cert=1
+run8 600ms cert=1
+run9 639ms cert=1
+run10 622ms cert=1
+----- CERT (showcerts x509 -noout) -----
+subject=CN = api.anthropic.com
+issuer=C = US, O = Google Trust Services, CN = WE1
+notBefore=Sep 21 18:15:27 2026 GMT
+notAfter=Dec 20 19:15:03 2026 GMT
+----- HTTP x10 (curl -m 15 direct --noproxy) -----
+run1 code=403 total=0.589832s
+run2 code=403 total=0.578548s
+run3 code=403 total=0.599702s
+run4 code=403 total=0.592786s
+run5 code=403 total=0.607376s
+run6 code=403 total=0.595027s
+run7 code=403 total=0.605991s
+run8 code=403 total=0.589410s
+run9 code=403 total=0.568440s
+run10 code=403 total=0.604563s
+----- ICMP ping -c 10 -W 2 -----
+PING api.anthropic.com (2607:6bc0::10) 56 data bytes
+64 bytes from 2607:6bc0::10: icmp_seq=1 ttl=54 time=189 ms
+64 bytes from 2607:6bc0::10: icmp_seq=2 ttl=54 time=195 ms
+64 bytes from 2607:6bc0::10: icmp_seq=3 ttl=54 time=187 ms
+64 bytes from 2607:6bc0::10: icmp_seq=5 ttl=54 time=187 ms
+64 bytes from 2607:6bc0::10: icmp_seq=6 ttl=54 time=196 ms
+64 bytes from 2607:6bc0::10: icmp_seq=7 ttl=54 time=199 ms
+64 bytes from 2607:6bc0::10: icmp_seq=8 ttl=54 time=192 ms
+64 bytes from 2607:6bc0::10: icmp_seq=9 ttl=54 time=193 ms
+64 bytes from 2607:6bc0::10: icmp_seq=10 ttl=54 time=193 ms
+
+--- api.anthropic.com ping statistics ---
+10 packets transmitted, 9 received, 10% packet loss, time 9029ms
+rtt min/avg/max/mdev = 187.052/192.506/198.679/3.741 ms
+----- mtr -r -c 10 (wide) -----
+Start: 2026-09-29T17:08:23+0800
+HOST: devserver              Loss%   Snt   Last   Avg  Best  Wrst StDev
+  1.|-- 2408:8220:8f17:1570::1  0.0%    10    1.1   0.8   0.5   1.2   0.3
+  2.|-- 2408:8001:500:509::1    0.0%    10   11.1   8.1   2.6  21.4   6.2
+  3.|-- 2408:8001:500:1221::2  80.0%    10    2.6  14.1   2.6  25.5  16.2
+  4.|-- 2408:8001:500:1007::2  10.0%    10    7.1   7.6   6.7  11.4   1.4
+  5.|-- ???                    100.0    10    0.0   0.0   0.0   0.0   0.0
+  6.|-- 2408:8000:2:819::       0.0%    10   34.3  35.0  34.3  36.8   0.7
+  7.|-- 2408:8000:2:794::       0.0%    10   36.7  38.1  36.2  49.6   4.1
+  8.|-- ???                    100.0    10    0.0   0.0   0.0   0.0   0.0
+  9.|-- 2408:8000:3::641        0.0%    10  188.7 188.6 188.3 188.9   0.2
+ 10.|-- 2400:cb00:12:3::        0.0%    10  191.6 196.3 191.6 213.5   6.9
+ 11.|-- 2607:6bc0::10           0.0%    10  193.5 191.6 187.7 195.9   2.5
+RESULT_HOST (stats computed in summary.md)
