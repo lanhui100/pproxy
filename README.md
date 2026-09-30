@@ -58,6 +58,9 @@ pproxy off
   pproxy clash         # 自动生成配置并在终端打印二维码，手机 Clash 扫码即用
   pproxy client clash  # 客户端子命令，支持 --url-only 仅输出订阅链接
   ```
+  > 已配置 gate 隧道（`PPROXY_TUNNEL_GATE_URL`）时自动生成 **ws+tls 隧道模式订阅**
+  > （server/HOST/SNI 对准 gate 域名，B015）；未配置回落局域网 http 模式。gate 域名
+  > 轮换后重新执行 `pproxy clash` 即得新订阅，无需手改配置。
 * **手机系统 Wi-Fi 代理**：Wi-Fi 设置中配置 HTTP 代理 `http://<电脑局域网IP>:8899`，输入账号密码（Basic Auth 或 Token）。
 * **手机 VPN 客户端（Clash Meta / Shadowrocket / Surge 等）**：添加 HTTP 代理节点指向 `pproxy`，通过手机端 TUN 虚拟网卡实现**全局 VPN**或**基于规则的智能分流**。
 

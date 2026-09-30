@@ -41,23 +41,32 @@
   现状探活仅消耗升级握手（1 请求/次低频）
 - **关联**：ADR implemented/feature/2026-09-30-gate-cf-request-quota
 
-### B013 — 部署形态 + 风控 SOP P1-4（edgetunnel 借鉴）
+### B013 — 部署形态 + 风控 SOP P1-4（edgetunnel 借鉴）✅ 已完成
 - **方案**：评估 gate 迁 Pages 部署（社区实证更耐封）；小号部署、域名轮换、
   "能用就别动"纪律；abuse 邮件处理 SOP
-- **验收**：文档含"收到 abuse 邮件怎么办 / 域名轮换步骤 / 账号隔离"三节（靠 review）
-- **落点**：`deploy/pproxy-service.md` 或 `docs/ops/`
+- **验收**：文档含"收到 abuse 邮件怎么办 / 域名轮换步骤 / 账号隔离"三节（靠 review）——
+  `docs/ops/CF-RISK-SOP.md` 含 §1 部署形态评估 / §2 账号隔离 / §3 abuse SOP / §4 域名轮换 /
+  §5 勿动纪律 / §6 机器可验清单；DEPLOY.md 已链入
+- **落点**：`docs/ops/CF-RISK-SOP.md`（B013 首页）+ DEPLOY.md 链接
+- **关联**：与优雅不下线部署 SOP（DEPLOY.md §0）配套；Pages 迁移为触发式（见 SOP §1）
 
-### B014 — 标准协议入站 P1-5（edgetunnel 借鉴，架构级大改）
-- **方案**：gate 增加 VLESS-WS 入站，Ed25519 配额令牌映射成 UUID 鉴权 → 第三方客户端
-  （Clash/v2rayN/Shadowrocket）直连 gate；代价=协议解析代码量+指纹面变大（需先做 B011）
-- **纪律**：**先出方案（proposed ADR）再动手**，不立即实施
-- **验收**：方案评审通过后立项；实现后第三方客户端可直连且配额/吊销体系保留
+### B014 — 标准协议入站 P1-5（edgetunnel 借鉴，架构级大改）📋 方案已出（proposed ADR）
+- **方案**：gate 增加 VLESS-WS 入站（`/vless`），Ed25519 配额令牌确定性派生 UUID 鉴权 →
+  第三方客户端（Clash/v2rayN/Shadowrocket）直连 gate，配额/吊销体系保留
+- **纪律**：**先出方案（proposed ADR）再动手**——`2026-10-01-vless-standard-protocol-ingress.md`
+  已含 Proposal/Alternatives/Acceptance/Risks；实施拆独立项，不与 B010-B013 混排
+- **前置**：B011 伪装页（已 ✅，指纹面控制）；实施时走优雅不下线部署（versions 灰度）
+- **验收**：见 proposed ADR §Acceptance criteria（真机第三方客户端直连靠部署后 review）
 
-### B015 — 客户端配置细节 P2-6（edgetunnel 借鉴）
-- **方案**：订阅链接 HOST/SNI 自动对准 gate 域名（域名轮换后免重新导入）；
-  多格式导出（sing-box/Surge）；token 轮换语义
-- **验收**：改 gate 域名后重新生成的订阅无需手改 HOST 即可用
-- **落点**：`pproxy clash`（`crates/cli`）
+### B015 — 客户端配置细节 P2-6（edgetunnel 借鉴）✅ 已完成
+- **方案**：订阅链接 HOST/SNI **自动对准 gate 域名**（域名轮换后免重新导入）——
+  `pproxy clash` 配置了 `PPROXY_TUNNEL_GATE_URL` 时生成 ws+tls 隧道模式
+  （server/sni=gate 域名、path=/ws、Bearer 鉴权），未配置回落局域网模式（行为不变）
+- **验收**：`cargo test -p pproxy-cli clash`（5 用例，含隧道模式与端点解析）非零退出；
+  真机 Clash 直连验证靠部署后 review（需 gate 在线）
+- **落点**：`crates/cli/src/cmd/clash.rs`（`generate_clash_yaml_tunnel` / `gate_host_from_config`）
+- **关联**：ADR implemented/feature/2026-09-30-clash-subscription-gate-alignment；
+  与 B014（VLESS 直连）配套——B014 落地后订阅可切 vless:// 直连
 
 ### B003 — vedge 改 CF 橙云代理回源 Vercel（中期方案）⏸ 待决策
 - **背景**：B002 判决——中国联通出口→Vercel anycast(66.33.60.x/76.76.21.x) 路由间歇性劣化；
