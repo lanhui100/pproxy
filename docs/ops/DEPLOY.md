@@ -156,6 +156,10 @@ ssh dev 'cd ~/pproxy && scripts/sync-desktop-release.sh desktop-vX.Y.Z'
 #   方式 B：export CLOUDFLARE_API_TOKEN=<token>   # 非交互（CI/脚本），token 需 Workers 编辑权限
 # 注意：非交互环境必须设 CLOUDFLARE_API_TOKEN，否则 wrangler 拒绝工作
 
+# 一键优雅部署（封装全部步骤，见 deploy/cf-gate-worker/deploy-graceful.sh）：
+#   export CLOUDFLARE_API_TOKEN=<token>
+#   bash deploy/cf-gate-worker/deploy-graceful.sh --observe-sec 120
+
 cd /home/USER/pproxy/deploy/cf-gate-worker   # 或 deploy/cf-worker（edge，流程相同）
 
 # 0) 离线打包校验（无需认证，失败即非零退出）
