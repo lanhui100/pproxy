@@ -7,9 +7,15 @@ impl Store {
     pub fn insert_route(&self, r: &NewRoute) -> Result<(), StoreError> {
         let conn = self.lock_conn();
         conn.execute(
-            "INSERT INTO routes (name, target_host, override_upstream, enabled, created_at)
-             VALUES (?1, ?2, ?3, 1, ?4)",
-            params![r.name, r.target_host, r.override_upstream, now_unix() as i64],
+            "INSERT INTO routes (name, target_host, override_upstream, backup_upstream, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+            params![
+                r.name,
+                r.target_host,
+                r.override_upstream,
+                r.backup_upstream,
+                now_unix() as i64
+            ],
         )?;
         Ok(())
     }
@@ -37,22 +43,26 @@ impl Store {
         &self,
         name: &str,
         override_upstream: Option<Option<String>>,
+        backup_upstream: Option<Option<String>>,
         enabled: Option<bool>,
     ) -> Result<bool, StoreError> {
-        if override_upstream.is_none() && enabled.is_none() {
-            // 两参数均 None：无列可改，仅报告存在性
+        if override_upstream.is_none() && backup_upstream.is_none() && enabled.is_none() {
+            // 三参数均 None：无列可改，仅报告存在性
             return self.get_route(name).map(|r| r.is_some());
         }
         let conn = self.lock_conn();
         let n = conn.execute(
             "UPDATE routes SET
                override_upstream = CASE WHEN ?2 THEN ?3 ELSE override_upstream END,
-               enabled = CASE WHEN ?4 THEN ?5 ELSE enabled END
+               backup_upstream   = CASE WHEN ?4 THEN ?5 ELSE backup_upstream END,
+               enabled           = CASE WHEN ?6 THEN ?7 ELSE enabled END
              WHERE name = ?1",
             params![
                 name,
                 override_upstream.is_some(),
                 override_upstream.clone().flatten(),
+                backup_upstream.is_some(),
+                backup_upstream.clone().flatten(),
                 enabled.is_some(),
                 enabled,
             ],
@@ -73,6 +83,7 @@ fn map_route(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRow> {
         target_host: row.get("target_host")?,
         upstream: row.get("upstream")?,
         override_upstream: row.get("override_upstream")?,
+        backup_upstream: row.get("backup_upstream")?,
         enabled: row.get::<_, i64>("enabled")? != 0,
         created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0) as u64,
     })

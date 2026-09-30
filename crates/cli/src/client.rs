@@ -88,6 +88,8 @@ pub struct RouteInfo {
     pub target_host: String,
     #[serde(default)]
     pub override_upstream: Option<String>,
+    #[serde(default)]
+    pub backup_upstream: Option<String>,
     pub enabled: bool,
     #[serde(default)]
     pub created_at: Option<u64>,
@@ -287,10 +289,14 @@ impl AdminClient {
         name: &str,
         target_host: &str,
         override_upstream: Option<&str>,
+        backup_upstream: Option<&str>,
     ) -> Result<(String, String), ApiError> {
         let mut body = serde_json::json!({ "name": name, "target_host": target_host });
         if let Some(u) = override_upstream {
             body["override_upstream"] = Value::from(u);
+        }
+        if let Some(b) = backup_upstream {
+            body["backup_upstream"] = Value::from(b);
         }
         let v = self
             .send(reqwest::Method::POST, "/api/routes", Some(body), None)

@@ -105,6 +105,7 @@ fn route_crud_and_update_three_state() {
             name: "openai".into(),
             target_host: "api.openai.com".into(),
             override_upstream: None,
+            backup_upstream: None,
         })
         .unwrap();
 
@@ -116,19 +117,19 @@ fn route_crud_and_update_three_state() {
     assert_eq!(store.list_routes().unwrap().len(), 1);
 
     // None=不改该列（C-P0-2）
-    store.update_route("openai", None, Some(false)).unwrap();
+    store.update_route("openai", None, None, Some(false)).unwrap();
     let r = store.get_route("openai").unwrap().unwrap();
     assert!(!r.enabled);
     assert!(r.override_upstream.is_none());
 
     // Some(Some(v))=设置
-    store.update_route("openai", Some(Some("vercel".into())), None).unwrap();
+    store.update_route("openai", Some(Some("vercel".into())), None, None).unwrap();
     let r = store.get_route("openai").unwrap().unwrap();
     assert_eq!(r.override_upstream.as_deref(), Some("vercel"));
     assert!(!r.enabled, "None 参数不应覆盖 enabled");
 
     // Some(None)=清除（置 NULL）
-    store.update_route("openai", Some(None), Some(true)).unwrap();
+    store.update_route("openai", Some(None), None, Some(true)).unwrap();
     let r = store.get_route("openai").unwrap().unwrap();
     assert!(r.override_upstream.is_none());
     assert!(r.enabled);
@@ -383,6 +384,7 @@ fn migrate_interrupted_state_config_untouched() {
             name: "anthropic".into(),
             target_host: "api.anthropic.com".into(),
             override_upstream: None,
+            backup_upstream: None,
         })
         .unwrap();
 

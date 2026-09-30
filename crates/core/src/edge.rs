@@ -23,6 +23,7 @@ pub struct EdgeClient {
     secret: String,
 }
 
+#[derive(Clone)]
 pub struct ForwardRequest {
     pub method: Method,
     pub target_url: String,
@@ -78,6 +79,17 @@ impl EdgeClient {
     }
 
     pub async fn execute(&self, req: ForwardRequest) -> anyhow::Result<Response> {
+        self.execute_with_attempts(req, 5).await
+    }
+
+    /// 主备 failover 支持（2026-09-28）：max_attempts 可调——主出口用较小的
+    /// 退避重试预算（如 3），耗尽快转备出口；备出口用默认 5。重试语义不变
+    /// （连接错误恒重试；幂等请求 5xx 重试；无幂等键 POST 不因 5xx 重试防幽灵扣费）。
+    pub async fn execute_with_attempts(
+        &self,
+        req: ForwardRequest,
+        max_attempts: usize,
+    ) -> anyhow::Result<Response> {
         let is_idempotent = matches!(
             req.method,
             Method::GET | Method::HEAD | Method::OPTIONS
@@ -88,7 +100,6 @@ impl EdgeClient {
             || req.headers.contains_key("x-idempotency_key");
         let retryable_method = is_idempotent || has_idempotency_key;
 
-        let max_attempts = 5;
         let mut attempt = 0;
 
         loop {

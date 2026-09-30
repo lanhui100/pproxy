@@ -355,11 +355,43 @@ async fn forward_handler(State(state): State<GatewayState>, req: Request) -> Res
             Some(body_bytes.to_vec())
         },
     };
-    let resp = match edge.execute(fwd).await {
+    // 第 5b 步：主备出口 failover 执行（2026-09-28）
+    // 主出口指数退避重试 PRIMARY_ATTEMPTS 次；连接层失败（Err）或 5xx 响应且
+    // 路由配置了备用出口 → 同请求转备出口再执行（备出口默认 5 次预算）。
+    // 4xx 视为上游正常业务响应（402/403/429 限流等），不 failover——重试无益。
+    const PRIMARY_ATTEMPTS: usize = 3;
+    let primary_edge = edge;
+    let mut resp = primary_edge.execute_with_attempts(fwd.clone(), PRIMARY_ATTEMPTS).await;
+    let should_failover = match &resp {
+        Err(_) => true,                    // 连接层失败：请求未确认送达
+        Ok(r) => r.status().is_server_error(), // 5xx：出口/上游服务端错误
+    };
+    let mut failed_over = false;
+    if should_failover {
+        if let Some(backup) = state.routes.backup_upstream(&ctx.route) {
+            if let Some(backup_edge) = state.edges.get(backup.as_str()) {
+                tracing::warn!(
+                    route = %ctx.route,
+                    from = upstream.as_str(),
+                    to = backup.as_str(),
+                    "primary edge failed after {PRIMARY_ATTEMPTS} attempts, failing over to backup edge"
+                );
+                resp = backup_edge.execute_with_attempts(fwd, 5).await;
+                failed_over = true;
+            }
+        }
+    }
+    let resp = match resp {
         Ok(r) => r,
         Err(e) => {
             // 错误日志禁记完整 URL（S-P2-10）：仅 route/host 类别
-            tracing::warn!(route = %ctx.route, error_kind = "edge_execute_failed", detail = %e, "upstream error");
+            tracing::warn!(
+                route = %ctx.route,
+                error_kind = "edge_execute_failed",
+                failed_over,
+                detail = %e,
+                "upstream error"
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 r#"{"error":"upstream_error"}"#,
@@ -725,6 +757,7 @@ let router = data_router(GatewayState {
                 name: "opencode".into(),
                 target_host: "opencode.ai".into(),
                 override_upstream: None,
+                backup_upstream: None,
             })
             .unwrap();
         let router = data_router(GatewayState {
@@ -753,5 +786,125 @@ let router = data_router(GatewayState {
         let want = "https://opencode.ai/zen/go/v1/responses";
         assert_eq!(body_string(resp).await, want, "stub 回显 target");
         assert_eq!(stub_handle.join().unwrap(), want, "上游实际收到的 target");
+    }
+
+    // ---- 主备出口 failover（2026-09-28）----
+    // 主 edge 指向不可达端口（连接层失败，退避重试 3 次后仍失败）；
+    // 路由配置 backup_upstream → 同请求转备 edge，最终 200 且 stub 收到 target。
+
+    #[tokio::test]
+    async fn primary_edge_failure_fails_over_to_backup() {
+        let (stub_url, stub_handle) = spawn_url_echo_stub();
+        let store = temp_store("failover");
+        let tokens = Arc::new(TokenService::new(Arc::clone(&store)).unwrap());
+        let mut edges = HashMap::new();
+        // 主：不可达（127.0.0.1:1 恒 connect refused）
+        edges.insert(
+            "broken".to_string(),
+            EdgeClient::new("http://127.0.0.1:1/api/proxy", "s").unwrap(),
+        );
+        // 备：本地 echo stub（200）
+        edges.insert(
+            "backup".to_string(),
+            EdgeClient::new(&stub_url, "stub-secret").unwrap(),
+        );
+        let routes = Arc::new(
+            pproxy_core::RouteTable::new(Arc::clone(&store), Arc::new(edges.clone())).unwrap(),
+        );
+        routes
+            .create_route(&pproxy_core::store::NewRoute {
+                name: "opencode".into(),
+                target_host: "opencode.ai".into(),
+                override_upstream: Some("broken".into()),
+                backup_upstream: Some("backup".into()),
+            })
+            .unwrap();
+        let router = data_router(GatewayState {
+            tokens: Arc::clone(&tokens),
+            edges: Arc::new(edges),
+            routes,
+            usage: Arc::new(UsageTracker::new(store)),
+            tunnel: None,
+        });
+        let (_, plaintext) = tokens.create_token("failover-tok", None).unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/{plaintext}/opencode/zen/go/v1/responses"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer sk-test")
+                    .body(Body::from(r#"{"model":"muse-spark-1.2-contributor"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "主出口失败后应转备出口返回 200");
+        let want = "https://opencode.ai/zen/go/v1/responses";
+        assert_eq!(body_string(resp).await, want, "failover 后 stub 回显 target");
+        assert_eq!(stub_handle.join().unwrap(), want, "备上游实际收到的 target");
+    }
+
+    // 4xx 上游业务响应不触发 failover：主 edge 返回 402，即使配了 backup
+    // 也原样透传 402（重试无益，防幽灵扣费）。
+    #[tokio::test]
+    async fn upstream_4xx_does_not_failover() {
+        // 4xx stub：固定回 402
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stub4xx = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = "HTTP/1.1 402 Payment Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+        let store = temp_store("no-failover-4xx");
+        let tokens = Arc::new(TokenService::new(Arc::clone(&store)).unwrap());
+        let mut edges = HashMap::new();
+        edges.insert(
+            "broken".to_string(),
+            EdgeClient::new(&format!("http://{addr}/api/proxy"), "s").unwrap(),
+        );
+        edges.insert(
+            "backup".to_string(),
+            EdgeClient::new("http://127.0.0.1:1/api/proxy", "s").unwrap(),
+        );
+        let routes = Arc::new(
+            pproxy_core::RouteTable::new(Arc::clone(&store), Arc::new(edges.clone())).unwrap(),
+        );
+        routes
+            .create_route(&pproxy_core::store::NewRoute {
+                name: "opencode".into(),
+                target_host: "opencode.ai".into(),
+                override_upstream: Some("broken".into()),
+                backup_upstream: Some("backup".into()),
+            })
+            .unwrap();
+        let router = data_router(GatewayState {
+            tokens: Arc::clone(&tokens),
+            edges: Arc::new(edges),
+            routes,
+            usage: Arc::new(UsageTracker::new(store)),
+            tunnel: None,
+        });
+        let (_, plaintext) = tokens.create_token("no-failover-4xx", None).unwrap();
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/{plaintext}/opencode/zen/go/v1/responses"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer sk-test")
+                    .body(Body::from(r#"{"model":"muse-spark-1.2-contributor"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED, "4xx 原样透传，不 failover");
+        stub4xx.join().unwrap();
     }
 }

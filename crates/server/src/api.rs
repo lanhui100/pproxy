@@ -161,6 +161,9 @@ struct CreateRouteReq {
     target_host: String,
     #[serde(default)]
     override_upstream: Option<String>,
+    /// 备用出口（主备 failover，2026-09-28）：worker|vercel|已配置上游名；缺省无
+    #[serde(default)]
+    backup_upstream: Option<String>,
 }
 
 /// PATCH 三态 DTO（C-P0-2 double_option）：None=不改；Some(None)=清除；Some(Some(v))=设置。
@@ -168,6 +171,8 @@ struct CreateRouteReq {
 struct UpdateRouteReq {
     #[serde(default, deserialize_with = "deserialize_double_option")]
     override_upstream: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    backup_upstream: Option<Option<String>>,
     #[serde(default)]
     enabled: Option<bool>,
     /// C-P2-9：upstream 列是创建时快照不可 PATCH；出现即 400
@@ -358,6 +363,7 @@ fn route_row_json(r: &RouteRow, effective: Upstream) -> serde_json::Value {
         "target_host": r.target_host,
         "upstream": r.upstream,
         "override_upstream": r.override_upstream,
+        "backup_upstream": r.backup_upstream,
         "enabled": r.enabled,
         "created_at": r.created_at,
         "effective_upstream": effective.as_str(),
@@ -394,6 +400,7 @@ async fn create_route_handler(State(st): State<AdminState>, body: Option<Json<Cr
         name: req.name.clone(),
         target_host: req.target_host.clone(),
         override_upstream: req.override_upstream.clone(),
+        backup_upstream: req.backup_upstream.clone(),
     };
     let routes = Arc::clone(&st.routes);
     let created = tokio::task::spawn_blocking(move || routes.create_route(&new_route)).await;
@@ -436,7 +443,7 @@ async fn update_route_handler(
     let name_for_lookup = name.clone();
     let routes = Arc::clone(&st.routes);
     let updated = tokio::task::spawn_blocking(move || {
-        routes.update_route(&name, req.override_upstream, req.enabled)
+        routes.update_route(&name, req.override_upstream, req.backup_upstream, req.enabled)
     })
     .await;
     match updated {

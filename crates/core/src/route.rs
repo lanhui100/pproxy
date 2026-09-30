@@ -334,6 +334,16 @@ impl RouteTable {
             .map(|r| self.pick_upstream(&r.target_host, r.override_upstream.as_deref()))
     }
 
+    /// 备用出口（主备 failover，2026-09-28）：路由无 backup_upstream（NULL/空串）
+    /// → None；有则解析为 Upstream。值在 create/update 已过 valid_override 校验，
+    /// 读取期不再校验（DB 手工篡改属运维越权，不在威胁模型内——同 §6.1 规则 6）。
+    pub fn backup_upstream(&self, name: &str) -> Option<Upstream> {
+        let row = self.lock_read().get(name).cloned()?;
+        row.backup_upstream
+            .filter(|b| !b.is_empty())
+            .map(|b| parse_upstream(&b).unwrap_or(Upstream::Worker))
+    }
+
     /// 管理面 CRUD（写库 + 同步刷新内存，模式同 T2 单一写路径）。
     ///
     /// F8：override_upstream 值域扩展——"worker"|"vercel"（S-P2-7）之外，
@@ -343,6 +353,12 @@ impl RouteTable {
         validate_host(&r.target_host)?;
         if let Some(o) = &r.override_upstream {
             if !valid_override(&self.edges, o) {
+                return Err(RouteError::InvalidUpstream);
+            }
+        }
+        // 主备出口（2026-09-28）：backup 与 override 同域校验（worker|vercel|已配置上游名）
+        if let Some(b) = &r.backup_upstream {
+            if !valid_override(&self.edges, b) {
                 return Err(RouteError::InvalidUpstream);
             }
         }
@@ -360,13 +376,14 @@ impl RouteTable {
     }
 
     /// 三态参数（C-P0-2，serde double_option 配合）：None=不改；Some(None)=清除；
-    /// Some(Some(v))=设置。override_upstream 提供值时必须为 "worker"|"vercel"
-    /// 或已配置上游名（F8，S-P2-7 扩展），否则 InvalidUpstream。
+    /// Some(Some(v))=设置。override_upstream / backup_upstream 提供值时必须为
+    /// "worker"|"vercel" 或已配置上游名（F8，S-P2-7 扩展），否则 InvalidUpstream。
     /// 返回是否命中（false=路由不存在）。
     pub fn update_route(
         &self,
         name: &str,
         override_upstream: Option<Option<String>>,
+        backup_upstream: Option<Option<String>>,
         enabled: Option<bool>,
     ) -> Result<bool, RouteError> {
         if let Some(Some(o)) = &override_upstream {
@@ -374,7 +391,14 @@ impl RouteTable {
                 return Err(RouteError::InvalidUpstream);
             }
         }
-        let updated = self.store.update_route(name, override_upstream, enabled)?;
+        if let Some(Some(b)) = &backup_upstream {
+            if !valid_override(&self.edges, b) {
+                return Err(RouteError::InvalidUpstream);
+            }
+        }
+        let updated = self
+            .store
+            .update_route(name, override_upstream, backup_upstream, enabled)?;
         if updated {
             self.reload()?;
         }
@@ -482,6 +506,7 @@ mod tests {
             name: name.into(),
             target_host: host.into(),
             override_upstream: override_upstream.map(|s| s.into()),
+            backup_upstream: None,
         }
     }
 
@@ -588,7 +613,7 @@ mod tests {
         ));
         rt.create_route(&new_route("anthropic", "api.anthropic.com", None))
             .unwrap();
-        rt.update_route("anthropic", None, Some(false)).unwrap();
+        rt.update_route("anthropic", None, None, Some(false)).unwrap();
         assert!(matches!(
             rt.resolve("anthropic", "/"),
             Err(RouteError::Disabled)
@@ -611,7 +636,7 @@ mod tests {
         ));
 
         rt.create_route(&nr).unwrap();
-        assert!(rt.update_route("anthropic", None, Some(false)).unwrap());
+        assert!(rt.update_route("anthropic", None, None, Some(false)).unwrap());
         assert!(matches!(
             rt.resolve("anthropic", "/"),
             Err(RouteError::Disabled)
@@ -705,29 +730,29 @@ mod tests {
         assert_eq!(rt.effective_upstream("anthropic"), Some(Upstream::Vercel));
 
         // None：不改该列
-        rt.update_route("anthropic", None, None).unwrap();
+        rt.update_route("anthropic", None, None, None).unwrap();
         assert_eq!(rt.effective_upstream("anthropic"), Some(Upstream::Vercel));
 
         // Some(None)：清除 override → 回落自动选择（anthropic → Worker）
         assert!(rt
-            .update_route("anthropic", Some(None), None)
+            .update_route("anthropic", Some(None), None, None)
             .unwrap());
         assert_eq!(rt.effective_upstream("anthropic"), Some(Upstream::Worker));
 
         // Some(Some("vercel"))：设置
         assert!(rt
-            .update_route("anthropic", Some(Some("vercel".into())), None)
+            .update_route("anthropic", Some(Some("vercel".into())), None, None)
             .unwrap());
         assert_eq!(rt.effective_upstream("anthropic"), Some(Upstream::Vercel));
 
         // Some(Some("bogus"))：InvalidUpstream（S-P2-7；F8 后未配置名仍拒绝）
         assert!(matches!(
-            rt.update_route("anthropic", Some(Some("bogus".into())), None),
+            rt.update_route("anthropic", Some(Some("bogus".into())), None, None),
             Err(RouteError::InvalidUpstream)
         ));
 
         // 不存在的路由 → false（非 Err）
-        assert!(!rt.update_route("nope", None, Some(true)).unwrap());
+        assert!(!rt.update_route("nope", None, None, Some(true)).unwrap());
     }
 
     // ---- §8.12 test_route 实测（网络用例，CI 门禁跳过）----

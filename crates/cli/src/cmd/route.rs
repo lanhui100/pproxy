@@ -38,6 +38,7 @@ fn route_row(r: &crate::client::RouteInfo) -> Vec<String> {
         r.target_host.clone(),
         r.effective_upstream.clone().unwrap_or_else(|| "?".into()),
         r.override_upstream.clone().unwrap_or_else(|| "-".into()),
+        r.backup_upstream.clone().unwrap_or_else(|| "-".into()),
         fmt_ts(r.created_at),
     ]
 }
@@ -46,7 +47,14 @@ pub(crate) fn list(http: &AdminClient) -> Result<i32, String> {
     tokio_block(async {
         match http.list_routes().await {
             Ok(rows) => {
-                let mut t = Table::new(&["name", "target_host", "upstream", "override", "created_at"]);
+                let mut t = Table::new(&[
+                    "name",
+                    "target_host",
+                    "upstream",
+                    "override",
+                    "backup",
+                    "created_at",
+                ]);
                 for r in &rows {
                     t.push(route_row(r));
                 }
@@ -63,13 +71,17 @@ pub(crate) fn add(
     name: &str,
     target_host: &str,
     upstream: Option<&str>,
+    backup: Option<&str>,
 ) -> Result<i32, String> {
     tokio_block(async {
-        match http.create_route(name, target_host, upstream).await {
+        match http.create_route(name, target_host, upstream, backup).await {
             Ok((rname, eff)) => {
                 match upstream {
                     Some(_) => println!("created {rname} (override upstream: {eff})"),
                     None => println!("created {rname} (auto-selected upstream: {eff})"),
+                }
+                if let Some(b) = backup {
+                    println!("backup upstream: {b}");
                 }
                 Ok(EXIT_OK)
             }
