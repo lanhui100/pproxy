@@ -18,13 +18,15 @@
 
 ## 待办
 
-### B011 — gate 伪装页 + 反指纹 P0-2（edgetunnel 借鉴）
+### B011 — gate 伪装页 + 反指纹 P0-2（edgetunnel 借鉴）✅ 已完成
 - **动机**：gate 非 `/ws` 路径全裸 404 = 最典型的"可疑 Worker"指纹，防扫号低成本高收益
-- **方案**：非 `/ws` 返回仿 nginx 欢迎页；`tunnel`/`gate` 特征字符串运行时拼装；
-  token 不进 URL 查询串；**不抄** edgetunnel 的"多语言无后门"注释垫片（信任争议）
-- **验收**：浏览器直开 gate 域名见普通页面；/ws 行为不变；wrangler 部署后 curl 非 /ws 返回伪装页
-- **落点**：`deploy/cf-gate-worker/worker.js` fetch 入口
-- **关联**：ADR implemented/feature/2026-09-30-gate-multi-egress-fallback（同源）
+- **方案**：非 `/ws` 返回 200 仿 nginx 欢迎页；`/ws`、`/debug` 等特征路径运行时拼装；
+  token 不进 URL 查询串（Bearer header）；**不抄** edgetunnel 的"多语言无后门"注释垫片（信任争议）
+- **验收**：`node deploy/cf-gate-worker/camouflage.test.mjs`（18 用例，非零退出）；
+  wrangler dev 实测 `GET /` 与 `/favicon.ico` 均 200 欢迎页、`/debug` 仍 JSON（smoke 通过）；
+  E2E 隧道回归（e2e-fallback.mjs）通过
+- **落点**：`deploy/cf-gate-worker/{worker.js,camouflage.mjs,camouflage.test.mjs}`
+- **关联**：ADR implemented/feature/2026-09-30-gate-camouflage-page；部署走优雅不下线 SOP（DEPLOY.md §更新 CF Worker）
 
 ### B012 — CF 请求量自省 + 配额联动 P0-3（edgetunnel 借鉴）
 - **动机**：gate 每 WS 会话/每 TCP 连接计 CF 请求；免费档 100k/天 极易爆，爆了触发滥用风控

@@ -17,6 +17,7 @@ import {
   socks5Connect,
   withTimeout,
 } from './egress-fallback.mjs'
+import { WS_PATH, DEBUG_PATH, DEBUG_EGRESS_PATH, routeFor, nginxWelcomePage } from './camouflage.mjs'
 import { makeEgressGeoCache } from './egress-geo.mjs'
 import { probeEgressGeo, DEFAULT_EGRESS_GEO_URL, DEFAULT_EGRESS_PROBE_TIMEOUT_MS } from './egress-probe.mjs'
 
@@ -118,7 +119,8 @@ async function openChannel(channel, cfg, target, timeoutMs) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url)
-    if (url.pathname === '/debug') {
+    const route = routeFor(url.pathname)
+    if (route === 'debug') {
       const cfg = parseFallbackConfig(env)
       return new Response(
         JSON.stringify({
@@ -139,7 +141,7 @@ export default {
     }
     // 出站地理探测诊断端点（与 /ws 同一 Bearer token 保护）：
     // 直接返回探测结果或真实报错，便于排查 unsupported_egress:UNKNOWN 的成因。
-    if (url.pathname === '/debug/egress') {
+    if (route === 'debugEgress') {
       const auth = request.headers.get('Authorization') ?? ''
       const presented = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
       if (!presented || (await sha256Hex(presented)) !== normHash(env.TUNNEL_TOKEN_HASH)) {
@@ -164,7 +166,9 @@ export default {
         return jsonResp({ ok: false, error: String((e && e.message) || e), config: cfg })
       }
     }
-    if (url.pathname !== '/ws') return new Response('not found', { status: 404 })
+    // 非隧道路径一律返回伪装页（B011 反指纹：不再裸 404"not found"，
+    // 浏览器直开域名看到普通站点；/debug、/debug/egress 已在上文处理）。
+    if (route !== 'ws') return nginxWelcomePage()
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
       return new Response('websocket required', { status: 400 })
     }

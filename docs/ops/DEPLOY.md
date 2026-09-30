@@ -91,6 +91,22 @@ SOCKS5 中继，验证直连必败 host 自动切兜底仍可出海）。
 
 ## 日常操作
 
+### 0. 优雅不下线部署总则（所有组件通用）
+
+> **纪律：任何部署动作都不得让服务整体下线。** 云边缘组件（CF Worker / Vercel）与
+> Rust 节点各自独立升级、无需协调，但**每一步都要先想清楚"窗口内流量谁来接"**：
+
+| 组件 | 零下线机制 | 窗口内流量接替 |
+|---|---|---|
+| CF gate/edge Worker | wrangler 4 **版本化灰度**（`versions upload` → `versions deploy @%` → rollback，见 §更新 CF Worker） | 新旧版本按比例共存切流，全程在线；客户端侧另有 Vercel failover 兜底 |
+| Vercel 函数 | 平台版本化部署（新 deployment 就绪后自动切流） | 平台自动，零窗口 |
+| Rust 节点（集群） | `pproxy cluster upgrade` 逐节点滚动（ROLLING-UPGRADE.md） | HA Forwarder 常驻 8899 吸收重启窗口 |
+| Rust 节点（单机，无 peer） | **无 HA Forwarder 吸收**——`systemctl restart` 有秒级窗口 | 客户端侧 engine failover 到 Vercel/备用出口吸收；文档如实标注，不可宣称"零下线" |
+
+**边界（诚实标注）**：单机无 peer 的 pproxy-server 重启窗口无法靠服务端消除，
+只能靠客户端多出口 failover 吸收；要真正做到服务端零下线，先配集群 peer 再滚动升级
+（`pproxy cluster token-create` / `join`，见 ROLLING-UPGRADE.md）。
+
 ### 更新 server（本机）
 ```bash
 cd /home/USER/pproxy
@@ -123,13 +139,50 @@ ssh dev 'cd ~/pproxy && scripts/sync-desktop-release.sh desktop-vX.Y.Z'
 > DNS：dl → cname.vercel.com（或 R2 custom domain）；命名约定：分发文件名统一点号
 > （Pony.Proxy_X.Y.Z_x64-setup.exe），tauri 产物空格由发布脚本归一。
 
-### 更新 CF Worker
+### 更新 CF Worker（gate / edge，优雅不下线 SOP）
+
+> **核心纪律：不用 `wrangler deploy` 直接替换**（旧版即刻下线、无灰度、失败即事故）。
+> 用 wrangler 4 版本化部署：新版本先 `upload`（线上不动）→ 验证 → `versions deploy` 按比例
+> 灰度 → 观察 → 全量；异常随时 `rollback`。全程新旧版本共存切流，服务零下线。
+
 ```bash
-source /home/USER/pproxy/.secrets.env   # 如脚本需要
-cd /home/USER/pproxy/deploy/cf-worker
-wrangler deploy
+# 前置：认证（一次性，选择其一）
+#   方式 A：npx wrangler login                     # 浏览器 OAuth
+#   方式 B：export CLOUDFLARE_API_TOKEN=<token>   # 非交互（CI/脚本），token 需 Workers 编辑权限
+# 注意：非交互环境必须设 CLOUDFLARE_API_TOKEN，否则 wrangler 拒绝工作
+
+cd /home/USER/pproxy/deploy/cf-gate-worker   # 或 deploy/cf-worker（edge，流程相同）
+
+# 0) 离线打包校验（无需认证，失败即非零退出）
+npx wrangler versions upload --dry-run
+
+# 1) 上传新版本（不影响线上：旧版本继续 100% 服务）
+VERSION_ID=$(npx wrangler versions upload --message "feat: 描述本次变更" 2>&1 | grep -oE 'Version ID: [0-9a-f]{32}' | awk '{print $3}')
+echo "new version: $VERSION_ID"
+
+# 2) 灰度切流：先 5% 观察（可重复多次、可随时加量/回退）
+npx wrangler versions deploy "$VERSION_ID@5"
+sleep 120                                        # 观察窗口：/debug、隧道连通、日志无异常
+curl -s https://gate.ponygo.fun/debug | head -c 200   # 验证新版本已生效且 /debug 正常
+
+# 3) 加量 → 全量（确认无误后）
+npx wrangler versions deploy "$VERSION_ID@50"
+sleep 120
+npx wrangler versions deploy "$VERSION_ID@100"
+
+# 4) 异常回滚（灰度/全量后发现问题）
+#    查上一版本 ID：npx wrangler versions list
+npx wrangler rollback <上一可用版本ID>
 ```
-注意：wrangler.toml 含 routes 配置（edge.example.com custom_domain）。
+
+> 注意事项：
+> - **secret 与 vars 不同步**：`wrangler versions secret put` 需在 upload 前完成，
+>   `--var`/`[vars]` 随版本配置上传（wrangler.toml 已注释说明）；改 TUNNEL_TOKEN_HASH 后
+>   必须重新 upload+deploy，Vercel 侧同源同步。
+> - **gate 专用**：P0-1 多出口兜底 vars（SOCKS5_PROXY 等）在 `wrangler.toml` [vars]，
+>   部署前确认目标版本配置正确（/debug 的 `fallback` 字段可见）。
+> - **验证口径**：灰度窗口至少包含一次真实隧道会话（客户端连一次
+>   `wss://gate.ponygo.fun/ws`），仅 curl /debug 不足以证明 WS 桥正常。
 
 ### 更新 Vercel 函数
 ```bash

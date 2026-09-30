@@ -47,3 +47,10 @@ enabled = true
 #   npx wrangler versions deploy <version-id>
 # 旧 `wrangler secret put` 在 wrangler 4 下被拒且 CLI 侧已改为 fail-fast；
 # Vercel 侧改 env 后必须重新部署（改 env 不自动对 Fluid 实例生效）。
+#
+# 部署纪律（优雅不下线）：禁止裸 `wrangler deploy` 直接替换，必须走版本化灰度——
+#   npx wrangler versions upload --message "<变更说明>"      # 线上不动
+#   npx wrangler versions deploy "<version-id>@5"            # 灰度 5% 观察
+#   npx wrangler versions deploy "<version-id>@100"          # 确认后全量
+#   npx wrangler rollback <上一版本ID>                        # 异常回滚
+# 完整 SOP 见 docs/ops/DEPLOY.md「更新 CF Worker（gate / edge，优雅不下线 SOP）」。

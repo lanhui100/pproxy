@@ -111,6 +111,8 @@ pony config export <service> [--token <name>]   # 输出 env 片段
 ```
 
 - 分流语义：命中走隧道、未命中本机直连；隧道失败向浏览器报错，不做透明恢复
+- gate 反指纹（B011）：非 /ws 路径返回 200 仿 nginx 欢迎页（不再裸 404"可疑 Worker"指纹）；
+  关键路径运行时拼装；token 仅 Bearer header 不进 URL；/debug、/debug/egress 不受影响
 - gate WS accept 口径（2026-08-25 生产实证裁决）：`server.accept()` 后 Response 必须携带 **`pair[0]`（client 端）**；`ctx.acceptWebSocket(server)`/返回 server 在生产边缘抛 500。本地 miniflare 工具链两种模式均不可复现平台行为（S4 已证伪），WS 行为以真机为准
 - 凭据：tunnel_token 明文仅 keyring/GUI 录入，哈希入 wrangler secret；轮换=服务端换 secret + GUI 重录（分钟级窗口）；源码禁止硬编码端点/令牌（2026-08 审计整改，隧道改 opt-in 由配置注入）
 - 引擎为纯 TCP 分流器：无解密无缓存；私网阻断主防线依赖 workerd 平台层（ADR-008 声明平台依赖）
