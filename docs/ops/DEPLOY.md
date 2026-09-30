@@ -116,6 +116,10 @@ sudo systemctl restart pproxy
 curl -s http://127.0.0.1:8899/ | head -c 100   # 健康检查
 ```
 
+### CF 平台风控（gate/edge 生存）
+部署形态（Workers vs Pages）、账号隔离、abuse 邮件处理、域名轮换与"能用就别动"纪律
+见 **[CF-RISK-SOP.md](CF-RISK-SOP.md)**（B013 落点）。
+
 ### 发桌面版（Windows，含自更新分发）
 ```bash
 # 1) 本机（Windows）构建：nsis + updater 签名
