@@ -17,6 +17,8 @@ pproxy user keygen
 
 # 2) 构建发布二进制（如 target/release/pproxy）
 cargo build --release -p pproxy-cli
+#    ⚠️ 集群分发推荐 GitHub Release 的 musl 静态产物（glibc 兼容见 §5.7）；
+#    本地 GNU 构建仅适配与构建机同代 glibc 的节点
 
 # 3) 为升级包生成 .sig（对升级包 SHA-256 摘要做 Ed25519 签名，输出 <file>.sig）
 pproxy user sign target/release/pproxy
@@ -109,6 +111,21 @@ pproxy --version             # 逐节点核对版本（见 §5 边界）
    预签名 URL 再用 `--minio/--r2` 直链。
 6. **云端边缘组件**（CF Worker / Vercel / Gate）与 Rust 节点升级互不依赖：`wrangler deploy`、
    Vercel 部署、桌面端 updater 各自独立，无需协调。
+7. **构建物 glibc 兼容性**：`cargo build` 产物为构建机 glibc 的动态链接二进制（如 Ubuntu 24.04
+   构建依赖 `GLIBC_2.39`），在更旧系统（如 Ubuntu 22.04 / GLIBC_2.35）上无法 exec（报
+   `GLIBC_2.39 not found`）。集群分发使用 GitHub Release 的 musl 静态产物（`cli-release` 工作流
+   cross 构建的 `pproxy-linux-amd64`，静态链接、任意 glibc 可跑），由管理机 `pproxy user sign`
+   重新签名后按本 SOP 分发。
+8. **单二进制 serve 节点自替换边界**：`serve` 节点以 CLI 自身作为服务二进制，`--target` 与升级
+   命令可执行文件同路径时，`atomic_replace` 换掉运行中 inode 后 `current_exe()` 指向 `(deleted)`，
+   serve 守护回退无法自动重新拉起（第 4 步报 `自启动服务失败`；此时二进制已替换成功，仅剩拉起）。
+   手动拉起：`setsid nohup <target> serve --lan >> ~/.pony/serve.log 2>&1 &`，并将新 PID 回写
+   `~/.pony/pproxy-serve.pid`。systemd 直跑 `pproxy-server`、`--target` 指向 server 二进制的节点
+   不受影响。
+9. **验签公钥不一致**：节点 `~/.pony/cluster_signing_key.hex` 可与管理机不同，或不存在（部分节点
+   仅持有 `cluster.json`），节点侧自动解析出的公钥会与管理机签名公钥不匹配而中止升级。统一做法：
+   以 `pproxy user sign` 输出中的「验签公钥 (HEX)」显式传给每个节点 `--verify-key <hex>`，不依赖
+   节点本地公钥文件。
 
 ## 6. 故障演练（可选，验证零停机）
 
