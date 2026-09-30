@@ -392,3 +392,72 @@ pub fn passwd(username: &str, new_password: &str) -> Result<i32, String> {
         }
     }
 }
+
+/// `pproxy user sign <file>` — 管理机为升级包生成 Ed25519 签名（.sig）。
+///
+/// 签名约定（与 `pproxy cluster upgrade --sig` 双侧一致）：
+/// 签名对象为**升级包的 SHA-256 摘要**，签名以 64 字节 HEX 写入 `<file>.sig`。
+/// 私钥来源 `~/.pony/cluster_signing_key.hex`（`pproxy user keygen` 生成，0600）。
+pub fn sign(file: &str, out: Option<&str>) -> Result<i32, String> {
+    use sha2::{Digest, Sha256};
+
+    let p = std::path::Path::new(file);
+    if !p.is_file() {
+        return Err(format!("待签名文件不存在: {file}"));
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("读取文件失败: {e}"))?;
+    let digest = Sha256::digest(&bytes);
+
+    let home = std::env::var("HOME").map_err(|_| "找不到 HOME 目录".to_string())?;
+    let key_path = std::path::Path::new(&home).join(".pony").join("cluster_signing_key.hex");
+    if !key_path.is_file() {
+        return Err(format!(
+            "未找到签名私钥 {} — 请先在管理机执行 `pproxy user keygen` 生成密钥对",
+            key_path.display()
+        ));
+    }
+    let seed_hex = std::fs::read_to_string(&key_path).map_err(|e| format!("读取私钥失败: {e}"))?;
+    let signer = pproxy_core::TokenSigner::from_seed_hex(&seed_hex).map_err(|e| e.to_string())?;
+    let sig = signer.sign_bytes(&digest);
+    let vk_hex = hex::encode(signer.verifying_key().to_bytes());
+
+    let out_path = match out {
+        Some(o) => std::path::PathBuf::from(o),
+        None => {
+            let mut s = p.as_os_str().to_owned();
+            s.push(".sig");
+            std::path::PathBuf::from(s)
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o644)
+            .open(&out_path)
+            .map_err(|e| format!("创建签名文件失败: {e}"))?;
+        use std::io::Write;
+        f.write_all(hex::encode(sig).as_bytes())
+            .map_err(|e| format!("写入签名文件失败: {e}"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&out_path, hex::encode(sig)).map_err(|e| format!("写入签名文件失败: {e}"))?;
+    }
+
+    println!("\n╔════════════════════════════════════════════════════════════════╗");
+    println!("║       ✓ 升级包 Ed25519 签名生成成功 (Release Signing)           ║");
+    println!("╚════════════════════════════════════════════════════════════════╝\n");
+    println!("  升级包 SHA-256: {}", hex::encode(digest));
+    println!("  签名文件:       {}", out_path.display());
+    println!("  验签公钥 (HEX): \x1b[1;32m{}\x1b[0m\n", vk_hex);
+    println!("  \x1b[1;33m节点侧校验：\x1b[0m");
+    println!("  pproxy cluster upgrade --local {} --sig {}", file, out_path.display());
+    println!("  （节点默认从 USER_VERIFYING_KEY / ~/.pony 公钥自动解析验签公钥）\n");
+
+    Ok(EXIT_OK)
+}

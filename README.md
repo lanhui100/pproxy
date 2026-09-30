@@ -100,6 +100,9 @@ pproxy cluster status
 
 - **零手工编辑 (Zero-Touch Bootstrap)**：令牌自带出海网关 URL、凭证与验签公钥，新节点入网即自愈装配。
 - **实网探活大盘**：`cluster status` 毫秒级并发探测各节点健康状况，自动区分在线/离线/时延。
+- **集群滚动升级（零停机）**：`pproxy cluster upgrade --local <pkg> --sig <pkg>.sig --target <服务二进制>`
+  逐节点拉包 → Ed25519 验签 → 原子替换 → 自动重启 + 健康检查；签名用管理机 `pproxy user sign <pkg>`。
+  完整 SOP（顺序、回滚、验证清单）见 [docs/ops/ROLLING-UPGRADE.md](docs/ops/ROLLING-UPGRADE.md)。
 
 ### 5. 商业多租户自包含令牌体系 (Ed25519 Token & Quota)
 

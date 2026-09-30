@@ -125,6 +125,11 @@ sudo systemctl restart pproxy
 curl -s http://127.0.0.1:8899/ | head -c 100   # 健康检查
 ```
 
+### 集群滚动升级（分布式节点，零停机）
+多节点集群的优雅升级流程、签名/分发、升级顺序与回滚见 **[ROLLING-UPGRADE.md](ROLLING-UPGRADE.md)**
+（命令：`pproxy cluster upgrade --local <pkg> --sig <pkg>.sig --target <服务二进制>`；
+签名：管理机 `pproxy user sign <pkg>`）。
+
 ### CF 平台风控（gate/edge 生存）
 部署形态（Workers vs Pages）、账号隔离、abuse 邮件处理、域名轮换与"能用就别动"纪律
 见 **[CF-RISK-SOP.md](CF-RISK-SOP.md)**（B013 落点）。
