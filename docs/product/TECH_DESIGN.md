@@ -56,7 +56,9 @@ alerts(id, ts, level, message, read_at)
 ```
 
 **监控轮询**（tokio interval，1h）
-- CF：GraphQL Analytics API（Workers 请求数/日）
+- CF：GraphQL Analytics API（Workers 请求数/日）；配置 `PPROXY_CF_GATE_SCRIPT_NAME`
+  后按 `scriptName` 增加 `gate_cf` 来源，独立展示 gate 隧道请求数并参与阈值告警
+  （B012；默认关闭，CF 免费档按账号计 100k/天，gate 与 edge 共享总额度）
 - Vercel：`GET /v1/usage`（函数调用/带宽）
 - 阈值 80% → 写 alerts + 触发 webhook（P1）
 

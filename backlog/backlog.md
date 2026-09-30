@@ -28,13 +28,18 @@
 - **落点**：`deploy/cf-gate-worker/{worker.js,camouflage.mjs,camouflage.test.mjs}`
 - **关联**：ADR implemented/feature/2026-09-30-gate-camouflage-page；部署走优雅不下线 SOP（DEPLOY.md §更新 CF Worker）
 
-### B012 — CF 请求量自省 + 配额联动 P0-3（edgetunnel 借鉴）
-- **动机**：gate 每 WS 会话/每 TCP 连接计 CF 请求；免费档 100k/天 极易爆，爆了触发滥用风控
-- **方案**：gate 隧道请求数纳入 SQLite 用量（quota/usage/alert），接近阈值告警或自动
-  failover 到 Vercel 出口；探活/测速在 engine 本地应答不计 CF 请求
-- **验收**：网关用量在 /api/quota 可见且随隧道流量增长；阈值触发告警与切换；Clash 探活不计费
-- **落点**：`crates/core`（quota/usage/alert）+ gate worker 用量上报端点
-- **关联**：ADR implemented/feature/2026-09-30-gate-multi-egress-fallback（同源）
+### B012 — CF 请求量自省 + 配额联动 P0-3（edgetunnel 借鉴）✅ 已完成（最小可行增量）
+- **动机**：gate 每 WS 会话/每 TCP 连接计 CF 请求；免费档 100k/天（按账号计）极易爆，
+  爆了触发滥用风控；现有采集只见账号总量，无法区分 gate 与 edge 各自消耗
+- **方案**：CfCollector 支持 `scriptName` 过滤（gate 单独来源 `gate_cf`），monitor 复用
+  既有 tick/越线告警链路；**默认关闭**（未设 `PPROXY_CF_GATE_SCRIPT_NAME` 行为不变）
+- **验收**：`cargo test -p pproxy-core quota`（含 by_script 用例）+ `cargo test -p pproxy-server`
+  （含 gate_source_disabled_by_default）非零退出；生产配置后 /api/quota 出现 gate_cf
+  且随隧道流量增长（靠 review）
+- **落点**：`crates/core/src/quota.rs`、`crates/server/src/monitor.rs`、`docs/ops/DEPLOY.md`
+- **后续增强（未做，backlog 备注）**：探活 worker 本地应答（edgetunnel 反代模式测速），
+  现状探活仅消耗升级握手（1 请求/次低频）
+- **关联**：ADR implemented/feature/2026-09-30-gate-cf-request-quota
 
 ### B013 — 部署形态 + 风控 SOP P1-4（edgetunnel 借鉴）
 - **方案**：评估 gate 迁 Pages 部署（社区实证更耐封）；小号部署、域名轮换、

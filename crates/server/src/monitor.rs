@@ -24,6 +24,8 @@ use tracing::{info, warn};
 /// 来源名（/api/quota sources 字段）。
 pub const SOURCE_CF: &str = UPSTREAM_CF;
 pub const SOURCE_VERCEL: &str = UPSTREAM_VERCEL;
+/// B012：gate 单独来源（worker 名过滤的请求量，独立于 edge 全账号总量）。
+pub const SOURCE_GATE: &str = "gate_cf";
 
 /// 保留策略（M1 债务）：usage_hourly 30 天 / quota_snapshots 90 天。
 const USAGE_RETENTION_SEC: u64 = 30 * 86_400;
@@ -64,7 +66,11 @@ impl MonitorHandle {
     /// 初始注册全部已知来源：缺凭据 → Disabled；有凭据但尚无成功采样 →
     /// Error（语义为"尚未 ok"，首个立即 tick 内即被真实结果覆盖）。
     fn new(cfg: &MonitorConfig) -> Self {
-        let (cf_enabled, vercel_enabled) = (cfg.cf_ready(), cfg.vercel_token.is_some());
+        let (cf_enabled, vercel_enabled, gate_enabled) = (
+            cfg.cf_ready(),
+            cfg.vercel_token.is_some(),
+            cfg.cf_ready() && cfg.cf_gate_script_name.is_some(),
+        );
         let mut m = HashMap::new();
         m.insert(
             SOURCE_CF.to_string(),
@@ -77,6 +83,15 @@ impl MonitorHandle {
             SOURCE_VERCEL.to_string(),
             (
                 if vercel_enabled { QuotaSourceState::Error } else { QuotaSourceState::Disabled },
+                None,
+            ),
+        );
+        // B012：默认关闭（未配 PPROXY_CF_GATE_SCRIPT_NAME → Disabled，不占 sources 行
+        // 的活跃语义；配了但缺 CF 凭据 → Disabled）。
+        m.insert(
+            SOURCE_GATE.to_string(),
+            (
+                if gate_enabled { QuotaSourceState::Error } else { QuotaSourceState::Disabled },
                 None,
             ),
         );
@@ -123,6 +138,9 @@ pub struct MonitorConfig {
     pub cf_token: Option<String>,
     pub cf_account_tag: Option<String>,
     pub cf_graphql_url: Option<String>,
+    /// B012：gate Worker 名（如 "pony-gate"）。None = gate 单独来源关闭（默认，
+    /// 行为与 B012 前完全一致——仅保留全账号 cf 来源）。
+    pub cf_gate_script_name: Option<String>,
     pub vercel_token: Option<String>,
     pub vercel_team_id: Option<String>,
     pub vercel_api_base: Option<String>,
@@ -148,6 +166,7 @@ impl MonitorConfig {
             cf_token: env_opt("PPROXY_CF_API_TOKEN"),
             cf_account_tag: env_opt("PPROXY_CF_ACCOUNT_TAG"),
             cf_graphql_url: env_opt("PPROXY_CF_GRAPHQL_URL"),
+            cf_gate_script_name: env_opt("PPROXY_CF_GATE_SCRIPT_NAME"),
             vercel_token: env_opt("PPROXY_VERCEL_TOKEN"),
             vercel_team_id: env_opt("PPROXY_VERCEL_TEAM_ID"),
             vercel_api_base: env_opt("PPROXY_VERCEL_API_BASE"),
@@ -159,6 +178,9 @@ impl MonitorConfig {
     pub fn log_disabled(&self) {
         if !self.cf_ready() {
             info!("monitor: cf source disabled (PPROXY_CF_API_TOKEN/PPROXY_CF_ACCOUNT_TAG missing)");
+        }
+        if self.cf_ready() && self.cf_gate_script_name.is_none() {
+            info!("monitor: gate source disabled (PPROXY_CF_GATE_SCRIPT_NAME missing; default off, B012)");
         }
         if self.vercel_token.is_none() {
             info!("monitor: vercel source disabled (PPROXY_VERCEL_TOKEN missing)");
@@ -194,6 +216,16 @@ async fn run_loop(store: Arc<Store>, cfg: MonitorConfig, handle: Arc<MonitorHand
         cfg.cf_account_tag.clone(),
         cfg.cf_graphql_url.clone(),
     );
+    // B012：gate 单独采集器（worker 名过滤），仅当配置了 PPROXY_CF_GATE_SCRIPT_NAME。
+    let gate = match cfg.cf_gate_script_name.as_deref() {
+        Some(script) if !script.is_empty() => Some(CfCollector::with_script_name(
+            cfg.cf_token.clone(),
+            cfg.cf_account_tag.clone(),
+            Some(script.to_string()),
+            cfg.cf_graphql_url.clone(),
+        )),
+        _ => None,
+    };
     let vercel = VercelCollector::new(
         cfg.vercel_token.clone(),
         cfg.vercel_team_id.clone(),
@@ -212,6 +244,7 @@ async fn run_loop(store: Arc<Store>, cfg: MonitorConfig, handle: Arc<MonitorHand
             &cfg,
             &handle,
             &cf,
+            gate.as_ref(),
             &vercel,
             &webhook,
             &mut last_pct,
@@ -227,6 +260,7 @@ async fn tick(
     cfg: &MonitorConfig,
     handle: &Arc<MonitorHandle>,
     cf: &CfCollector,
+    gate: Option<&CfCollector>,
     vercel: &VercelCollector,
     webhook: &WebhookChannel,
     last_pct: &mut HashMap<(&'static str, &'static str), f64>,
@@ -252,6 +286,31 @@ async fn tick(
             Err(e) => {
                 warn!(error = %e, "monitor: cf collect failed (retry next tick)");
                 handle.set_state(SOURCE_CF, QuotaSourceState::Error);
+            }
+        }
+    }
+
+    // ---- Gate 来源（B012，默认关闭）----
+    if let Some(gate) = gate {
+        if gate.enabled() {
+            match gate.collect_daily_requests(now).await {
+                Ok(sample) => {
+                    match persist_sample(store, SOURCE_GATE, "requests_daily", ts, &sample).await {
+                        Ok(()) => {
+                            handle.set_ok(SOURCE_GATE, now);
+                            evaluate_and_notify(store, webhook, last_pct, cfg.threshold_pct, SOURCE_GATE, "requests_daily", &sample, now).await;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "monitor: gate snapshot persist failed");
+                            handle.set_state(SOURCE_GATE, QuotaSourceState::Error);
+                        }
+                    }
+                }
+                Err(CollectError::Disabled) => {}
+                Err(e) => {
+                    warn!(error = %e, "monitor: gate collect failed (retry next tick)");
+                    handle.set_state(SOURCE_GATE, QuotaSourceState::Error);
+                }
             }
         }
     }
@@ -407,6 +466,7 @@ mod tests {
             cf_token: Some("cf_secret".into()),
             cf_account_tag: Some("tag".into()),
             cf_graphql_url: None,
+            cf_gate_script_name: None,
             vercel_token: Some("vercel_secret".into()),
             vercel_team_id: None,
             vercel_api_base: None,
@@ -426,5 +486,36 @@ mod tests {
         assert!(!json.to_string().contains("cf_secret"));
         assert!(!json.to_string().contains("vercel_secret"));
         assert!(!json.to_string().contains("http://hook"));
+    }
+
+    /// B012：gate 来源默认关闭（未配 PPROXY_CF_GATE_SCRIPT_NAME → Disabled）；
+    /// 配置后且有 CF 凭据 → Error（"尚未 ok"，首 tick 后覆盖）。
+    #[test]
+    fn gate_source_disabled_by_default() {
+        let base = MonitorConfig {
+            poll_interval_sec: 60,
+            threshold_pct: 50.0,
+            cf_token: Some("t".into()),
+            cf_account_tag: Some("tag".into()),
+            cf_graphql_url: None,
+            cf_gate_script_name: None,
+            vercel_token: None,
+            vercel_team_id: None,
+            vercel_api_base: None,
+            webhook_url: None,
+        };
+        let handle = MonitorHandle::new(&base);
+        let statuses = handle.statuses();
+        let gate = statuses.iter().find(|s| s.name == SOURCE_GATE).unwrap();
+        assert_eq!(gate.state, QuotaSourceState::Disabled, "默认关闭 = B012 前行为");
+
+        let enabled = MonitorConfig {
+            cf_gate_script_name: Some("pony-gate".into()),
+            ..base
+        };
+        let handle2 = MonitorHandle::new(&enabled);
+        let statuses2 = handle2.statuses();
+        let gate2 = statuses2.iter().find(|s| s.name == SOURCE_GATE).unwrap();
+        assert_eq!(gate2.state, QuotaSourceState::Error, "已配置 → 等待首 tick 结果");
     }
 }

@@ -143,10 +143,24 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 // ---- Cloudflare ----
 
+/// 全账号请求量查询（默认来源 cf/requests_daily）：不按 worker 过滤，
+/// 返回账号下全部 Worker 的请求总和（B012 前现状）。
 const CF_GRAPHQL_QUERY: &str = r#"query($accountTag: String!, $since: Date!, $until: Date!) {
   viewer { accounts(filter: {accountTag: $accountTag}) {
     workersInvocationsAdaptive(
       filter: { date_geq: $since, date_leq: $until }, limit: 10000,
+      orderBy: [date_ASC]) {
+      sum { requests }
+      dimensions { date }
+    } } }
+}"#;
+
+/// 按 Worker 名过滤的请求量查询（B012：gate 单独来源 gate_cf/requests_daily，
+/// 经 `scriptName` 维度区分 gate 隧道请求数，独立于 edge 全账号总量）。
+const CF_GRAPHQL_QUERY_BY_SCRIPT: &str = r#"query($accountTag: String!, $since: Date!, $until: Date!, $scriptName: String!) {
+  viewer { accounts(filter: {accountTag: $accountTag}) {
+    workersInvocationsAdaptive(
+      filter: { date_geq: $since, date_leq: $until, scriptName: $scriptName }, limit: 10000,
       orderBy: [date_ASC]) {
       sum { requests }
       dimensions { date }
@@ -162,6 +176,25 @@ pub fn cf_graphql_request_body(account_tag: &str, since: &str, until: &str) -> s
             "accountTag": account_tag,
             "since": since,
             "until": until,
+        },
+    })
+}
+
+/// 按 Worker 名过滤的 GraphQL 请求体（B012：gate 单独来源）。
+/// 变量化 scriptName，与全账号查询同一注入面纪律。
+pub fn cf_graphql_request_body_by_script(
+    account_tag: &str,
+    script_name: &str,
+    since: &str,
+    until: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "query": CF_GRAPHQL_QUERY_BY_SCRIPT,
+        "variables": {
+            "accountTag": account_tag,
+            "since": since,
+            "until": until,
+            "scriptName": script_name,
         },
     })
 }
@@ -215,22 +248,35 @@ pub fn parse_cf_usage(body: &[u8], quota: i64) -> Result<CfUsageOutcome, String>
 }
 
 /// Cloudflare Workers 用量采集器（10s 独立超时 client）。
+/// `script_name` 为 Some 时按 Worker 名过滤（B012：gate 单独来源），None = 全账号。
 pub struct CfCollector {
     token: Option<String>,
     account_tag: Option<String>,
     graphql_url: String,
+    script_name: Option<String>,
     client: reqwest::Client,
 }
 
 impl CfCollector {
     /// token 与 account_tag 任一缺失 → 来源 disabled（启动 info 一行非错误）。
     pub fn new(token: Option<String>, account_tag: Option<String>, graphql_url: Option<String>) -> Self {
+        Self::with_script_name(token, account_tag, None, graphql_url)
+    }
+
+    /// 带可选 Worker 名过滤的构造（B012：gate 单独来源传 Some("pony-gate")）。
+    pub fn with_script_name(
+        token: Option<String>,
+        account_tag: Option<String>,
+        script_name: Option<String>,
+        graphql_url: Option<String>,
+    ) -> Self {
         CfCollector {
             token,
             account_tag,
             graphql_url: graphql_url
                 .filter(|u| !u.is_empty())
                 .unwrap_or_else(|| CF_GRAPHQL_URL_DEFAULT.to_string()),
+            script_name: script_name.filter(|s| !s.is_empty()),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))
                 .build()
@@ -242,7 +288,7 @@ impl CfCollector {
         self.token.is_some() && self.account_tag.is_some()
     }
 
-    /// 当日 UTC 窗口 requests_daily 采样。
+    /// 当日 UTC 窗口 requests_daily 采样（script_name 过滤时即该 Worker 的请求量）。
     pub async fn collect_daily_requests(&self, now_unix_ts: u64) -> Result<QuotaSample, CollectError> {
         let Some(token) = self.token.as_deref() else {
             return Err(CollectError::Disabled);
@@ -251,7 +297,10 @@ impl CfCollector {
             return Err(CollectError::Disabled);
         };
         let date = utc_date_string(now_unix_ts);
-        let body = cf_graphql_request_body(tag, &date, &date);
+        let body = match self.script_name.as_deref() {
+            Some(script) => cf_graphql_request_body_by_script(tag, script, &date, &date),
+            None => cf_graphql_request_body(tag, &date, &date),
+        };
         let resp = self
             .client
             .post(&self.graphql_url)
@@ -427,6 +476,27 @@ mod tests {
         assert_eq!(vars["accountTag"].as_str(), Some(evil));
         assert_eq!(vars["since"].as_str(), Some("2026-08-22"));
         assert_eq!(vars["until"].as_str(), Some("2026-08-22"));
+    }
+
+    #[test]
+    fn cf_body_by_script_scopes_script_name() {
+        // B012：gate 来源按 scriptName 过滤，变量化注入面同全账号查询。
+        let evil = "\"} evil {\"";
+        let body = cf_graphql_request_body_by_script("acc1", evil, "2026-08-22", "2026-08-22");
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("$scriptName"), "query 使用变量占位");
+        assert!(!query.contains(evil), "查询文本不含插值");
+        let vars = &body["variables"];
+        assert_eq!(vars["accountTag"].as_str(), Some("acc1"));
+        assert_eq!(vars["scriptName"].as_str(), Some(evil));
+        // 关键：按 worker 过滤后，parse_cf_usage 的求和口径不变（同一解析函数）
+        let resp = br#"{"errors":[],"data":{"viewer":{"accounts":[{"workersInvocationsAdaptive":[{"sum":{"requests":4200},"dimensions":{"date":"2026-08-22"}}]}]}}}"#;
+        let out = parse_cf_usage(resp, CF_DAILY_REQUEST_QUOTA).unwrap();
+        assert_eq!(
+            out,
+            CfUsageOutcome::Ok(QuotaSample::new(4200, 100_000)),
+            "gate 单独请求数可被同解析函数求和"
+        );
     }
 
     // ---- parse_cf_usage 三态 ----
