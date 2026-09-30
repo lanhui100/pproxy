@@ -11,6 +11,12 @@ import {
   shouldBlockEgress,
   parseAllowedEgressCountries,
 } from './gate-policy.mjs'
+import {
+  parseFallbackConfig,
+  channelOrder,
+  socks5Connect,
+  withTimeout,
+} from './egress-fallback.mjs'
 import { makeEgressGeoCache } from './egress-geo.mjs'
 import { probeEgressGeo, DEFAULT_EGRESS_GEO_URL, DEFAULT_EGRESS_PROBE_TIMEOUT_MS } from './egress-probe.mjs'
 
@@ -72,15 +78,61 @@ function egressProbeConfig(env) {
   }
 }
 
+/// 建立单个出口通道（P0-1 多出口兜底）。
+/// @param {string} channel 'direct' | 'socks5' | 'proxyip'
+/// @param {ReturnType<parseFallbackConfig>} cfg
+/// @param {{host: string, port: number}} target 客户端声明的目标
+/// @param {number} timeoutMs 0 = 不设超时（仅直连、无兜底时的现状行为）
+/// @returns {Promise<{sock: object, writer: object, leftover: Uint8Array|null}>}
+async function openChannel(channel, cfg, target, timeoutMs) {
+  let sock = null
+  try {
+    if (channel === 'direct') {
+      sock = connect({ hostname: target.host, port: target.port })
+      const writer = sock.writable.getWriter()
+      await withTimeout(sock.opened, timeoutMs, 'direct connect')
+      return { sock, writer, leftover: null }
+    }
+    if (channel === 'socks5') {
+      // SOCKS5 链式：连用户自有 VPS（默认 1080 语义由配置 host:port 决定，参照
+      // crates/core/src/relay.rs::socks5_connect）。握手复用同一 writer，成功后直接中继。
+      sock = connect({ hostname: cfg.socks5.host, port: cfg.socks5.port })
+      const writer = sock.writable.getWriter()
+      await withTimeout(sock.opened, timeoutMs, 'socks5 tcp connect')
+      const { leftover } = await socks5Connect(sock, writer, target.host, target.port, timeoutMs)
+      return { sock, writer, leftover }
+    }
+    // proxyip：SNI 反代中继。客户端 TLS ClientHello 携带目标 host 的 SNI，
+    // 反代据此把 TCP 流转发到真实目标（edgetunnel 反代语义），worker 只直连中继地址。
+    sock = connect({ hostname: cfg.proxyIp.host, port: cfg.proxyIp.port })
+    const writer = sock.writable.getWriter()
+    await withTimeout(sock.opened, timeoutMs, 'proxyip connect')
+    return { sock, writer, leftover: null }
+  } catch (e) {
+    // 超时/失败时关闭悬空 socket，避免黑洞通道泄漏
+    try { sock?.close?.() } catch {}
+    throw e
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url)
     if (url.pathname === '/debug') {
+      const cfg = parseFallbackConfig(env)
       return new Response(
         JSON.stringify({
           set: typeof env.TUNNEL_TOKEN_HASH === 'string',
           // 只暴露长度不暴露 hash 本体：len!=64 即 env 写脏（换行/截断），与 Vercel /debug 口径对齐
           len: typeof env.TUNNEL_TOKEN_HASH === 'string' ? env.TUNNEL_TOKEN_HASH.trim().length : 0,
+          // 多出口兜底配置态（P0-1，不含端点/国家码本体，仅暴露"是否配置"）
+          fallback: {
+            socks5: !!cfg.socks5,
+            proxyip: !!cfg.proxyIp,
+            socks5CountryDeclared: !!cfg.socks5Country,
+            proxyipCountryDeclared: !!cfg.proxyIpCountry,
+            attemptTimeoutMs: cfg.attemptTimeoutMs,
+          },
         }),
         { headers: { 'content-type': 'application/json' } },
       )
@@ -173,34 +225,77 @@ export default {
         return
       }
 
+      // 多出口兜底（P0-1）：直连失败/被 CF 收紧时自动切用户配置的兜底通道。
+      // 通道编排在 egress-fallback.mjs：direct（现状优先）→ socks5 → proxyip，
+      // 全部按 channelOrder 排好序且已过滤不合规通道（合规 host 仅保留声明合规的兜底）。
+      const cfg = parseFallbackConfig(env)
+      let channels = channelOrder(req.host, cfg)
+
       // 出站地理门禁（A 方案）：入站 colo 合规 ≠ 出站 egress IP 合规
       // （connect() 的出站 IP 由 CF 另行分配）。仅对 Cloud Code 系 host 生效，
       // fail-closed；非合规 host 一律放行，避免把泛 Google 流量倾泻到兜底出口。
+      // 有声明合规的兜底通道时：直连被 geo 门禁拒 → 直接切兜底（不出 Vercel failover）；
+      // 无兜底时维持现状（拒绝 → 客户端 failover 到 Vercel 合规出口）。
       if (requiresCompliantEgress(req.host)) {
         const egress = await getEgressCache(env).resolve()
         const egressReason = shouldBlockEgress(egress, req.host, {
           allowedCountries: parseAllowedEgressCountries(env.EGRESS_ALLOWED_COUNTRIES),
         })
         if (egressReason) {
-          console.log(
-            '[gate] egress blocked',
-            egressReason,
-            req.host,
-            egress.status,
-            egress.ip || '',
-          )
-          server.send(JSON.stringify({ ok: false, reason: egressReason }))
-          server.close(1008, egressReason)
-          return
+          const compliantFallbacks = channels.filter((c) => c !== 'direct')
+          if (compliantFallbacks.length) {
+            console.log('[gate] egress blocked, switch to compliant fallback', egressReason, req.host)
+            channels = compliantFallbacks
+          } else {
+            console.log(
+              '[gate] egress blocked',
+              egressReason,
+              req.host,
+              egress.status,
+              egress.ip || '',
+            )
+            server.send(JSON.stringify({ ok: false, reason: egressReason }))
+            server.close(1008, egressReason)
+            return
+          }
         }
       }
+
       try {
-        console.log('[gate] connecting', req.host, port)
-        const sock = connect({ hostname: req.host, port })
-        const up = sock.writable.getWriter()
-        await sock.opened
+        // 顺序尝试各通道；只有直连时维持现状（无超时，避免行为漂移），
+        // 存在兜底通道时给每个通道建立超时（防黑洞挂死永远切不到兜底）。
+        let via = null
+        let sock = null
+        let leftover = null
+        let lastErr = null
+        const attemptTimeoutMs = channels.length > 1 ? cfg.attemptTimeoutMs : 0
+        for (const channel of channels) {
+          try {
+            const opened = await openChannel(channel, cfg, req, port, attemptTimeoutMs)
+            sock = opened.sock
+            writer = opened.writer
+            leftover = opened.leftover
+            via = channel
+            break
+          } catch (e) {
+            lastErr = e
+            console.log('[gate] channel failed', channel, String(e))
+          }
+        }
+        if (!sock) {
+          console.log('[gate] connect error (all channels)', String(lastErr))
+          server.send(JSON.stringify({ ok: false, reason: String(lastErr) }))
+          try { server.close(1011, 'connect failed') } catch {}
+          return
+        }
+        console.log('[gate] connected via', via, req.host, port)
         established = true
-        server.send(JSON.stringify({ ok: true }))
+        server.send(JSON.stringify({ ok: true, via }))
+        // leftover（SOCKS5 握手后已读到的上游早到字节）必须先于 pipeTo flush 给客户端，
+        // 与 crates/core/src/relay.rs relay_with_leftover 语义对齐，防止粘包丢字节。
+        if (leftover && leftover.length) {
+          try { server.send(leftover) } catch {}
+        }
         // TCP→WS：官方规范 pipe 模式
         // 上游正常 EOF（pipeTo resolve）与异常（reject）都必须关闭 WS——
         // 此前只挂了 .catch，正常关闭时 WS 悬挂成"半死隧道"，客户端侧表现为 EOF。
@@ -218,7 +313,6 @@ export default {
             }),
           )
           .then(closeUpstream, closeUpstream)
-        writer = up
       } catch (e) {
         console.log('[gate] connect error', String(e))
         server.send(JSON.stringify({ ok: false, reason: String(e) }))

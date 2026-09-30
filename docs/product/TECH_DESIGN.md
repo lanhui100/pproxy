@@ -105,7 +105,9 @@ pony config export <service> [--token <name>]   # 输出 env 片段
    ├─ PAC /pac：命中单条 PROXY 127.0.0.1:18900，无 DIRECT 兜底
    ▼
 [CF Worker] gate（deploy/cf-gate-worker/，独立于 edge 数据面）
-   └─ sha256(token)≡TUNNEL_TOKEN_HASH → ACL（443-only+host 归一化）→ cloudflare:sockets connect() 出站
+   └─ sha256(token)≡TUNNEL_TOKEN_HASH → ACL（443-only+host 归一化）→ 多出口兜底
+      （P0-1：直连 cloudflare:sockets connect() 失败 → SOCKS5 链式 → SNI 反代中继，
+       默认全空 = 仅直连；兜底过 gate-policy.mjs 同一合规门禁，合规 host 需声明国家码）
 ```
 
 - 分流语义：命中走隧道、未命中本机直连；隧道失败向浏览器报错，不做透明恢复

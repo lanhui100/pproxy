@@ -28,6 +28,16 @@ EGRESS_GEO_STALE_MS = "1800000"
 # 留空 = 使用 gate-policy.mjs 的 DEFAULT_ALLOWED_EGRESS_COUNTRIES（美/欧/亚太合规区/拉美）
 # EGRESS_ALLOWED_COUNTRIES = ""
 
+# ── 多出口兜底（P0-1，借鉴 edgetunnel 反代兜底语义；默认全部留空 = 仅直连，行为不变）──
+# 直连（cloudflare:sockets connect()）失败/被 CF 收紧时，自动依次尝试以下用户配置的
+# 兜底通道：socks5 → proxyip。合规门禁不降级：Google Cloud Code 系 host 仅当显式声明
+# 国家码且过 shouldBlockEgress 才走兜底（fail-closed，合规后缀仍只走白名单出口）。
+# SOCKS5_PROXY = "vps.example.com:1080"        # 用户自有 VPS SOCKS5（host:port）
+# SOCKS5_COUNTRY = "US"                        # 该 SOCKS5 出口的声明国家码（合规判定用）
+# PROXYIP_HOST = "relay.example.com"           # SNI 反代中继 host[:port]（默认 443）
+# PROXYIP_COUNTRY = "US"                       # 该反代出口的声明国家码（合规判定用）
+# EGRESS_ATTEMPT_TIMEOUT_MS = "8000"           # 单通道建立超时（存在兜底时生效，防黑洞挂死）
+
 [observability]
 enabled = true
 

@@ -1,2 +1,8 @@
 # 本地密钥模板：复制为 .dev.vars 并填入真实值（.dev.vars 已被 ignore，严禁提交）
 TUNNEL_TOKEN_HASH=<sha256-hex-of-tunnel-token>
+# 可选：多出口兜底（P0-1），留空 = 仅直连（生产默认）
+# SOCKS5_PROXY=vps.example.com:1080
+# SOCKS5_COUNTRY=US
+# PROXYIP_HOST=relay.example.com
+# PROXYIP_COUNTRY=US
+# EGRESS_ATTEMPT_TIMEOUT_MS=8000

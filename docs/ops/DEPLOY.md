@@ -55,6 +55,25 @@
 | `GATE_ADMIN` | 网关管理端点地址（CLI 撤销热推送目标，默认 `http://127.0.0.1:3101`） |
 | `PPROXY_SERVICE_USER` | `m4_test.sh` 断言的服务运行用户（默认 `pproxy`） |
 
+### 3.5 gate 多出口兜底（P0-1 可选配置，默认留空 = 仅直连）
+
+gate worker 直连（`cloudflare:sockets connect()`）失败/被 CF 收紧时，可自动切到
+用户配置的兜底通道（SOCKS5 链式 → SNI 反代中继）。**默认全部留空，行为与仅直连
+完全一致**；兜底通道执行与直连同一套 `gate-policy.mjs` 合规门禁（Google Cloud Code
+系 host 仅当显式声明国家码且过 `shouldBlockEgress` 才走兜底，fail-closed）。
+
+| 变量（Gate Worker `wrangler.toml` [vars] / `.dev.vars`） | 作用 |
+|---|---|
+| `SOCKS5_PROXY` | 用户自有 VPS SOCKS5，格式 `host:port`（如 `vps.example.com:1080`） |
+| `SOCKS5_COUNTRY` | 该 SOCKS5 出口的**声明国家码**（如 `US`），合规判定用 |
+| `PROXYIP_HOST` | SNI 反代中继 `host[:port]`（默认 443） |
+| `PROXYIP_COUNTRY` | 该反代出口的**声明国家码**（如 `US`），合规判定用 |
+| `EGRESS_ATTEMPT_TIMEOUT_MS` | 单通道建立超时（默认 8000；存在兜底通道时生效，防黑洞挂死） |
+
+验证：单测 `node deploy/cf-gate-worker/egress-fallback.test.mjs`；端到端
+`node deploy/cf-gate-worker/e2e-fallback.mjs`（本地 wrangler dev + 固定目标
+SOCKS5 中继，验证直连必败 host 自动切兜底仍可出海）。
+
 ### 4. 桌面端配置
 
 桌面端（Tauri）无需改源码：在「设置 → 方案 A」粘贴**授权码**（`pony-gate://` 口令或裸 token，口令自带端点）即可开通隧道；端点在客户端侧持久化，代码内回退默认端点仅为占位。

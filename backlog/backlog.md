@@ -4,9 +4,53 @@
 
 ## 进行中
 
-（无）
+### B010 — gate 多出口兜底 P0-1（edgetunnel 借鉴）🔄 代码+单测已落地，待部署验收
+- **动机**：gate worker 只有 `cloudflare:sockets connect()` 直连一条路——CF 重点风控
+  的模式；CF 一收紧出口，整条 gate 隧道链路失效（研究背景：docs/HANDOVER §3 P0-1，已删）
+- **方案**：直连失败/被 CF 收紧 → 自动切用户配置兜底（SOCKS5 链式 → SNI 反代中继）；
+  默认全留空 = 仅直连（不默认走任何第三方中转）；兜底过 gate-policy.mjs 同一合规门禁
+  （合规 host 需声明国家码 fail-closed）
+- **验收**：`node deploy/cf-gate-worker/egress-fallback.test.mjs`（43 用例，非零退出）；
+  `node deploy/cf-gate-worker/e2e-fallback.mjs`（wrangler dev 直连必败 host 自动切
+  SOCKS5 仍出海，非零退出）；生产部署后断直连观察（靠 review）
+- **落点**：`deploy/cf-gate-worker/{worker.js,egress-fallback.mjs,egress-fallback.test.mjs,e2e-fallback.mjs,wrangler.toml}`
+- **关联**：ADR implemented/feature/2026-09-30-gate-multi-egress-fallback；B011/B012 同源
 
 ## 待办
+
+### B011 — gate 伪装页 + 反指纹 P0-2（edgetunnel 借鉴）
+- **动机**：gate 非 `/ws` 路径全裸 404 = 最典型的"可疑 Worker"指纹，防扫号低成本高收益
+- **方案**：非 `/ws` 返回仿 nginx 欢迎页；`tunnel`/`gate` 特征字符串运行时拼装；
+  token 不进 URL 查询串；**不抄** edgetunnel 的"多语言无后门"注释垫片（信任争议）
+- **验收**：浏览器直开 gate 域名见普通页面；/ws 行为不变；wrangler 部署后 curl 非 /ws 返回伪装页
+- **落点**：`deploy/cf-gate-worker/worker.js` fetch 入口
+- **关联**：ADR implemented/feature/2026-09-30-gate-multi-egress-fallback（同源）
+
+### B012 — CF 请求量自省 + 配额联动 P0-3（edgetunnel 借鉴）
+- **动机**：gate 每 WS 会话/每 TCP 连接计 CF 请求；免费档 100k/天 极易爆，爆了触发滥用风控
+- **方案**：gate 隧道请求数纳入 SQLite 用量（quota/usage/alert），接近阈值告警或自动
+  failover 到 Vercel 出口；探活/测速在 engine 本地应答不计 CF 请求
+- **验收**：网关用量在 /api/quota 可见且随隧道流量增长；阈值触发告警与切换；Clash 探活不计费
+- **落点**：`crates/core`（quota/usage/alert）+ gate worker 用量上报端点
+- **关联**：ADR implemented/feature/2026-09-30-gate-multi-egress-fallback（同源）
+
+### B013 — 部署形态 + 风控 SOP P1-4（edgetunnel 借鉴）
+- **方案**：评估 gate 迁 Pages 部署（社区实证更耐封）；小号部署、域名轮换、
+  "能用就别动"纪律；abuse 邮件处理 SOP
+- **验收**：文档含"收到 abuse 邮件怎么办 / 域名轮换步骤 / 账号隔离"三节（靠 review）
+- **落点**：`deploy/pproxy-service.md` 或 `docs/ops/`
+
+### B014 — 标准协议入站 P1-5（edgetunnel 借鉴，架构级大改）
+- **方案**：gate 增加 VLESS-WS 入站，Ed25519 配额令牌映射成 UUID 鉴权 → 第三方客户端
+  （Clash/v2rayN/Shadowrocket）直连 gate；代价=协议解析代码量+指纹面变大（需先做 B011）
+- **纪律**：**先出方案（proposed ADR）再动手**，不立即实施
+- **验收**：方案评审通过后立项；实现后第三方客户端可直连且配额/吊销体系保留
+
+### B015 — 客户端配置细节 P2-6（edgetunnel 借鉴）
+- **方案**：订阅链接 HOST/SNI 自动对准 gate 域名（域名轮换后免重新导入）；
+  多格式导出（sing-box/Surge）；token 轮换语义
+- **验收**：改 gate 域名后重新生成的订阅无需手改 HOST 即可用
+- **落点**：`pproxy clash`（`crates/cli`）
 
 ### B003 — vedge 改 CF 橙云代理回源 Vercel（中期方案）⏸ 待决策
 - **背景**：B002 判决——中国联通出口→Vercel anycast(66.33.60.x/76.76.21.x) 路由间歇性劣化；
