@@ -21,8 +21,35 @@ pub fn generate_clash_yaml(server_ip: &str, port: u16, token: Option<&str>) -> S
 /// B015：隧道模式（gate 域名直连）。gate_host 形如 "gate.example.com"（不带协议/路径）。
 /// 生成的 proxy 走 ws+tls：server=gate 域名、sni=同域名、ws-opts path=/ws、
 /// 鉴权经 ws-opts headers Authorization: Bearer <token>（对齐 gate worker /ws 协议）。
-pub fn generate_clash_yaml_tunnel(gate_host: &str, token: Option<&str>) -> String {
-    generate_clash_yaml_mode(gate_host, 443, token, Some(gate_host))
+/// token 缺失时返回 Err（fail-fast：空 Bearer 必然 401，不如直接报错提示）。
+pub fn generate_clash_yaml_tunnel(gate_host: &str, token: Option<&str>) -> Result<String, String> {
+    let tok = token
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "隧道模式缺少访问令牌：请先配置 PPROXY_TUNNEL_TOKEN 或 --token".to_string())?;
+    if !is_valid_hostname(gate_host) {
+        return Err(format!(
+            "非法 gate 域名（仅允许字母数字点连字符或 [IPv6]）：{gate_host}"
+        ));
+    }
+    Ok(generate_clash_yaml_mode(gate_host, 443, Some(tok), Some(gate_host)))
+}
+
+/// host 白名单校验（对抗审核 P1：防 YAML 注入/结构破坏）。
+/// 允许 DNS 域名（字母数字连字符点）与 [IPv6] 字面量；不含空白/冒号/#/引号。
+fn is_valid_hostname(host: &str) -> bool {
+    let h = host.trim();
+    if h.is_empty() || h.len() > 253 {
+        return false;
+    }
+    if h.starts_with('[') && h.ends_with(']') {
+        // [IPv6]：括号内允许十六进制、冒号、点
+        let inner = &h[1..h.len() - 1];
+        return !inner.is_empty()
+            && inner
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b':' || b == b'.');
+    }
+    h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
 }
 
 /// 统一实现：tunnel_host 为 Some 时输出 ws+tls 隧道 proxy；否则 http 局域网 proxy。
@@ -37,23 +64,24 @@ fn generate_clash_yaml_mode(
         _ => String::new(),
     };
 
-    let (proxy_block, headers_block) = match tunnel_host {
+    // 对抗审核 P1：proxy-groups 的成员必须与 proxies 实际定义一致——
+    // 隧道模式只有 Pony-Tunnel，局域网模式只有 Pony-Proxy（未定义为死引用会被
+    // Clash 严格校验拒绝加载）。
+    let (proxy_block, group_members) = match tunnel_host {
         Some(host) => {
-            // 隧道直连：ws+tls，SNI/HOST 对准 gate 域名，token 走 Bearer
             let proxy = format!(
                 "  - name: \"Pony-Tunnel\"\n    type: ws\n    server: {host}\n    port: 443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    ws-opts:\n      path: /ws\n      headers:\n        Authorization: \"Bearer {}\"\n",
                 token.unwrap_or("")
             );
-            (proxy, String::new())
+            (proxy, "      - \"Pony-Tunnel\"\n      - DIRECT".to_string())
         }
         None => {
             let proxy = format!(
                 "  - name: \"Pony-Proxy\"\n    type: http\n    server: {server}\n    port: {port}\n{auth_section}"
             );
-            (proxy, String::new())
+            (proxy, "      - \"Pony-Proxy\"\n      - DIRECT".to_string())
         }
     };
-    let _ = headers_block;
 
     format!(
         r#"# ================================================================
@@ -72,9 +100,7 @@ proxies:
     url: "http://cp.cloudflare.com/generate_204"
     interval: 300
     proxies:
-      - "Pony-Tunnel"
-      - "Pony-Proxy"
-      - DIRECT
+{group_members}
 
 rules:
   # 1. 服务端公网与局域网直连保护（审查修复 P0-2：置顶优先，加 no-resolve 避免反向解析延迟）
@@ -177,10 +203,10 @@ fn extract_token_from_existing_file() -> Option<String> {
     None
 }
 
-/// 从配置提取 gate 隧道域名（B015）：
+/// 从配置提取 gate 隧道端点（B015，对抗审核 P1：保留端口）：
 /// 支持 "wss://host[:port]/ws"、"wss://host[:port]"、"host[:port]" 三种形态，
-/// 返回纯 host（去掉端口/协议/路径）；多端点取第一个；无配置返回 None。
-fn gate_host_from_config(cfg: &PonyConfig) -> Option<String> {
+/// 返回 (host, port)；端口缺省按 wss 默认 443；多端点取第一个；无配置返回 None。
+fn gate_endpoint_from_config(cfg: &PonyConfig) -> Option<(String, u16)> {
     let url = cfg.tunnel_gate_url.as_deref()?.trim();
     let first = url.split(',').next()?.trim();
     if first.is_empty() {
@@ -194,19 +220,26 @@ fn gate_host_from_config(cfg: &PonyConfig) -> Option<String> {
         .trim_start_matches("http://");
     // 去路径（/ws 等）
     let hostport = without_scheme.split('/').next().unwrap_or("").trim();
-    // 去端口：IPv6 "[::1]:443" → "::1"（保留括号内）；普通 "host:port" → "host"
-    let host = if hostport.starts_with('[') {
-        hostport
-            .split_once(']')
-            .map(|(h, _)| h.trim_start_matches('[').to_string())
-            .unwrap_or_else(|| hostport.to_string())
-    } else {
-        hostport.split(':').next().unwrap_or("").to_string()
-    };
-    if host.is_empty() {
+    // 拆 host 与端口
+    if hostport.starts_with('[') {
+        // [::1]:443
+        if let Some((h, rest)) = hostport.split_once(']') {
+            let host = h.trim_start_matches('[').to_string();
+            let port = rest
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(443);
+            return Some((host, port));
+        }
+        None
+    } else if let Some((h, p)) = hostport.rsplit_once(':') {
+        let host = h.to_string();
+        let port = p.parse::<u16>().ok()?;
+        Some((host, port))
+    } else if hostport.is_empty() {
         None
     } else {
-        Some(host)
+        Some((hostport.to_string(), 443))
     }
 }
 
@@ -246,8 +279,9 @@ pub fn run(
     let port = port_arg.unwrap_or(8899);
 
     // B015：若配置了 gate 隧道域名，订阅自动对准 gate（域名轮换后重新生成即生效）。
-    // 提取 wss://host[:port]/ws 或 host:port 中的 host；无配置回落局域网模式。
-    let gate_host = gate_host_from_config(cfg);
+    // 提取 wss://host[:port]/ws 或 host:port 中的 host[:port]；无配置回落局域网模式。
+    // 对抗审核 P1：保留端口（非 443 时拒绝——gate 仅放行 443，见 worker ALLOWED_PORTS）。
+    let gate_endpoint = gate_endpoint_from_config(cfg);
 
     // 自动确定局域网 IP
     let lan_ip = match lan_ip_arg {
@@ -261,8 +295,16 @@ pub fn run(
     let token_str = token.as_deref().unwrap_or("<未配置-请运行 pproxy token create 生成>");
 
     // 1. 生成 YAML 内容（gate 隧道模式或局域网模式）
-    let yaml = match gate_host.as_deref() {
-        Some(host) => generate_clash_yaml_tunnel(host, token.as_deref()),
+    //    隧道模式 token 缺失 → fail-fast（空 Bearer 必然 401，不如直接报错）
+    let yaml = match gate_endpoint.as_ref() {
+        Some((host, tport)) => {
+            if *tport != 443 {
+                return Err(format!(
+                    "gate 隧道端口 {tport} 不受支持：gate worker 仅放行 443（ALLOWED_PORTS）"
+                ));
+            }
+            generate_clash_yaml_tunnel(host, token.as_deref())?
+        }
         None => generate_clash_yaml(&lan_ip, port, token.as_deref()),
     };
 
@@ -271,13 +313,21 @@ pub fn run(
         let _ = config::secure_write_file(&path, yaml.as_bytes());
     }
 
-    let subscription_url = match gate_host.as_deref() {
-        Some(host) => format!("wss://{host}/ws"),
-        None => format!("http://{lan_ip}:{port}/clash.yaml"),
+    // 对抗审核 P1：隧道模式的订阅 URL 不可用 wss://（Clash 按 HTTP 拉取会拿 400），
+    // 输出本地 YAML 文件路径供手动/文件导入；局域网模式维持 http 订阅端点。
+    let subscription_url = match gate_endpoint.as_ref() {
+        Some(_) => None,
+        None => Some(format!("http://{lan_ip}:{port}/clash.yaml")),
     };
 
     if url_only {
-        println!("{subscription_url}");
+        match subscription_url.as_deref() {
+            Some(url) => println!("{url}"),
+            None => {
+                // 隧道模式无 HTTP 订阅端点：打印 YAML 内容（重定向到文件即得订阅）
+                println!("{yaml}")
+            }
+        }
         return Ok(EXIT_OK);
     }
 
@@ -286,26 +336,40 @@ pub fn run(
     println!("║            Pony Proxy 手机 Clash Meta 配置一键导入              ║");
     println!("╚════════════════════════════════════════════════════════════════╝\n");
 
-    println!("\x1b[1;33m【方式一：手机扫码导入（最便捷）】\x1b[0m");
-    println!("打开手机 Clash Meta（或 Flclash / 小火箭）-> 配置 -> 新建配置 -> \x1b[1;36m扫描二维码\x1b[0m：\n");
-
-    match render_qr(&subscription_url) {
-        Ok(qr) => {
-            println!("{qr}\n");
+    match gate_endpoint.as_ref() {
+        Some(_) => {
+            // 隧道模式：无 HTTP 订阅端点，引导从本地文件导入（wss:// 不可被 URL 拉取）
+            println!("\x1b[1;33m【方式一：手机扫码导入（最便捷）】\x1b[0m");
+            println!("隧道模式无公网订阅端点，请使用【方式二：本地文件导入】：\n");
+            println!("\x1b[1;33m【方式二：从本地文件导入】\x1b[0m");
+            if let Ok(file_path) = default_clash_file_path() {
+                println!("配置文件已生成至本机：");
+                println!("  \x1b[1;34m{}\x1b[0m\n", file_path.display());
+                println!("将文件传到手机（网盘/微信/数据线），Clash 中选择「配置文件 → 新建 → 从文件导入」。\n");
+            }
         }
-        Err(e) => {
-            eprintln!("(二维码生成失败: {e})\n");
+        None => {
+            println!("\x1b[1;33m【方式一：手机扫码导入（最便捷）】\x1b[0m");
+            println!("打开手机 Clash Meta（或 Flclash / 小火箭）-> 配置 -> 新建配置 -> \x1b[1;36m扫描二维码\x1b[0m：\n");
+            if let Some(url) = subscription_url.as_deref() {
+                match render_qr(url) {
+                    Ok(qr) => {
+                        println!("{qr}\n");
+                    }
+                    Err(e) => {
+                        eprintln!("(二维码生成失败: {e})\n");
+                    }
+                }
+                println!("\x1b[1;33m【方式二：从 URL 导入】\x1b[0m");
+                println!("在手机 Clash 中选择「从 URL 导入」，填入以下订阅链接：");
+                println!("  \x1b[1;32m{url}\x1b[0m\n");
+            }
+            if let Ok(file_path) = default_clash_file_path() {
+                println!("\x1b[1;33m【方式三：从本地文件导入】\x1b[0m");
+                println!("配置文件已生成至本机：");
+                println!("  \x1b[1;34m{}\x1b[0m\n", file_path.display());
+            }
         }
-    }
-
-    println!("\x1b[1;33m【方式二：从 URL 导入】\x1b[0m");
-    println!("在手机 Clash 中选择「从 URL 导入」，填入以下订阅链接：");
-    println!("  \x1b[1;32m{subscription_url}\x1b[0m\n");
-
-    if let Ok(file_path) = default_clash_file_path() {
-        println!("\x1b[1;33m【方式三：从本地文件导入】\x1b[0m");
-        println!("配置文件已生成至本机：");
-        println!("  \x1b[1;34m{}\x1b[0m\n", file_path.display());
     }
 
     println!("\x1b[1;33m【方式四：手机手动配置 HTTP 代理】\x1b[0m");
@@ -315,8 +379,8 @@ pub fn run(
     println!("  代理密码:   \x1b[1;32m{token_str}\x1b[0m\n");
 
     println!("────────────────────────────────────────────────────────────────");
-    match gate_host.as_deref() {
-        Some(host) => {
+    match gate_endpoint.as_ref() {
+        Some((host, _tport)) => {
             println!("\x1b[1;36m💡 隧道模式：直连 gate 域名 {host}（HOST/SNI 已自动对准）\x1b[0m");
             println!("\x1b[1;36m   gate 域名轮换后重新执行本命令生成新订阅，无需手改配置\x1b[0m");
             println!("\x1b[1;36m   需服务端已配置 PPROXY_TUNNEL_GATE_URL（gate 隧道端点）\x1b[0m\n");
@@ -356,7 +420,7 @@ mod tests {
     #[test]
     fn test_generate_clash_yaml_tunnel_aligns_gate_host() {
         // B015：隧道模式 server/SNI/HOST 自动对准 gate 域名，Bearer 鉴权走 ws-opts headers
-        let yaml = generate_clash_yaml_tunnel("gate.ponygo.fun", Some("tok_123"));
+        let yaml = generate_clash_yaml_tunnel("gate.ponygo.fun", Some("tok_123")).unwrap();
         assert!(yaml.contains("type: ws"), "隧道模式是 ws 代理");
         assert!(yaml.contains("server: gate.ponygo.fun"));
         assert!(yaml.contains("port: 443"));
@@ -364,29 +428,59 @@ mod tests {
         assert!(yaml.contains("path: /ws"), "对齐 gate /ws 路径");
         assert!(yaml.contains("Authorization: \"Bearer tok_123\""), "token 走 Bearer");
         assert!(!yaml.contains("username:"), "隧道模式不用 http 基本认证");
+        // 对抗审核 P1：group 成员必须与 proxies 定义一致（隧道模式只有 Pony-Tunnel）
+        assert!(!yaml.contains("\"Pony-Proxy\""), "隧道模式不得引用未定义的 Pony-Proxy");
+        assert!(yaml.contains("\"Pony-Tunnel\""));
+        // YAML 结构完整：proxies 后有 proxy-groups，缩进合法
+        assert!(yaml.contains("proxies:\n  - name: \"Pony-Tunnel\"\n    type: ws"));
     }
 
     #[test]
-    fn test_gate_host_from_config_parses_endpoint_shapes() {
+    fn test_generate_clash_yaml_tunnel_token_missing_fails_fast() {
+        // 对抗审核 P1：token 缺失 → Err（空 Bearer 必然 401，fail-fast 优于生成死配置）
+        assert!(generate_clash_yaml_tunnel("gate.ponygo.fun", None).is_err());
+        assert!(generate_clash_yaml_tunnel("gate.ponygo.fun", Some("")).is_err());
+    }
+
+    #[test]
+    fn test_generate_clash_yaml_tunnel_rejects_invalid_host() {
+        // 对抗审核 P1：host 白名单校验防 YAML 注入/结构破坏
+        assert!(generate_clash_yaml_tunnel("good.com\n  - name: evil\n    type: socks5", Some("t")).is_err());
+        assert!(generate_clash_yaml_tunnel("bad:host#x", Some("t")).is_err());
+        assert!(generate_clash_yaml_tunnel("sp ace.com", Some("t")).is_err());
+        assert!(generate_clash_yaml_tunnel("", Some("t")).is_err());
+        assert!(generate_clash_yaml_tunnel("ok.example.com", Some("t")).is_ok());
+        assert!(generate_clash_yaml_tunnel("[2001:db8::1]", Some("t")).is_ok(), "IPv6 字面量允许");
+    }
+
+    #[test]
+    fn test_gate_endpoint_from_config_parses_endpoint_shapes() {
         // B015：域名轮换后重新生成订阅即生效，无需手改 HOST——解析三种端点形态
+        let ep = |cfg: &PonyConfig| {
+            gate_endpoint_from_config(cfg).map(|(h, p)| (h, p))
+        };
         let mut cfg = PonyConfig::default();
         cfg.tunnel_gate_url = Some("wss://gate.ponygo.fun/ws".into());
-        assert_eq!(gate_host_from_config(&cfg).as_deref(), Some("gate.ponygo.fun"));
+        assert_eq!(
+            ep(&cfg),
+            Some(("gate.ponygo.fun".to_string(), 443)),
+            "wss 缺省端口 443"
+        );
 
         cfg.tunnel_gate_url = Some("wss://gate2.ponygo.fun".into());
-        assert_eq!(gate_host_from_config(&cfg).as_deref(), Some("gate2.ponygo.fun"));
+        assert_eq!(ep(&cfg), Some(("gate2.ponygo.fun".to_string(), 443)));
 
-        cfg.tunnel_gate_url = Some("gate3.ponygo.fun:443".into());
-        assert_eq!(gate_host_from_config(&cfg).as_deref(), Some("gate3.ponygo.fun"));
+        // 对抗审核 P1：端口保留（非 443 拒绝在 run() 层，解析层先透传）
+        cfg.tunnel_gate_url = Some("gate3.ponygo.fun:8443".into());
+        assert_eq!(ep(&cfg), Some(("gate3.ponygo.fun".to_string(), 8443)));
 
-        // 多端点取第一个（桌面端 vgate 在前/逗号分隔）
         cfg.tunnel_gate_url = Some("wss://gate4.ponygo.fun/ws,wss://backup.ponygo.fun/ws".into());
-        assert_eq!(gate_host_from_config(&cfg).as_deref(), Some("gate4.ponygo.fun"));
+        assert_eq!(ep(&cfg), Some(("gate4.ponygo.fun".to_string(), 443)), "多端点取第一个");
 
         cfg.tunnel_gate_url = None;
-        assert_eq!(gate_host_from_config(&cfg), None, "无配置回落局域网模式");
+        assert_eq!(ep(&cfg), None, "无配置回落局域网模式");
 
         cfg.tunnel_gate_url = Some("  ".into());
-        assert_eq!(gate_host_from_config(&cfg), None, "空白配置视为未配置");
+        assert_eq!(ep(&cfg), None, "空白配置视为未配置");
     }
 }

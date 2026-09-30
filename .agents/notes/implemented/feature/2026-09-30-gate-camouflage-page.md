@@ -38,6 +38,10 @@ gate worker 非 `/ws` 路径返回裸 `404 not found`——这是最典型的"�
 ## Consequences
 
 - gate 域名在非隧道路径下的指纹从"可疑 Worker"变为"普通站点"，防扫号成本极低；
-- /ws 协议、/debug、/debug/egress 无任何行为变化；客户端/探活不受影响；
+- /ws 协议行为无变化；/debug 匿名端点不再暴露兜底配置态（对抗审核 P1：兜底拓扑
+  移入 Bearer 保护的 /debug/egress，符合 CF-RISK-SOP「诊断端点只加 Bearer 保护」）；
+- **边界（对抗审核 P2，如实标注）**：特征串运行时拼装覆盖**路径特征**（/ws、/debug、
+  /debug/egress 不落明文）；响应体内文案（`websocket required`/`unauthorized`）仍为
+  明文——非路径指纹主面且改动有 401 行为风险，本轮不处理，登记为已知边界；
 - 单测可机械验收（`node deploy/cf-gate-worker/camouflage.test.mjs`，非零退出）；
 - 部署走既有优雅不下线 SOP（wrangler versions 灰度，DEPLOY.md §更新 CF Worker）。

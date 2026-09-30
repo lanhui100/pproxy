@@ -39,6 +39,8 @@ check('非法端口 → null', parseEndpoint('vps.example.com:0') === null)
 check('端口越界 → null', parseEndpoint('vps.example.com:70000') === null)
 check('非数字端口 → null', parseEndpoint('vps.example.com:abc') === null)
 check('空 host → null', parseEndpoint(':1080') === null)
+check('裸 IPv6 无方括号 → null（P2 防御）', parseEndpoint('2001:db8::1') === null)
+check('裸 IPv6 带端口 → null（P2 防御）', parseEndpoint('2001:db8::1:443') === null)
 
 console.log('[2] parseFallbackConfig（默认全空 = 仅直连）')
 const empty = parseFallbackConfig({})
@@ -58,6 +60,8 @@ check('国家码大写归一', full.socks5Country === 'US' && full.proxyIpCountr
 check('proxyip 配置生效', full.proxyIp.host === 'relay.example.com' && full.proxyIp.port === 443)
 check('超时覆盖生效', full.attemptTimeoutMs === 5000)
 check('env 缺失对象容错', parseFallbackConfig(undefined).socks5 === null)
+check('P2：EGRESS_ATTEMPT_TIMEOUT_MS=0 表达"不设超时"', parseFallbackConfig({ EGRESS_ATTEMPT_TIMEOUT_MS: '0' }).attemptTimeoutMs === 0)
+check('P2：非数字超时回落默认', parseFallbackConfig({ EGRESS_ATTEMPT_TIMEOUT_MS: 'abc' }).attemptTimeoutMs === DEFAULT_ATTEMPT_TIMEOUT_MS)
 
 console.log('[3] 合规门禁（fallbackAllowed / channelOrder）')
 const g = { allowedCountries: ['US', 'JP', 'SG'] }
@@ -80,7 +84,12 @@ check('仅 socks5 配置', channelOrder('github.com', parseFallbackConfig({ SOCK
 check('仅 proxyip 配置', channelOrder('github.com', parseFallbackConfig({ PROXYIP_HOST: 'relay.example.com' })).join(',') === 'direct,proxyip')
 check('无配置仅直连', channelOrder('github.com', parseFallbackConfig({})).join(',') === 'direct')
 check('合规 host 无国家码 → 仅直连', channelOrder('daily-cloudcode-pa.googleapis.com', cfgBoth).join(',') === 'direct')
-check('合规 host 声明合规 → 含兜底', channelOrder('daily-cloudcode-pa.googleapis.com', parseFallbackConfig({ SOCKS5_PROXY: 'vps.example.com:1080', SOCKS5_COUNTRY: 'US' })).join(',') === 'direct,socks5')
+check('合规 host 声明合规 → 含 socks5 兜底', channelOrder('daily-cloudcode-pa.googleapis.com', parseFallbackConfig({ SOCKS5_PROXY: 'vps.example.com:1080', SOCKS5_COUNTRY: 'US' })).join(',') === 'direct,socks5')
+
+console.log('[3.5] P0-2 收紧：ProxyIP 通道对合规 host 一律禁用（门禁与真实出口目标脱钩）')
+check('合规 host + proxyip（声明合规国家码）→ 仍禁用 proxyip', channelOrder('daily-cloudcode-pa.googleapis.com', parseFallbackConfig({ PROXYIP_HOST: 'relay.example.com', PROXYIP_COUNTRY: 'US' })).join(',') === 'direct')
+check('合规 host + socks5+proxyip 都配但无国家码 → 仅直连（socks5 也 fail-closed）', channelOrder('daily-cloudcode-pa.googleapis.com', cfgBoth).join(',') === 'direct')
+check('非合规 host + proxyip 声明国家码 → 可用（不受收紧影响）', channelOrder('github.com', parseFallbackConfig({ PROXYIP_HOST: 'relay.example.com', PROXYIP_COUNTRY: 'US' })).join(',') === 'direct,proxyip')
 
 console.log('[4] withTimeout')
 check('正常 promise 通过', (await withTimeout(Promise.resolve(42), 50)) === 42)

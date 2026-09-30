@@ -121,26 +121,23 @@ export default {
     const url = new URL(request.url)
     const route = routeFor(url.pathname)
     if (route === 'debug') {
-      const cfg = parseFallbackConfig(env)
       return new Response(
         JSON.stringify({
           set: typeof env.TUNNEL_TOKEN_HASH === 'string',
           // 只暴露长度不暴露 hash 本体：len!=64 即 env 写脏（换行/截断），与 Vercel /debug 口径对齐
           len: typeof env.TUNNEL_TOKEN_HASH === 'string' ? env.TUNNEL_TOKEN_HASH.trim().length : 0,
-          // 多出口兜底配置态（P0-1，不含端点/国家码本体，仅暴露"是否配置"）
-          fallback: {
-            socks5: !!cfg.socks5,
-            proxyip: !!cfg.proxyIp,
-            socks5CountryDeclared: !!cfg.socks5Country,
-            proxyipCountryDeclared: !!cfg.proxyIpCountry,
-            attemptTimeoutMs: cfg.attemptTimeoutMs,
-          },
+          // 多出口兜底配置态（P0-1）不在此公开暴露——对抗审核 P1：兜底拓扑是
+          // 对抗目标信息（是否有多出口、声明国家码、超时窗），移入 Bearer 保护的
+          // /debug/egress（见下），符合 CF-RISK-SOP「诊断端点只加在 Bearer 保护下」纪律。
+          fallback: 'see /debug/egress (bearer-protected)',
         }),
         { headers: { 'content-type': 'application/json' } },
       )
     }
     // 出站地理探测诊断端点（与 /ws 同一 Bearer token 保护）：
     // 直接返回探测结果或真实报错，便于排查 unsupported_egress:UNKNOWN 的成因。
+    // 对抗审核 P1：兜底配置态（是否启用 socks5/proxyip、声明国家码、超时窗）随本
+    // 端点返回，仅持有隧道 token 者可读。
     if (route === 'debugEgress') {
       const auth = request.headers.get('Authorization') ?? ''
       const presented = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
@@ -151,6 +148,7 @@ export default {
         return new Response('unauthorized', { status: 401 })
       }
       const cfg = egressProbeConfig(env)
+      const fallbackCfg = parseFallbackConfig(env)
       const allowed = parseAllowedEgressCountries(env.EGRESS_ALLOWED_COUNTRIES)
       try {
         const geo = await probeEgressGeo(cfg)
@@ -161,6 +159,14 @@ export default {
           compliant: allowed.includes(geo.country),
           allowedCountries: allowed,
           config: cfg,
+          // 兜底配置态（Bearer 保护，含是否启用/声明国家码/超时）
+          fallback: {
+            socks5: !!fallbackCfg.socks5,
+            proxyip: !!fallbackCfg.proxyIp,
+            socks5CountryDeclared: !!fallbackCfg.socks5Country,
+            proxyipCountryDeclared: !!fallbackCfg.proxyIpCountry,
+            attemptTimeoutMs: fallbackCfg.attemptTimeoutMs,
+          },
         })
       } catch (e) {
         return jsonResp({ ok: false, error: String((e && e.message) || e), config: cfg })
@@ -266,16 +272,21 @@ export default {
       }
 
       try {
-        // 顺序尝试各通道；只有直连时维持现状（无超时，避免行为漂移），
+        // 顺序尝试各通道；仅直连时维持现状（无超时，避免行为漂移），
         // 存在兜底通道时给每个通道建立超时（防黑洞挂死永远切不到兜底）。
+        // 对抗审核 P2：判断依据是"是否存在兜底通道"而非"通道数>1"——
+        // egress 门禁把候选收窄到单个合规兜底时仍须保留超时，否则挂死的
+        // SOCKS5/ProxyIP 会让 WS 永久悬挂（依赖客户端超时兜底）。
         let via = null
         let sock = null
         let leftover = null
         let lastErr = null
-        const attemptTimeoutMs = channels.length > 1 ? cfg.attemptTimeoutMs : 0
+        const hasFallback = channels.some((c) => c !== 'direct')
+        const attemptTimeoutMs = hasFallback ? cfg.attemptTimeoutMs : 0
+        const target = { host: req.host, port }
         for (const channel of channels) {
           try {
-            const opened = await openChannel(channel, cfg, req, port, attemptTimeoutMs)
+            const opened = await openChannel(channel, cfg, target, attemptTimeoutMs)
             sock = opened.sock
             writer = opened.writer
             leftover = opened.leftover

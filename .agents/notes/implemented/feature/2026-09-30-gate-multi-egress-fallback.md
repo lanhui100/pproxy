@@ -29,10 +29,14 @@ pproxy 整条 gate 隧道链路失效——无兜底、无弹性。需求：直�
    （`{"ok":true,"via":"direct|socks5|proxyip"}`，客户端只读 `ok` 字段，向后兼容）。
 3. **合规贯通**（P0-1 核心约束，不破坏护城河）：直连通道维持现状门禁（colo +
    出站 geo 探测）；兜底通道**必须先过同一套 `gate-policy.mjs` 判定**：
-   - 对 `requiresCompliantEgress(host)`（Google Cloud Code 系），兜底仅当
-     `{SOCKS5,PROXYIP}_COUNTRY` 声明且 `shouldBlockEgress` 放行时才可用，
-     未声明/未放行一律禁用兜底（fail-closed，Google 系仍只走白名单出口）；
-   - 对非合规 host（通用流量），兜底不做 geo 限制（与直连现状一致，防误伤大流量）。
+   - **SOCKS5**：CONNECT 目标 = 首帧声明 host，门禁可信——`requiresCompliantEgress`
+     的 host 仅当 `SOCKS5_COUNTRY` 声明且 `shouldBlockEgress` 放行时可用，
+     未声明/未放行禁用（fail-closed）；
+   - **ProxyIP（SNI 反代）**：worker 仅透传字节、真实出口目标由隧道内 TLS SNI
+     决定（worker 不可见），门禁判定对象（首帧 host）与真实转发对象无对应关系，
+     **合规 host 一律禁用该通道**（对抗审核 P0-2 收紧）；仅非合规 host 可用，
+     与直连同口径；
+   - 非合规 host（通用流量）兜底不做 geo 限制（与直连现状一致，防误伤大流量）。
 4. **实现**：SOCKS5 握手（greeting/connect 域名请求，参照 `crates/core/src/relay.rs`
    的 `socks5_connect` 语义）与通道编排收敛到新模块 `egress-fallback.mjs`（纯函数，
    node 可直接单测，含真实本地 SOCKS5 服务器端到端用例）；`worker.js` 只负责
@@ -59,8 +63,12 @@ pproxy 整条 gate 隧道链路失效——无兜底、无弹性。需求：直�
 ## Consequences
 
 - gate 隧道在 CF 直连受限时仍可用（SOCKS5/ProxyIP 兜底），生存级短板被补齐；
-- 合规保证不降级：Google Cloud Code 系流量仍只走直连白名单出口或声明合规的兜底；
-- 客户端无需改动（`via` 字段向后兼容）；`/debug` 可查兜底配置态；
+- 合规口径如实收敛（对抗审核）：Google Cloud Code 系仅可能走直连（白名单出口）
+  或**CONNECT 目标可验证的 SOCKS5**（声明国家码 + `shouldBlockEgress`）；ProxyIP
+  通道不参与合规出口判定（合规 host 禁用）；声明国家码是运维信任承诺，误声明
+  会让 Google 拒连，部署验收需核对声明与实测一致；
+- 客户端无需改动（`via` 字段向后兼容）；兜底配置态在 **Bearer 保护的
+  `/debug/egress`** 可见（/debug 匿名端点不再暴露，对抗审核 P1）；
 - 部署侧新增一组可选 vars（见 `wrangler.toml` 注释与 `docs/ops/DEPLOY.md`），
   默认零配置行为不变；
 - 验收口径：`node deploy/cf-gate-worker/egress-fallback.test.mjs`（非零退出）覆盖

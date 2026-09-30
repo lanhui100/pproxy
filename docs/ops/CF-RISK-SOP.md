@@ -23,7 +23,8 @@
 | 成本 | 免费档 100k 请求/天（账号级） | 同 Workers 免费档（同一额度体系） |
 | 自定义域 | `routes` custom_domain | Pages custom domain |
 
-**现状**：gate 当前为 Workers（`wrangler.toml` routes custom_domain `gate.ponygo.fun`）。
+**现状**：gate 当前为 Workers（`wrangler.toml` routes custom_domain，生产域不在此
+写死——README「开源部署清单」占位纪律，以实际部署配置为准）。
 **迁移触发条件**（满足任一才评估迁移，不主动折腾）：
 1. gate 收到 abuse 邮件或账号被标记（见 §3）；
 2. 同一账号 Worker 被封（1011 无法恢复）；
@@ -78,8 +79,9 @@
 ## 4. 域名轮换步骤（Worker 被标记 / 域名被 SNI 阻断时）
 
 > 触发：域名被 GFW 阻断（国内 timeout）、CF 标记、或 abuse 后弃号。
-> pproxy 客户端侧 endpoint 可配（`PPROXY_TUNNEL_GATE_URL` / 桌面端授权码），
-> 轮换=换端点在客户端重录，分钟级窗口（B015 后续做订阅 HOST 自动对准，先手工）。
+> pproxy 客户端侧 endpoint 可配（`PPROXY_TUNNEL_GATE_URL` / 桌面端授权码）；
+> `pproxy clash` 已自动从该配置派生订阅的 HOST/SNI（B015，域名轮换后重新生成订阅
+> 即自动对准，无需手改）。
 
 ```bash
 # 1) 新域名绑定（旧域保留勿删，DNS 生效前回退用）
@@ -109,12 +111,16 @@ curl -s https://<新域>/debug | head -c 120          # 200 且含 fallback 字�
 
 ---
 
-## 6. 机器可验清单（非零退出命令）
+## 6. 机器可验清单（命令 + 输出判读）
+
+> 对抗审核修正：curl 均带 `-f`（非 2xx 即退出非零），`grep -q` 命中才退出 0，
+> 满足"非零退出"承诺；域名按开源占位纪律用 `<gate域名>` 占位，以实际部署为准。
 
 | 检查 | 命令 |
 |---|---|
-| gate 存活 + 伪装页生效 | `curl -s -o /dev/null -w '%{http_code}' https://gate.ponygo.fun/` 应 200（欢迎页） |
-| /debug 正常 | `curl -s https://gate.ponygo.fun/debug` 含 `fallback` 字段 |
+| gate 存活 + 伪装页生效 | `curl -fsS -o /dev/null -w '%{http_code}' https://<gate域名>/` 应 200（欢迎页） |
+| /debug 正常 | `curl -fsS https://<gate域名>/debug` 含 `set:true`（fallback 配置态在 Bearer 保护的 /debug/egress，见 DEPLOY.md） |
+| 兜底配置态（需 tunnel token） | `curl -fsS -H "Authorization: Bearer <token>" https://<gate域名>/debug/egress` 含 `fallback` 对象 |
 | 新域 DNS 已生效 | `dig +short <新域> \| grep -q '^104\.\|^172\.\|^173\.'`（CF 任播段） |
 | 风控迹象日志 | `journalctl -u pproxy -g 'unsupported_colo\|abuse\|1011' -n 20`（人工判读） |
 

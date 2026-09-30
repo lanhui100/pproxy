@@ -5,7 +5,7 @@
 | 组件 | 部署方式 | 位置 |
 |------|---------|------|
 | pony-server (pproxy-server) | systemd `pproxy.service` | dev 服务器 `/home/USER/pproxy/target/release/` |
-| CF Worker | `wrangler deploy` | Cloudflare（edge.example.com） |
+| CF Worker | `wrangler versions` 版本化灰度（见 §更新 CF Worker，**禁裸 `wrangler deploy`**） | Cloudflare（edge.example.com） |
 | Vercel 函数 | Vercel API（v13 deployments） | Vercel（vedge.example.com） |
 | 桌面分发（updater 主端点） | `scripts/publish-desktop-dist.sh` | Vercel 静态（dl.example.com，项目 pony-dsk） |
 | 凭据 | `.secrets.env`（600） | 本地，不部署 |
@@ -60,15 +60,24 @@
 
 gate worker 直连（`cloudflare:sockets connect()`）失败/被 CF 收紧时，可自动切到
 用户配置的兜底通道（SOCKS5 链式 → SNI 反代中继）。**默认全部留空，行为与仅直连
-完全一致**；兜底通道执行与直连同一套 `gate-policy.mjs` 合规门禁（Google Cloud Code
-系 host 仅当显式声明国家码且过 `shouldBlockEgress` 才走兜底，fail-closed）。
+完全一致**。
+
+合规口径（对抗审核 P0-2/P1 收紧后的如实表述）：
+- **直连**：维持既有 geo 门禁（colo + 出站探测，fail-closed）；
+- **SOCKS5 链式**：CONNECT 目标 = 客户端首帧声明 host，门禁可信——Google Cloud Code
+  系 host 仅当显式声明国家码且过 `shouldBlockEgress` 才走该兜底（fail-closed）；
+  ⚠️ **声明国家码是运维信任承诺**（worker 无法穿透 VPS 实测出口），误声明
+  （如声明 US 实际 HK）会让 Google 拒连，部署验收需核对声明与实测一致；
+- **SNI 反代中继（ProxyIP）**：worker 仅透传字节、真实目标由隧道内 SNI 决定，
+  **不参与 Google Cloud Code 系 host 的合规出口判定**（合规 host 一律禁用该通道，
+  仅非合规 host 可用，与直连同口径）。
 
 | 变量（Gate Worker `wrangler.toml` [vars] / `.dev.vars`） | 作用 |
 |---|---|
 | `SOCKS5_PROXY` | 用户自有 VPS SOCKS5，格式 `host:port`（如 `vps.example.com:1080`） |
-| `SOCKS5_COUNTRY` | 该 SOCKS5 出口的**声明国家码**（如 `US`），合规判定用 |
-| `PROXYIP_HOST` | SNI 反代中继 `host[:port]`（默认 443） |
-| `PROXYIP_COUNTRY` | 该反代出口的**声明国家码**（如 `US`），合规判定用 |
+| `SOCKS5_COUNTRY` | 该 SOCKS5 出口的**声明国家码**（如 `US`），合规判定用（运维需核验与实测一致） |
+| `PROXYIP_HOST` | SNI 反代中继 `host[:port]`（默认 443）；仅非合规 host 可用 |
+| `PROXYIP_COUNTRY` | 该反代出口的**声明国家码**（如 `US`）；合规 host 不适用（P0-2 收紧） |
 | `EGRESS_ATTEMPT_TIMEOUT_MS` | 单通道建立超时（默认 8000；存在兜底通道时生效，防黑洞挂死） |
 
 验证：单测 `node deploy/cf-gate-worker/egress-fallback.test.mjs`；端到端
@@ -158,7 +167,10 @@ ssh dev 'cd ~/pproxy && scripts/sync-desktop-release.sh desktop-vX.Y.Z'
 
 # 一键优雅部署（封装全部步骤，见 deploy/cf-gate-worker/deploy-graceful.sh）：
 #   export CLOUDFLARE_API_TOKEN=<token>
-#   bash deploy/cf-gate-worker/deploy-graceful.sh --observe-sec 120
+#   bash deploy/cf-gate-worker/deploy-graceful.sh \
+#       --verify-url https://<gate实际域名>/debug \
+#       [--verify-token <tunnel token>]   # 提供时灰度窗口含真实 WS 会话验证
+#   （--observe-sec / --tag 可选；默认 120s / deploy-graceful）
 
 cd /home/USER/pproxy/deploy/cf-gate-worker   # 或 deploy/cf-worker（edge，流程相同）
 
@@ -172,7 +184,8 @@ echo "new version: $VERSION_ID"
 # 2) 灰度切流：先 5% 观察（可重复多次、可随时加量/回退）
 npx wrangler versions deploy "$VERSION_ID@5"
 sleep 120                                        # 观察窗口：/debug、隧道连通、日志无异常
-curl -s https://gate.ponygo.fun/debug | head -c 200   # 验证新版本已生效且 /debug 正常
+curl -s https://<gate域名>/debug | head -c 200   # 验证新版本已生效且 /debug 正常
+# （生产域按开源占位纪律用 <gate域名> 占位；一键脚本用 --verify-url 传入真实域）
 
 # 3) 加量 → 全量（确认无误后）
 npx wrangler versions deploy "$VERSION_ID@50"
@@ -189,9 +202,11 @@ npx wrangler rollback <上一可用版本ID>
 >   `--var`/`[vars]` 随版本配置上传（wrangler.toml 已注释说明）；改 TUNNEL_TOKEN_HASH 后
 >   必须重新 upload+deploy，Vercel 侧同源同步。
 > - **gate 专用**：P0-1 多出口兜底 vars（SOCKS5_PROXY 等）在 `wrangler.toml` [vars]，
->   部署前确认目标版本配置正确（/debug 的 `fallback` 字段可见）。
+>   部署前确认目标版本配置正确——兜底配置态在 **Bearer 保护的 /debug/egress** 的
+>   `fallback` 字段可见（/debug 匿名端点不再暴露，对抗审核 P1）。
 > - **验证口径**：灰度窗口至少包含一次真实隧道会话（客户端连一次
->   `wss://gate.ponygo.fun/ws`），仅 curl /debug 不足以证明 WS 桥正常。
+>   `wss://<gate域名>/ws`），仅 curl /debug 不足以证明 WS 桥正常；
+>   一键脚本 `--verify-token` 可自动做该会话检查。
 
 ### 更新 Vercel 函数
 ```bash

@@ -20,6 +20,8 @@ import {
 export const DEFAULT_ATTEMPT_TIMEOUT_MS = 8000
 
 /// 解析 "host[:port]" / "[v6]:port" / "host"（默认端口）。非法/空返回 null。
+/// 对抗审核 P2：无方括号的裸 IPv6（含多个冒号）按"多个冒号且非数字端口"拒绝，
+/// 避免 lastIndexOf(':') 把 v6 拆成带尾冒号的 host。
 export function parseEndpoint(spec, defaultPort = 443) {
   if (typeof spec !== 'string' || !spec.trim()) return null
   const s = spec.trim()
@@ -36,8 +38,11 @@ export function parseEndpoint(spec, defaultPort = 443) {
   } else {
     const idx = s.lastIndexOf(':')
     if (idx !== -1) {
+      const portPart = s.slice(idx + 1)
+      // 裸 IPv6（多个冒号）或端口非数字 → 拒绝（需要方括号形态）
+      if (s.indexOf(':') !== idx || !/^\d+$/.test(portPart)) return null
       host = s.slice(0, idx)
-      port = Number(s.slice(idx + 1))
+      port = Number(portPart)
     }
   }
 
@@ -46,19 +51,25 @@ export function parseEndpoint(spec, defaultPort = 443) {
 }
 
 /// 兜底配置：全部可选，默认留空 = 仅直连（行为与现状完全一致）。
+/// 对抗审核 P2：超时用严格解析（Number.isFinite），`EGRESS_ATTEMPT_TIMEOUT_MS=0`
+/// 表达"不设超时"，不被 `Number()||` 吞成默认值。
 export function parseFallbackConfig(env) {
   const e = env || {}
+  const rawTimeout = Number(e.EGRESS_ATTEMPT_TIMEOUT_MS)
   return {
     socks5: parseEndpoint(e.SOCKS5_PROXY),
     proxyIp: parseEndpoint(e.PROXYIP_HOST, 443),
     socks5Country: (e.SOCKS5_COUNTRY || '').trim().toUpperCase() || null,
     proxyIpCountry: (e.PROXYIP_COUNTRY || '').trim().toUpperCase() || null,
     allowedCountries: parseAllowedEgressCountries(e.EGRESS_ALLOWED_COUNTRIES),
-    attemptTimeoutMs: Number(e.EGRESS_ATTEMPT_TIMEOUT_MS) || DEFAULT_ATTEMPT_TIMEOUT_MS,
+    attemptTimeoutMs: Number.isFinite(rawTimeout) ? rawTimeout : DEFAULT_ATTEMPT_TIMEOUT_MS,
   }
 }
 
 /// 兜底通道合规判定：合规 host 必须显式声明国家码且过 shouldBlockEgress 才放行。
+/// 仅对"CONNECT 目标 = 首帧声明 host"的通道（SOCKS5）可信；ProxyIP 通道不适用
+/// （见 channelOrder：worker 只透传字节，真实目标由隧道内 SNI 决定、门禁无法对应，
+/// 合规 host 一律禁用）。
 /// @param {string} host 目标主机
 /// @param {string|null} country 声明国家码（大写或 null）
 /// @param {{allowedCountries?: string[]}} cfg
@@ -75,10 +86,17 @@ export function fallbackAllowed(host, country, cfg) {
 }
 
 /// 通道编排：返回按序尝试的通道名数组（直连恒在首位）。
+///
+/// 对抗审核收紧（P0-2）：ProxyIP 反代对**合规 host 一律禁用**——worker 对 proxyip
+/// 只 `connect(反代地址)` 后透传字节，真实出口目标由隧道内 TLS ClientHello 的 SNI
+/// 决定，worker 不可见也无法校验；若按首帧声明的 host 判定门禁，客户端可报无害
+/// host 而实际 SNI 指向 Google 系，绕过 egress 门禁。因此合规后缀仅可能走
+/// 直连（白名单出口）或声明合规的 SOCKS5（CONNECT 目标=首帧 host，门禁可信）。
 export function channelOrder(host, cfg) {
   const order = ['direct']
   if (cfg.socks5 && fallbackAllowed(host, cfg.socks5Country, cfg)) order.push('socks5')
-  if (cfg.proxyIp && fallbackAllowed(host, cfg.proxyIpCountry, cfg)) order.push('proxyip')
+  // ProxyIP：仅非合规 host 可用（与直连同口径，不涉合规承诺）
+  if (cfg.proxyIp && !requiresCompliantEgress(host)) order.push('proxyip')
   return order
 }
 

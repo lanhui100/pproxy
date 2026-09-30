@@ -50,5 +50,6 @@ gate 与 edge 各自烧了多少**——gate 请求数隐没在总量里，逼�
 - 配额口径：gate 与 edge 共享账号级 100k/天（CF 免费档按账号计），gate 来源的
   告警用于提前感知隧道流量占比，不能把两个来源的配额相加；
 - 机械验收：`cargo test -p pproxy-core quota`（含 by_script 用例）与
-  `cargo test -p pproxy-server`（含 gate_source_disabled_by_default）非零退出；
+  `cargo test -p pproxy-server gate_source_disabled_by_default`（锚定本功能用例，
+  避免 scope 外整包计时竞态干扰；对抗审核 P2）非零退出；
   生产可见性靠配置后观察 /api/quota（标注靠 review）。

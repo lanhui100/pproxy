@@ -8,11 +8,13 @@
 - **动机**：gate worker 只有 `cloudflare:sockets connect()` 直连一条路——CF 重点风控
   的模式；CF 一收紧出口，整条 gate 隧道链路失效（研究背景：docs/HANDOVER §3 P0-1，已删）
 - **方案**：直连失败/被 CF 收紧 → 自动切用户配置兜底（SOCKS5 链式 → SNI 反代中继）；
-  默认全留空 = 仅直连（不默认走任何第三方中转）；兜底过 gate-policy.mjs 同一合规门禁
-  （合规 host 需声明国家码 fail-closed）
-- **验收**：`node deploy/cf-gate-worker/egress-fallback.test.mjs`（43 用例，非零退出）；
-  `node deploy/cf-gate-worker/e2e-fallback.mjs`（wrangler dev 直连必败 host 自动切
-  SOCKS5 仍出海，非零退出）；生产部署后断直连观察（靠 review）
+  默认全留空 = 仅直连（不默认走任何第三方中转）；合规口径（对抗审核 P0-2 收紧）：
+  SOCKS5 CONNECT 目标=首帧 host 门禁可信（合规 host 需声明国家码 fail-closed）；
+  **ProxyIP 通道合规 host 一律禁用**（worker 仅透传字节、门禁无法对应真实出口目标）
+- **验收**：`node deploy/cf-gate-worker/egress-fallback.test.mjs`（50 用例，非零退出，
+  含 P0-2 收紧用例）；`node deploy/cf-gate-worker/e2e-fallback.mjs`（wrangler dev
+  直连必败 host 自动切 SOCKS5 后数据可达，非零退出，本地验证机制、真实出海靠 review；
+  已修孤儿进程可重复运行）；生产部署后断直连观察（靠 review）
 - **落点**：`deploy/cf-gate-worker/{worker.js,egress-fallback.mjs,egress-fallback.test.mjs,e2e-fallback.mjs,wrangler.toml}`
 - **关联**：ADR implemented/feature/2026-09-30-gate-multi-egress-fallback；B011/B012 同源
 
@@ -33,9 +35,9 @@
   爆了触发滥用风控；现有采集只见账号总量，无法区分 gate 与 edge 各自消耗
 - **方案**：CfCollector 支持 `scriptName` 过滤（gate 单独来源 `gate_cf`），monitor 复用
   既有 tick/越线告警链路；**默认关闭**（未设 `PPROXY_CF_GATE_SCRIPT_NAME` 行为不变）
-- **验收**：`cargo test -p pproxy-core quota`（含 by_script 用例）+ `cargo test -p pproxy-server`
-  （含 gate_source_disabled_by_default）非零退出；生产配置后 /api/quota 出现 gate_cf
-  且随隧道流量增长（靠 review）
+- **验收**：`cargo test -p pproxy-core quota`（含 by_script 用例）+ `cargo test -p pproxy-server
+  gate_source_disabled_by_default`（锚定本功能用例，对抗审核 P2）非零退出；生产配置后
+  /api/quota 出现 gate_cf 且随隧道流量增长（靠 review）
 - **落点**：`crates/core/src/quota.rs`、`crates/server/src/monitor.rs`、`docs/ops/DEPLOY.md`
 - **后续增强（未做，backlog 备注）**：探活 worker 本地应答（edgetunnel 反代模式测速），
   现状探活仅消耗升级握手（1 请求/次低频）
@@ -62,9 +64,12 @@
 - **方案**：订阅链接 HOST/SNI **自动对准 gate 域名**（域名轮换后免重新导入）——
   `pproxy clash` 配置了 `PPROXY_TUNNEL_GATE_URL` 时生成 ws+tls 隧道模式
   （server/sni=gate 域名、path=/ws、Bearer 鉴权），未配置回落局域网模式（行为不变）
-- **验收**：`cargo test -p pproxy-cli clash`（5 用例，含隧道模式与端点解析）非零退出；
-  真机 Clash 直连验证靠部署后 review（需 gate 在线）
-- **落点**：`crates/cli/src/cmd/clash.rs`（`generate_clash_yaml_tunnel` / `gate_host_from_config`）
+- **对抗审核修订**：group 成员按模式生成（无死引用）；隧道模式输出本地 YAML 文件引导
+  导入（wss:// 不可被 URL 拉取）；端口保留（非 443 拒绝）；host 白名单防 YAML 注入；
+  token 缺失 fail-fast
+- **验收**：`cargo test -p pproxy-cli clash`（7 用例，含 group 完整性/token fail-fast/
+  host 白名单/端点解析）非零退出；真机 Clash 直连验证靠部署后 review（需 gate 在线）
+- **落点**：`crates/cli/src/cmd/clash.rs`（`generate_clash_yaml_tunnel` / `gate_endpoint_from_config`）
 - **关联**：ADR implemented/feature/2026-09-30-clash-subscription-gate-alignment；
   与 B014（VLESS 直连）配套——B014 落地后订阅可切 vless:// 直连
 

@@ -45,5 +45,14 @@ Status: implemented
   即生效（免手改 HOST/SNI）；
 - 未配置隧道的行为与 B015 前完全一致（局域网 http 模式）；
 - 鉴权语义对齐 gate `/ws` 协议（Bearer），第三方 Clash 客户端可直连 gate；
-- 机械验收：`cargo test -p pproxy-cli clash`（5 用例，含 tunnel 模式与端点解析）非零退出；
+- **对抗审核修订（2026-09-30）**：
+  - proxy-groups 成员按模式生成（隧道模式不再引用未定义的 Pony-Proxy，Clash 严格
+    解析可加载）；
+  - 隧道模式无 HTTP 订阅端点，改为输出本地 YAML 文件路径引导手动导入（wss:// 不可
+    被 Clash 按 URL 拉取——gate 对无 Upgrade 请求回 400）；
+  - `gate_endpoint_from_config` 保留端口，非 443 端口拒绝（gate 仅放行 443）；
+  - `generate_clash_yaml_tunnel` 改为 Result：token 缺失 fail-fast、host 白名单校验
+    （`[a-z0-9.-]` / `[IPv6]`，防 YAML 注入）；
+- 机械验收：`cargo test -p pproxy-cli clash`（7 用例，含 group 完整性/token fail-fast/
+  host 白名单/端点解析）非零退出；
 - 真机 Clash 直连验证靠部署后 review（wss 端点需真实 gate 在线）。

@@ -30,13 +30,16 @@ EGRESS_GEO_STALE_MS = "1800000"
 
 # ── 多出口兜底（P0-1，借鉴 edgetunnel 反代兜底语义；默认全部留空 = 仅直连，行为不变）──
 # 直连（cloudflare:sockets connect()）失败/被 CF 收紧时，自动依次尝试以下用户配置的
-# 兜底通道：socks5 → proxyip。合规门禁不降级：Google Cloud Code 系 host 仅当显式声明
-# 国家码且过 shouldBlockEgress 才走兜底（fail-closed，合规后缀仍只走白名单出口）。
+# 兜底通道：socks5 → proxyip。合规口径（对抗审核 P0-2 收紧）：
+#   - SOCKS5：CONNECT 目标=首帧 host，门禁可信；Google Cloud Code 系 host 仅当
+#     显式声明国家码且过 shouldBlockEgress 才走该兜底（fail-closed）；
+#   - ProxyIP（SNI 反代）：worker 仅透传字节、真实目标由 SNI 决定，**合规 host 一律
+#     禁用**（仅非合规 host 可用）；声明国家码不适用于合规判定。
 # SOCKS5_PROXY = "vps.example.com:1080"        # 用户自有 VPS SOCKS5（host:port）
-# SOCKS5_COUNTRY = "US"                        # 该 SOCKS5 出口的声明国家码（合规判定用）
-# PROXYIP_HOST = "relay.example.com"           # SNI 反代中继 host[:port]（默认 443）
-# PROXYIP_COUNTRY = "US"                       # 该反代出口的声明国家码（合规判定用）
-# EGRESS_ATTEMPT_TIMEOUT_MS = "8000"           # 单通道建立超时（存在兜底时生效，防黑洞挂死）
+# SOCKS5_COUNTRY = "US"                        # 该 SOCKS5 出口的声明国家码（合规判定用，需运维核验实测）
+# PROXYIP_HOST = "relay.example.com"           # SNI 反代中继 host[:port]（默认 443，仅非合规 host）
+# PROXYIP_COUNTRY = "US"                       # 该反代出口的声明国家码（合规 host 不适用）
+# EGRESS_ATTEMPT_TIMEOUT_MS = "8000"           # 单通道建立超时（存在兜底通道时生效，防黑洞挂死；0=不设超时）
 
 [observability]
 enabled = true
