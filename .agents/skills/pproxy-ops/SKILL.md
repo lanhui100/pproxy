@@ -91,6 +91,18 @@ pproxy cluster join -t "<JOIN_TOKEN>" --auto-start
 pproxy cluster status
 ```
 
+### 2.4 集群零停机滚动升级 (Rolling Upgrade)
+逐节点升级：拉包 → Ed25519 验签 → 原子替换 → 自动重启 + 健康检查（HA Forwarder 吸收重启窗口）：
+```bash
+# 管理机为升级包签名（对 SHA-256 摘要做 Ed25519，输出 <file>.sig）
+pproxy user sign target/release/pproxy
+
+# 每个节点依次执行（systemd 节点务必 --target 指向服务二进制；非种子先升，种子最后）
+pproxy cluster upgrade --local /path/to/pproxy --sig /path/to/pproxy.sig --target /opt/pproxy/target/release/pproxy-server
+# 对象存储分发：--minio <url> 或 --r2 s3://<bucket>/<key>（需 R2_ENDPOINT/S3_ENDPOINT/MINIO_ENDPOINT）
+# 完整 SOP 见 docs/ops/ROLLING-UPGRADE.md
+```
+
 ---
 
 ## 3. 商业多租户配额与凭据管理 (Ed25519)

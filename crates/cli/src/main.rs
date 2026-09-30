@@ -308,6 +308,14 @@ enum UserCmd {
         /// 待撤销的令牌字符串 (usr_live_...) 或 用户名 (username)
         target: String,
     },
+    /// 为升级包生成 Ed25519 签名（管理机执行；签名对象为升级包 SHA-256 摘要，与 pproxy cluster upgrade 约定一致）
+    Sign {
+        /// 待签名文件（升级包二进制）
+        file: String,
+        /// 输出签名文件路径（默认 <file>.sig，内容为 64 字节 HEX）
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -355,15 +363,27 @@ enum ClusterCmd {
         /// 本地新二进制路径（P2P 流式推送，推荐）
         #[arg(long, short = 'l')]
         local: Option<String>,
-        /// MinIO 备份对象存储 URL
+        /// MinIO 对象存储 URL（http(s):// 直链或 s3://<bucket>/<key>，需 S3_ENDPOINT/MINIO_ENDPOINT）
         #[arg(long, short = 'm')]
         minio: Option<String>,
-        /// Cloudflare R2 备份 URL
+        /// Cloudflare R2 URL（http(s):// 直链或 s3://<bucket>/<key>，需 R2_ENDPOINT）
         #[arg(long, short = 'r')]
         r2: Option<String>,
-        /// 开发者 Ed25519 签名文件路径（.sig 强制校验防篡改）
+        /// 开发者 Ed25519 签名文件路径（.sig 强制校验防篡改；约定：对升级包 SHA-256 摘要签名）
         #[arg(long, short = 's')]
         sig: Option<String>,
+        /// 验签公钥 HEX（默认 USER_VERIFYING_KEY 或 ~/.pony/cluster_signing_key.hex 派生）
+        #[arg(long)]
+        verify_key: Option<String>,
+        /// 替换目标二进制路径（默认当前 CLI 自身；systemd 节点请指向服务二进制如 /opt/pproxy/target/release/pproxy-server）
+        #[arg(long, short = 't')]
+        target: Option<String>,
+        /// 重启前排空等待秒数（在途请求收尾，HA Forwarder 自动漂移；0 关闭）
+        #[arg(long, default_value = "3")]
+        drain_wait: u64,
+        /// 仅替换二进制，不重启服务
+        #[arg(long)]
+        no_restart: bool,
     },
 }
 
@@ -395,6 +415,9 @@ enum RouteCmd {
         /// override 上游（worker|vercel|已配置上游名）；缺省自动选择
         #[arg(long)]
         upstream: Option<String>,
+        /// 备用出口（主备 failover）：主出口失败后自动转此上游；缺省无
+        #[arg(long)]
+        backup: Option<String>,
     },
     /// 删除指定的路由规则
     Rm {
@@ -668,6 +691,9 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             UserCmd::Revoke { target } => {
                 cmd::user::revoke(target).map_err(RunError::Msg)
             }
+            UserCmd::Sign { file, out } => {
+                cmd::user::sign(file, out.as_deref()).map_err(RunError::Msg)
+            }
         };
     }
 
@@ -683,8 +709,18 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             ClusterCmd::Status => {
                 cmd::cluster::status().map_err(RunError::Msg)
             }
-            ClusterCmd::Upgrade { local, minio, r2, sig } => {
-                cmd::cluster::upgrade(local.as_deref(), minio.as_deref(), r2.as_deref(), sig.as_deref()).map_err(RunError::Msg)
+            ClusterCmd::Upgrade { local, minio, r2, sig, verify_key, target, drain_wait, no_restart } => {
+                cmd::cluster::upgrade(
+                    local.as_deref(),
+                    minio.as_deref(),
+                    r2.as_deref(),
+                    sig.as_deref(),
+                    verify_key.as_deref(),
+                    target.as_deref(),
+                    *drain_wait,
+                    *no_restart,
+                )
+                .map_err(RunError::Msg)
             }
         };
     }
@@ -823,8 +859,8 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         Command::Status => cmd::service::status(&http),
         Command::Route { cmd } => match cmd {
             RouteCmd::List => cmd::route::list(&http),
-            RouteCmd::Add { name, target_host, upstream } => {
-                cmd::route::add(&http, name, target_host, upstream.as_deref())
+            RouteCmd::Add { name, target_host, upstream, backup } => {
+                cmd::route::add(&http, name, target_host, upstream.as_deref(), backup.as_deref())
             }
             RouteCmd::Rm { name } => cmd::route::rm(&http, name),
             RouteCmd::Test { name, all } => match (name.as_deref(), *all) {

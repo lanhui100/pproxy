@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS routes (
   target_host       TEXT NOT NULL,
   upstream          TEXT,
   override_upstream TEXT,
+  backup_upstream   TEXT,
   enabled           INTEGER NOT NULL DEFAULT 1,
   created_at        INTEGER NOT NULL
 );
@@ -196,6 +197,7 @@ pub struct RouteRow {
     pub target_host: String,
     pub upstream: Option<String>,
     pub override_upstream: Option<String>,
+    pub backup_upstream: Option<String>,
     pub enabled: bool,
     pub created_at: u64,
 }
@@ -205,6 +207,7 @@ pub struct NewRoute {
     pub name: String,
     pub target_host: String,
     pub override_upstream: Option<String>,
+    pub backup_upstream: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -255,6 +258,17 @@ impl Store {
             "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;",
         )?;
         conn.execute_batch(SCHEMA_SQL)?;
+        // 幂等迁移（主备出口）：老库无 backup_upstream 列时补齐（CREATE TABLE IF NOT
+        // EXISTS 只对新库生效）。PRAGMA table_info 探测列存在性，缺失则 ALTER。
+        let has_backup = conn
+            .prepare("PRAGMA table_info(routes)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<String>, _>>()?
+            .iter()
+            .any(|c| c == "backup_upstream");
+        if !has_backup {
+            conn.execute_batch("ALTER TABLE routes ADD COLUMN backup_upstream TEXT")?;
+        }
         Ok((
             Store {
                 conn: Mutex::new(conn),

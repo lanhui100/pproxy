@@ -98,12 +98,31 @@ impl TokenSigner {
         Self { signing_key }
     }
 
+    /// 从 32 字节十六进制种子（`~/.pony/cluster_signing_key.hex` 格式）恢复签名器
+    pub fn from_seed_hex(hex_str: &str) -> Result<Self> {
+        let bytes = hex::decode(hex_str.trim()).map_err(|e| anyhow!("无效的种子 HEX: {e}"))?;
+        if bytes.len() != 32 {
+            return Err(anyhow!("种子必须为 32 字节（64 个 HEX 字符）"));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(Self::from_bytes(&arr))
+    }
+
     pub fn to_bytes(&self) -> [u8; 32] {
         self.signing_key.to_bytes()
     }
 
     pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
+    }
+
+    /// 对任意消息做 Ed25519 签名，返回 64 字节签名。
+    ///
+    /// 升级包签名约定：签名对象为**升级包的 SHA-256 摘要**（先摘要后签名，
+    /// 与 `pproxy user sign` / `pproxy cluster upgrade` 双侧一致）。
+    pub fn sign_bytes(&self, message: &[u8]) -> [u8; 64] {
+        self.signing_key.sign(message).to_bytes()
     }
 
     /// 签发自包含令牌：格式为 `usr_live_<payload_b64url>.<signature_b64url>`
@@ -202,6 +221,21 @@ impl TokenVerifier {
 
         Ok(claims)
     }
+
+    /// 校验任意消息的 Ed25519 签名（升级包签名约定：对升级包 SHA-256 摘要签名）。
+    ///
+    /// 供 `pproxy cluster upgrade` 在替换二进制前做防篡改硬校验。
+    pub fn verify_bytes(&self, message: &[u8], sig_bytes: &[u8]) -> Result<()> {
+        if sig_bytes.len() != 64 {
+            return Err(anyhow!("Ed25519 签名长度必须为 64 字节"));
+        }
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(sig_bytes);
+        let signature = Signature::from_bytes(&sig_arr);
+        self.verifying_key
+            .verify_strict(message, &signature)
+            .map_err(|e| anyhow!("升级包签名校验失败: {e}"))
+    }
 }
 
 #[cfg(test)]
@@ -291,5 +325,53 @@ mod tests {
 
         let err = verifier.verify_token(&tampered_token).unwrap_err();
         assert!(err.to_string().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn test_sign_bytes_and_verify_bytes_roundtrip() {
+        // 升级包签名约定：对 SHA-256 摘要签名，双侧 verify_bytes 硬校验
+        use sha2::{Digest, Sha256};
+        let (signer, vk) = TokenSigner::generate();
+        let verifier = TokenVerifier::new(vk);
+
+        let package = b"mock pproxy binary bytes v0.3.57";
+        let digest = Sha256::digest(package);
+        let sig = signer.sign_bytes(&digest);
+        assert_eq!(sig.len(), 64);
+
+        verifier.verify_bytes(&digest, &sig).expect("valid signature passes");
+    }
+
+    #[test]
+    fn test_verify_bytes_rejects_tampered_message_and_sig() {
+        use sha2::{Digest, Sha256};
+        let (signer, vk) = TokenSigner::generate();
+        let verifier = TokenVerifier::new(vk);
+
+        let package = b"mock pproxy binary bytes";
+        let digest = Sha256::digest(package);
+        let sig = signer.sign_bytes(&digest);
+
+        // 篡改消息（换个摘要）→ 拒绝
+        let tampered_digest = Sha256::digest(b"tampered bytes");
+        assert!(verifier.verify_bytes(&tampered_digest, &sig).is_err());
+
+        // 签名长度非法 → 拒绝
+        assert!(verifier.verify_bytes(&digest, &sig[..63]).is_err());
+    }
+
+    #[test]
+    fn test_signer_from_seed_hex_roundtrip() {
+        let (signer, _vk) = TokenSigner::generate();
+        let seed_hex = hex::encode(signer.to_bytes());
+        let restored = TokenSigner::from_seed_hex(&seed_hex).unwrap();
+        assert_eq!(restored.to_bytes(), signer.to_bytes());
+        assert_eq!(
+            hex::encode(restored.verifying_key().to_bytes()),
+            hex::encode(signer.verifying_key().to_bytes())
+        );
+
+        assert!(TokenSigner::from_seed_hex("abcd").is_err());
+        assert!(TokenSigner::from_seed_hex("zz").is_err());
     }
 }

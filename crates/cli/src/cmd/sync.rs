@@ -339,6 +339,7 @@ pub fn import_internal(input: &str, passphrase: Option<&str>, nonces_path: Optio
             name,
             target_host: target,
             override_upstream: None,
+            backup_upstream: None,
         };
         let _ = store.insert_route(&route_req);
     }
