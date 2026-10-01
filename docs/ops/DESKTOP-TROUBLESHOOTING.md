@@ -905,3 +905,24 @@ keyring 3.6.3 一律按 **UTF-16** 解码凭据 blob（其 `set_password` 亦按
 - 新增针对性单测：`tunnel_pool_refills_expired_sessions_automatically` 与 `tunnel_pool_maintain_exits_when_owner_dropped`；
 - 全量单元与集成测试：`cargo test --lib` **57/57 通过**；
 - 静态质量检查：`cargo clippy --all-targets` **0 警告**。
+
+---
+
+## 集群节点公网探测与多租户并发限流调优 · 2026-10-01
+
+**背景**：
+桌面端在实际分布式集群网络拓扑下，偶现两个主要可用性故障：
+1. **tencent 节点偶发下线**：阶段状态正常，但备灾节点 2（tencent）频繁闪烁离线；
+2. **多租户连接状态全红（429 级联）**：多租户令牌下偶发所有物理出口与站点测速失败，返回 502/429。
+
+**根因与修复**：
+1. **集群 TCP 探测超时过紧**：
+   - 根因：`desktop/src-tauri/src/lib.rs` 的 `proxy_cluster_nodes_get` 硬编码 `800ms` 超时。tencent 节点经 Tailscale 在公网 DERP 中继（RTT 达 370ms+）或 NAT 重协商丢包时极易超过 800ms 造成误判下线；
+   - 修复：探测超时放宽至 `2500ms`，充分容忍跨公网 Tailscale 链路抖动。
+2. **失效 Vercel 出口下线**：
+   - 根因：`vgate.ponygo.fun` 返回 `HTTP 402 DEPLOYMENT_DISABLED`（账号停用），导致合规 host 分流或回退 Vercel 时必挂；
+   - 修复：精简集群 `PPROXY_TUNNEL_GATE_URL` 为 `wss://rn.ponygo.fun/ws,wss://gate.ponygo.fun/ws`，主力对准 RackNerd 原生 VPS 隧道。
+3. **海外网关（gate-server）多租户并发连接泄漏**：
+   - 根因：旧版 `gate-server` 在 HTTP WS Upgrade 阶段预占连接计数，升级夭折或连接异常中断未正确触发 Drop 递减，导致活跃计数累加击穿上限（`429 Too Many Requests: Concurrent Connections Limit`），引发桌面端全量拨测 502；
+   - 修复：升级 `pproxy-gate-server`，将计数管理移至 Socket 读写生命周期 Guard 内，并放宽突发防护上限。
+

@@ -12,7 +12,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::proto::{connect_ws, WsSink, WsStream};
-use crate::route::{classify_egress, Egress};
+use crate::route::{classify_egress, is_native_vps_endpoint, Egress};
 
 // 默认生产连接生命周期与补给频率
 const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(30);
@@ -258,10 +258,14 @@ impl TunnelPool {
                         consec_401 = 0;
                     }
 
-                    // 逐端点补足到 target_size（仅 Vercel 出口强制为 0 以防 Fluid compute 持续计费，NativeVps/CF 全力预热）
+                    // 逐端点补足到 target_size（仅 Vercel 出口强制为 0 以防 Fluid compute 持续计费，NativeVps 全力预热；
+                    // 若已配置独立原生 VPS，CF Anycast 仅作 Fallback，无需浪费资源预池化避免 Anycast 握手超时拖慢主池）
+                    let has_vps = endpoints.iter().any(|ep| is_native_vps_endpoint(ep));
                     let mut healthy = true;
                     for ep in &endpoints {
                         let target_size = if classify_egress(ep) == Egress::Vercel {
+                            0
+                        } else if has_vps && !is_native_vps_endpoint(ep) {
                             0
                         } else {
                             pool.size

@@ -1963,9 +1963,9 @@ async fn proxy_cluster_nodes_get() -> Result<serde_json::Value, String> {
     let mut nodes = Vec::new();
     for addr in peer_addrs {
         let started = std::time::Instant::now();
-        // 快速 TCP 探测
+        // 集群节点健康探测：放宽至 2500ms（Tailscale 跨公网/DERP 中继握手可能需要 300~500ms+）
         let is_online = tokio::time::timeout(
-            std::time::Duration::from_millis(800),
+            std::time::Duration::from_millis(2500),
             tokio::net::TcpStream::connect(&addr),
         ).await.map(|r| r.is_ok()).unwrap_or(false);
         let ms = started.elapsed().as_millis() as u64;
