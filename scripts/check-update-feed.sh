@@ -32,9 +32,18 @@ for url in "${FEED_URLS[@]}"; do
     echo "SKIP $url（--github-only）"
     continue
   fi
-  if curl -fsSL -m 30 -o "$TMP/feed.json" "$url" 2>/dev/null; then
-    version="$(python3 -c "import json,sys; d=json.load(open('$TMP/feed.json')); print(d.get('version',''))" 2>/dev/null || true)"
-    [[ -n "$version" ]] || fail "$url 返回的 JSON 无 version 字段"
+  # 重试吸收 GitHub release-assets 最终一致性竞态：release 刚创建时 releases/latest 可能
+  # 先解析、资产对象后落地（曾出现 2xx 但 body 非 feed）。失败才重试，最多 3 次。
+  version=""
+  for attempt in 1 2 3; do
+    if curl -fsSL -m 30 -o "$TMP/feed.json" "$url" 2>/dev/null; then
+      version="$(python3 -c "import json,sys; d=json.load(open('$TMP/feed.json')); print(d.get('version',''))" 2>/dev/null || true)"
+      [[ -n "$version" ]] && break
+    fi
+    echo "WARN $url 第 $attempt 次不可用/非 feed，5s 后重试" >&2
+    sleep 5
+  done
+  if [[ -n "$version" ]]; then
     checked=$((checked + 1))
     echo "OK  $url  -> version=$version"
     if [[ -n "$EXPECTED" && "$version" != "$EXPECTED" ]]; then
