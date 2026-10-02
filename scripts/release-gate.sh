@@ -24,6 +24,8 @@ for a in "$@"; do
   [[ "$a" == "--feed" ]] && FEED=1 || POS+=("$a")
 done
 EXPECTED="${POS[0]:-$(python3 -c "import json; print(json.load(open('desktop/package.json'))['version'])")}"
+# 容忍 tag 派生版本（desktop-v0.3.63 → "v0.3.63"）带来的前导 v
+EXPECTED="${EXPECTED#v}"
 
 fail() { echo "❌ GATE FAIL: $*" >&2; exit 1; }
 pass() { echo "✅ $*"; }

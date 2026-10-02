@@ -47,6 +47,7 @@ jobs:
         # 图例等关键 UI 文本缺失于产物（由 scripts/release-gate.sh 机械校验）
         run: |
           VER="${GITHUB_REF_NAME#desktop-}"
+          VER="${VER#v}"
           bash scripts/release-gate.sh "$VER"
 
       - name: Prepare updater endpoints fragment (build-time injection)
@@ -154,4 +155,5 @@ jobs:
         # 与本次版本一致（access.ponygo.fun 由网关主机手动 sync，发布时刻可滞后，故只查 GitHub）
         run: |
           VER="${GITHUB_REF_NAME#desktop-}"
+          VER="${VER#v}"
           bash scripts/check-update-feed.sh --github-only "$VER"
