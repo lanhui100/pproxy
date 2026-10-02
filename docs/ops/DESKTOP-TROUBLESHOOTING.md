@@ -926,3 +926,19 @@ keyring 3.6.3 一律按 **UTF-16** 解码凭据 blob（其 `set_password` 亦按
    - 根因：旧版 `gate-server` 在 HTTP WS Upgrade 阶段预占连接计数，升级夭折或连接异常中断未正确触发 Drop 递减，导致活跃计数累加击穿上限（`429 Too Many Requests: Concurrent Connections Limit`），引发桌面端全量拨测 502；
    - 修复：升级 `pproxy-gate-server`，将计数管理移至 Socket 读写生命周期 Guard 内，并放宽突发防护上限。
 
+
+---
+
+## Dashboard 用量/实时网速图例不显示 与 发版校验门禁 · 2026-10-02
+
+**症状**：用户在已安装版本里看不到用量统计图的图例栏（近 7 日用量 / 近 24 小时用量 / 实时网速）。
+
+**排查结论（先分清"代码里有没有" vs "运行时不显示"）**：
+- 图例栏 UI 代码自 `bf23895`（2026-08-31，Dashboard 重构）引入，`desktop-v0.3.62`（2026-09-27 发布）**已包含**。所以"图例不显示 = 新版没发"**不成立**；未发布的 `e8d70c2`/`98601a7` 改的是 RN/Upstream 全出口汇总与布局/交互，不是图例栏有无。
+- 若界面整块「用量统计」图表区缺失：优先确认安装版本号（此前检查更新失败时可能停在更旧版本），仍复发则取桌面端日志（诊断导出）定位运行时异常。
+- 防回归手段：产物 UI 字符串门禁（见下），图例文本缺一即拦。
+
+**发版门禁（2026-10-02 起生效）**：
+- `scripts/release-gate.sh`：发版前自检——① 版本三处一致（`desktop/package.json` / `desktop/src-tauri/tauri.conf.json` / `src-tauri/Cargo.toml`，漏 bump 即拦）；② `pnpm check` + `pnpm test` + `pnpm build`；③ 产物 UI 字符串门禁（`近 7 日用量`/`近 24 小时用量`/`实时网速`/`今日请求` 必须出现在构建产物中）。
+- `scripts/check-update-feed.sh [--github-only] [版本]`：校验更新 feed 通道（GitHub `releases/latest` 必达；`access.ponygo.fun` 常规模式必达，`--github-only` 时跳过——该域由网关主机手动 sync-desktop-release.sh 更新，发布时刻可滞后）。
+- 接线：`desktop-release.yml` 发版前跑 `release-gate.sh`、发版后跑 `check-update-feed.sh --github-only`；`cli-release.yml` 在 general/CLI 发布时自动复制最新 desktop 的 `latest.json` 进该 release 并校验 GitHub latest 通道——封死"CLI 发布抢占 GitHub latest 导致桌面端检查更新 404"一类事故（详见 `.agents/notes/implemented/bug-fix/2026-10-02-github-latest-feed-shadowed-by-cli-release.md`）。

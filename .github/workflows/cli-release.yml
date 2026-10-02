@@ -179,3 +179,29 @@ jobs:
             gh release create "$TAG" release-assets/* --title "Pony Proxy $TAG" --notes-file /tmp/release_body.txt
           fi
 
+      - name: Re-protect desktop update feed on general releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+        # 根因（2026-10-02）：GitHub "latest" 按最近创建取 release，general/CLI 发布（如 v0.3.57）
+        # 会把 releases/latest/download/latest.json 带向无 latest.json 的 release → 桌面端检查更新 404。
+        # 此处把当前最新 desktop release 的 latest.json 复制进本次 release，保证 releases/latest 永不 404；
+        # 并校验 GitHub latest 通道仍能解析出合法 feed（见 .agents/notes/implemented/bug-fix/2026-10-02-...）。
+        run: |
+          TAG="${{ steps.get_tag.outputs.tag }}"
+          case "$TAG" in
+            desktop-*) echo "desktop release，latest.json 已由 tauri-action 上传，跳过复制" ;;
+            *)
+              DT="$(gh release list --repo lanhui100/pproxy --limit 50 --json tagName --jq '.[].tagName' | grep '^desktop-v' | sort -V | tail -1 || true)"
+              if [ -n "$DT" ]; then
+                echo "Copying latest.json from desktop release $DT to $TAG"
+                mkdir -p feed-assets
+                gh release download "$DT" --repo lanhui100/pproxy --pattern latest.json --dir feed-assets
+                gh release upload "$TAG" feed-assets/latest.json --clobber
+              else
+                echo "WARN: 未找到 desktop release，跳过 feed 复制"
+              fi
+              bash scripts/check-update-feed.sh --github-only
+              ;;
+          esac
+
