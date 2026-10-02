@@ -35,6 +35,7 @@ const toast = useToast()
 // 运行状态
 const isRunning = ref(false)
 const isToggling = ref(false)
+const isSwitchingMode = ref(false)
 const proxyMode = ref<'whitelist' | 'global'>('whitelist')
 const configInfo = ref<{
   mode_type: string
@@ -683,16 +684,18 @@ async function refreshStatus() {
 
 async function toggleProxy() {
   if (isToggling.value) return
+  const prevRunning = isRunning.value
+  // 乐观更新：即时响应用户点击，并进入 loading 反馈状态
+  isRunning.value = !prevRunning
   isToggling.value = true
+
   try {
     if (!isTauri()) {
-      isRunning.value = !isRunning.value
       return
     }
     const { invoke } = await import('@tauri-apps/api/core')
-    if (isRunning.value) {
+    if (prevRunning) {
       await invoke('proxy_disable')
-      isRunning.value = false
       toast.success('已关闭加速')
     } else {
       await invoke('proxy_enable')
@@ -709,6 +712,8 @@ async function toggleProxy() {
       void runAllTests()
     }
   } catch (e: any) {
+    // 失败回滚
+    isRunning.value = prevRunning
     toast.error(typeof e === 'string' ? e : e?.message || '操作失败')
   } finally {
     isToggling.value = false
@@ -716,17 +721,26 @@ async function toggleProxy() {
 }
 
 async function setProxyMode(mode: 'whitelist' | 'global') {
+  if (proxyMode.value === mode) return
+  const prevMode = proxyMode.value
+  // 乐观更新：即时切换选中态
+  proxyMode.value = mode
+  isSwitchingMode.value = true
+
   if (!isTauri()) {
-    proxyMode.value = mode
+    isSwitchingMode.value = false
     return
   }
   try {
     const { invoke } = await import('@tauri-apps/api/core')
     await invoke('proxy_mode_set', { mode })
-    proxyMode.value = mode
     toast.success(mode === 'whitelist' ? '已切换至智能分流模式' : '已切换至全局加速模式')
   } catch (e: any) {
+    // 失败回滚
+    proxyMode.value = prevMode
     toast.error('切换模式失败')
+  } finally {
+    isSwitchingMode.value = false
   }
 }
 
@@ -967,41 +981,45 @@ async function submitImportOrChained() {
             :title="isToggling ? '切换中…' : isRunning ? '点击关闭加速' : '点击开启加速'"
             :aria-label="isToggling ? '正在切换加速状态' : isRunning ? '加速运行中，点击关闭' : '加速已停止，点击开启'"
             :class="[
-              'h-20 w-20 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer',
-              isToggling ? 'opacity-60 cursor-not-allowed' : '',
+              'h-20 w-20 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer relative',
               isRunning
                 ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/25 hover:bg-emerald-600'
                 : 'bg-muted text-muted-foreground hover:bg-accent hover:text-foreground',
             ]"
           >
-            <Power class="h-8 w-8" />
+            <RefreshCw v-if="isToggling" class="h-8 w-8 animate-spin" />
+            <Power v-else class="h-8 w-8" />
           </button>
 
           <!-- 加速模式 switch：智能 / 全局 -->
           <div class="mt-5 inline-flex items-center rounded-full bg-muted p-1" role="group" aria-label="加速模式">
             <button
               @click="setProxyMode('whitelist')"
+              :disabled="isSwitchingMode"
               :aria-pressed="proxyMode === 'whitelist'"
               :class="[
-                'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer',
+                'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer inline-flex items-center gap-1.5',
                 proxyMode === 'whitelist'
                   ? 'bg-card text-foreground font-medium shadow-sm'
                   : 'text-muted-foreground hover:text-foreground',
               ]"
             >
-              智能
+              <RefreshCw v-if="isSwitchingMode && proxyMode === 'whitelist'" class="h-3.5 w-3.5 animate-spin" />
+              <span>智能</span>
             </button>
             <button
               @click="setProxyMode('global')"
+              :disabled="isSwitchingMode"
               :aria-pressed="proxyMode === 'global'"
               :class="[
-                'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer',
+                'px-6 py-1.5 rounded-full text-sm transition-all duration-150 cursor-pointer inline-flex items-center gap-1.5',
                 proxyMode === 'global'
                   ? 'bg-card text-foreground font-medium shadow-sm'
                   : 'text-muted-foreground hover:text-foreground',
               ]"
             >
-              全局
+              <RefreshCw v-if="isSwitchingMode && proxyMode === 'global'" class="h-3.5 w-3.5 animate-spin" />
+              <span>全局</span>
             </button>
           </div>
 

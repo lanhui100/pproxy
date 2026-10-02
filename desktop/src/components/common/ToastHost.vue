@@ -73,7 +73,7 @@ async function copyError(id: number, text: string): Promise<void> {
       <div
         v-for="t in toasts"
         :key="t.id"
-        class="toast-frosted-card pointer-events-auto flex w-[min(calc(100vw-3rem),21rem)] min-h-[5.25rem] items-start gap-3 rounded-xl p-3.5 select-none bg-neutral-100/90 text-neutral-800 dark:bg-neutral-800/95 dark:text-neutral-100 backdrop-blur-xl shadow-lg border-0"
+        class="toast-frosted-card pointer-events-auto flex w-[min(calc(100vw-3rem),21rem)] min-h-[5.25rem] items-start gap-3 rounded-xl p-3.5 select-none bg-neutral-200/95 text-neutral-900 dark:bg-neutral-900/95 dark:text-neutral-100 backdrop-blur-xl border border-neutral-300/60 dark:border-neutral-700/60"
       >
         <!-- 语义图标（仅此处使用语义色彩） -->
         <component
@@ -84,24 +84,24 @@ async function copyError(id: number, text: string): Promise<void> {
 
         <!-- 文本层级（浅灰色/中性灰色质感底色，至少容纳三行文字，避免细长条） -->
         <div class="min-w-0 flex-1 flex flex-col justify-center min-h-[3.25rem] py-0.5">
-          <p class="text-xs font-semibold leading-relaxed break-words text-neutral-800 dark:text-neutral-100">
+          <p class="text-xs font-semibold leading-relaxed break-words text-neutral-900 dark:text-neutral-100">
             {{ t.message }}
           </p>
           <p
             v-if="t.detail && t.detail !== t.message"
-            class="mt-1 text-[11px] leading-relaxed break-words line-clamp-3 text-neutral-600 dark:text-neutral-300"
+            class="mt-1 text-[11px] leading-relaxed break-words line-clamp-3 text-neutral-700 dark:text-neutral-300"
           >
             {{ t.detail }}
           </p>
           <p
             v-else-if="t.kind === 'error'"
-            class="mt-1 text-[11px] text-neutral-500 dark:text-neutral-400"
+            class="mt-1 text-[11px] text-neutral-600 dark:text-neutral-400"
           >
             常驻提示 · 请点击复制反馈
           </p>
           <p
             v-else
-            class="mt-0.5 text-[11px] text-neutral-500 dark:text-neutral-400 opacity-80"
+            class="mt-0.5 text-[11px] text-neutral-600 dark:text-neutral-400 opacity-80"
           >
             系统操作提示
           </p>
@@ -112,7 +112,7 @@ async function copyError(id: number, text: string): Promise<void> {
           <button
             v-if="t.kind === 'error'"
             type="button"
-            class="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-neutral-700 dark:text-neutral-200 hover:text-neutral-900 dark:hover:text-white bg-black/5 hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/20 transition-colors cursor-pointer"
+            class="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-neutral-800 dark:text-neutral-200 hover:text-neutral-950 dark:hover:text-white bg-black/5 hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/20 transition-colors cursor-pointer"
             @click="copyError(t.id, t.detail ?? t.message)"
           >
             <Check v-if="copiedIds.has(t.id)" class="size-3.5 text-emerald-500 dark:text-emerald-400" />
@@ -121,7 +121,7 @@ async function copyError(id: number, text: string): Promise<void> {
           </button>
           <button
             type="button"
-            class="rounded-md p-1 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-100 hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
+            class="rounded-md p-1 text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100 hover:bg-black/5 dark:hover:bg-white/10 transition-colors cursor-pointer"
             title="关闭提示"
             @click="dismiss(t.id)"
           >

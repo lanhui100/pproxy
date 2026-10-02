@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Check,
@@ -46,7 +46,7 @@ import {
 } from '@/lib/config'
 import { setAppConfigured } from '@/composables/useAppConfig'
 import InfoTip from '@/components/common/InfoTip.vue'
-import { buildAccessUrlDev, cleanDomainInput, type AccessUrlResult } from '@/lib/urls'
+import { cleanDomainInput } from '@/lib/urls'
 import {
   Dialog,
   DialogContent,
@@ -62,15 +62,12 @@ const router = useRouter()
 const GATE_INPUT_TIP = '用于接入服务端或授权集群。支持粘贴接入令牌、授权码或连接口令。'
 const SYNC_URI_TIP = '粘贴 pproxy-sync:// 或 pproxy:// 口令，一键同步节点配置与凭据。'
 const REMOTE_PASS_TIP = '自建服务器认证密码，仅保存在本机系统凭据库。'
-const API_TOKEN_TIP = '用于调用本地 API 代理的访问密钥（形如 pony_xxx）。由服务提供方提供。'
-const ACCESS_URL_TIP = '输入模型 base_url（如 api.openai.com/v1），自动推导路由并生成接入地址。'
 
 // ---- 输入框 Ref 引用（用于进入编辑态时自动聚焦） ----
 const gateInputRef = ref<HTMLInputElement | null>(null)
 const importSyncInputRef = ref<HTMLInputElement | null>(null)
 const remoteHostInputRef = ref<HTMLInputElement | null>(null)
 const whitelistInputRef = ref<HTMLInputElement | null>(null)
-const apiTokenInputRef = ref<HTMLInputElement | null>(null)
 
 // ---- 自定义加速名单（白名单）----
 const whitelistEntries = ref<string[]>([])
@@ -80,16 +77,13 @@ const isAddingDomain = ref(false)
 
 // ---- 破坏性操作二次确认状态 ----
 const confirmingClearTunnel = ref(false)
-const confirmingClearApiToken = ref(false)
 
 function closeAllEditing(): void {
   isEditingGate.value = false
   isImportingSync.value = false
   isEditingRemote.value = false
   isAddingWhitelist.value = false
-  isEditingApiToken.value = false
   confirmingClearTunnel.value = false
-  confirmingClearApiToken.value = false
 }
 
 async function refreshWhitelist(): Promise<void> {
@@ -161,165 +155,6 @@ async function removeWhitelistEntry(i: number): Promise<void> {
     if (target) toast.success(`已移除 ${target}`)
   } catch (e: any) {
     toast.error('移除失败', typeof e === 'string' ? e : e?.message || String(e))
-  }
-}
-
-// ---- API 反代地址生成 ----
-const providerBaseUrl = ref('')
-const apiProxyTokenInput = ref('')
-const apiProxyTokenSaved = ref<string | null>(null)
-const isEditingApiToken = ref(false)
-const accessGenerating = ref(false)
-const accessResult = ref<AccessUrlResult | null>(null)
-const accessCopied = ref<'local' | 'public' | null>(null)
-let accessCopyTimer: ReturnType<typeof setTimeout> | null = null
-
-onUnmounted(() => {
-  if (accessCopyTimer) {
-    clearTimeout(accessCopyTimer)
-    accessCopyTimer = null
-  }
-})
-
-async function loadApiProxyToken(): Promise<void> {
-  try {
-    if (isTauri()) {
-      const { invoke } = await import('@tauri-apps/api/core')
-      const t = (await invoke('proxy_api_token_get')) as string | null
-      apiProxyTokenSaved.value = t
-      if (t) apiProxyTokenInput.value = t
-    } else {
-      const t = localStorage.getItem('pony-dev-api-token')
-      apiProxyTokenSaved.value = t
-      if (t) apiProxyTokenInput.value = t
-    }
-  } catch (e) {
-    console.warn('Failed to load api proxy token:', e)
-  }
-}
-
-function startEditApiToken(): void {
-  closeAllEditing()
-  apiProxyTokenInput.value = apiProxyTokenSaved.value || ''
-  isEditingApiToken.value = true
-  void nextTick(() => apiTokenInputRef.value?.focus())
-}
-
-function cancelEditApiToken(): void {
-  apiProxyTokenInput.value = apiProxyTokenSaved.value || ''
-  isEditingApiToken.value = false
-}
-
-async function saveApiProxyToken(): Promise<void> {
-  const raw = apiProxyTokenInput.value.trim()
-  if (!raw) {
-    await clearApiTokenAction()
-    return
-  }
-
-  if (raw.startsWith('gate_')) {
-    toast.error('令牌类型错误', 'gate_ 开头为出海隧道码，API 反代请使用 pony_xxx 令牌')
-    return
-  }
-  if (!raw.startsWith('pony_')) {
-    toast.error('格式不规范', '反代令牌必须以 pony_ 开头（例如 pony_31abc...）')
-    return
-  }
-
-  try {
-    if (isTauri()) {
-      const { invoke } = await import('@tauri-apps/api/core')
-      await invoke('proxy_api_token_set', { token: raw })
-    } else {
-      localStorage.setItem('pony-dev-api-token', raw)
-    }
-    apiProxyTokenSaved.value = raw
-    isEditingApiToken.value = false
-    toast.success('反代令牌已保存生效')
-  } catch (e: any) {
-    toast.error('保存失败', typeof e === 'string' ? e : e?.message)
-  }
-}
-
-async function clearApiTokenAction(): Promise<void> {
-  try {
-    if (isTauri()) {
-      const { invoke } = await import('@tauri-apps/api/core')
-      await invoke('proxy_api_token_set', { token: '' })
-    } else {
-      localStorage.removeItem('pony-dev-api-token')
-    }
-    apiProxyTokenSaved.value = null
-    apiProxyTokenInput.value = ''
-    isEditingApiToken.value = false
-    confirmingClearApiToken.value = false
-    toast.success('已清空反代令牌')
-  } catch (e: any) {
-    confirmingClearApiToken.value = false
-    toast.error('清空失败', typeof e === 'string' ? e : e?.message)
-  }
-}
-
-async function generateAccessUrls(): Promise<void> {
-  if (accessGenerating.value) return
-  const raw = providerBaseUrl.value.trim()
-  if (!raw) {
-    toast.error('请先输入模型提供商的 base_url', '例如 https://api.anthropic.com 或 api.openai.com/v1')
-    return
-  }
-  const tokenCandidate = apiProxyTokenSaved.value || apiProxyTokenInput.value.trim()
-  if (tokenCandidate && tokenCandidate.startsWith('gate_')) {
-    toast.error('提示：不可使用 gate_ 出海隧道码', 'API 反代需要形如 pony_xxx 的令牌')
-    return
-  }
-
-  accessGenerating.value = true
-  try {
-    if (isTauri()) {
-      const { invoke } = await import('@tauri-apps/api/core')
-      accessResult.value = (await invoke('proxy_access_url_generate', {
-        baseUrl: raw,
-        customToken: tokenCandidate || null,
-      })) as AccessUrlResult
-      if (accessResult.value.has_token && tokenCandidate) {
-        apiProxyTokenSaved.value = tokenCandidate
-      }
-    } else {
-      accessResult.value = buildAccessUrlDev(raw, tokenCandidate)
-      if (tokenCandidate) {
-        localStorage.setItem('pony-dev-api-token', tokenCandidate)
-        apiProxyTokenSaved.value = tokenCandidate
-      }
-    }
-    accessCopied.value = null
-    if (!accessResult.value.has_token) {
-      toast.info('已生成，但未配置反代令牌', '令牌段为 <token> 占位，配置 pony_xxx 令牌后自动填充')
-    }
-  } catch (e: any) {
-    accessResult.value = null
-    toast.error('生成失败', typeof e === 'string' ? e : e?.message ?? '未知错误')
-  } finally {
-    accessGenerating.value = false
-  }
-}
-
-async function copyAccessUrl(kind: 'local' | 'public'): Promise<void> {
-  const text = kind === 'local' ? accessResult.value?.local_url : accessResult.value?.public_url
-  if (!text) return
-  try {
-    await navigator.clipboard.writeText(text)
-    if (accessCopyTimer) {
-      clearTimeout(accessCopyTimer)
-      accessCopyTimer = null
-    }
-    accessCopied.value = kind
-    toast.success(kind === 'local' ? '本机地址已复制' : '公网地址已复制')
-    accessCopyTimer = setTimeout(() => {
-      accessCopied.value = null
-      accessCopyTimer = null
-    }, 2000)
-  } catch {
-    toast.error('复制失败，请手动选择复制')
   }
 }
 
@@ -704,7 +539,6 @@ const clashConfig = ref<ClashConfigData | null>(null)
 const loadingClash = ref(false)
 const showClashDialog = ref(false)
 const clashUrlCopied = ref(false)
-const clashYamlCopied = ref(false)
 
 async function fetchClashConfig(): Promise<void> {
   loadingClash.value = true
@@ -750,18 +584,6 @@ async function copyClashUrl(): Promise<void> {
   }
 }
 
-async function copyClashYaml(): Promise<void> {
-  if (!clashConfig.value?.yaml) return
-  try {
-    await navigator.clipboard.writeText(clashConfig.value.yaml)
-    clashYamlCopied.value = true
-    toast.success('已复制完整配置内容', '可直接在客户端中新建配置并粘贴')
-    setTimeout(() => { clashYamlCopied.value = false }, 2500)
-  } catch {
-    toast.error('复制失败')
-  }
-}
-
 async function exportClashFile(): Promise<void> {
   if (!isTauri()) {
     toast.info('开发模式', '已模拟保存 ~/.pony/clash.yaml')
@@ -781,7 +603,6 @@ onMounted(async () => {
   void refreshTunnel()
   void refreshWhitelist()
   void refreshAutoProxy()
-  void loadApiProxyToken()
 
   if (isTauri()) {
     try {
@@ -1199,176 +1020,6 @@ onMounted(async () => {
       </div>
     </section>
 
-    <!-- API 反代 -->
-    <section class="space-y-2.5">
-      <div>
-        <h2 class="text-sm font-bold text-foreground flex items-center gap-1.5">
-          API 反代
-          <InfoTip :text="ACCESS_URL_TIP" />
-        </h2>
-        <p class="text-xs text-muted-foreground mt-0.5">转换模型服务 base_url 并注入凭据，生成 SDK 接入地址</p>
-      </div>
-
-      <div class="rounded-xl bg-muted/60 dark:bg-muted/25 border border-border/20 p-4 space-y-3">
-        <!-- 反代令牌配置项 -->
-        <div>
-          <div v-if="!isEditingApiToken" class="flex items-center justify-between gap-4 py-1">
-            <div class="space-y-0.5 min-w-0">
-              <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
-                反代令牌
-                <InfoTip :text="API_TOKEN_TIP" />
-              </div>
-              <div class="text-[11px] text-muted-foreground font-mono truncate">
-                <span v-if="apiProxyTokenSaved">{{ apiProxyTokenSaved.slice(0, 10) }}…{{ apiProxyTokenSaved.slice(-6) }}</span>
-                <span v-else>未配置（将使用 &lt;token&gt; 占位）</span>
-              </div>
-            </div>
-            <div class="flex items-center gap-1 shrink-0">
-              <!-- 清除令牌带二次确认 -->
-              <div v-if="apiProxyTokenSaved" class="inline-flex items-center">
-                <div v-if="confirmingClearApiToken" class="flex items-center gap-1.5 bg-background px-2 py-0.5 rounded-md border border-rose-500/30 text-[11px]">
-                  <span class="text-rose-500 font-medium">确定清空？</span>
-                  <button
-                    type="button"
-                    @click="clearApiTokenAction"
-                    class="text-rose-600 font-medium hover:underline cursor-pointer focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
-                  >
-                    是
-                  </button>
-                  <button
-                    type="button"
-                    @click="confirmingClearApiToken = false"
-                    class="text-muted-foreground hover:underline cursor-pointer ml-0.5 focus-visible:ring-1 focus-visible:ring-ring/50 outline-none"
-                  >
-                    否
-                  </button>
-                </div>
-                <button
-                  v-else
-                  type="button"
-                  @click="confirmingClearApiToken = true"
-                  title="清空令牌"
-                  aria-label="清空令牌"
-                  class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-rose-500 hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-                >
-                  <Trash2 class="size-3.5" />
-                </button>
-              </div>
-              <button
-                type="button"
-                @click="startEditApiToken"
-                title="修改反代令牌"
-                aria-label="修改反代令牌"
-                class="h-7 w-7 rounded-md inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-              >
-                <Pencil class="size-3.5" />
-              </button>
-            </div>
-          </div>
-
-          <div v-else class="space-y-2 py-1">
-            <div class="text-xs font-medium text-foreground flex items-center gap-1.5">
-              修改反代令牌
-              <InfoTip :text="API_TOKEN_TIP" />
-            </div>
-            <div class="flex items-center gap-2">
-              <Input
-                ref="apiTokenInputRef"
-                v-model="apiProxyTokenInput"
-                placeholder="请输入形如 pony_31abc... 的访问令牌"
-                class="font-mono text-xs h-8 bg-background"
-                @keyup.enter="saveApiProxyToken"
-                @keydown.esc="cancelEditApiToken"
-              />
-              <button
-                type="button"
-                @click="saveApiProxyToken"
-                title="保存 (Enter)"
-                aria-label="保存"
-                class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center bg-foreground text-background hover:bg-foreground/90 transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-              >
-                <Check class="size-3.5" />
-              </button>
-              <button
-                type="button"
-                @click="cancelEditApiToken"
-                title="取消 (Esc)"
-                aria-label="取消"
-                class="h-8 w-8 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-              >
-                <X class="size-3.5" />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- 地址生成行 -->
-        <div class="border-t border-border/30 pt-3 space-y-2">
-          <div class="flex items-center gap-2">
-            <Input
-              v-model="providerBaseUrl"
-              placeholder="例如 https://api.anthropic.com 或 api.openai.com/v1"
-              class="font-mono text-xs h-8 bg-background"
-              @keyup.enter="generateAccessUrls"
-            />
-            <Button
-              size="sm"
-              variant="secondary"
-              class="text-xs h-8 shrink-0 cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-              :disabled="accessGenerating || !providerBaseUrl.trim()"
-              @click="generateAccessUrls"
-            >
-              <RefreshCw v-if="accessGenerating" class="size-3.5 mr-1 animate-spin" />
-              {{ accessGenerating ? '生成中…' : '生成' }}
-            </Button>
-          </div>
-
-          <!-- 生成结果展示 -->
-          <div v-if="accessResult" class="rounded-lg bg-background/60 p-3 space-y-2 text-xs">
-            <div class="flex items-center justify-between text-[11px]">
-              <span class="text-muted-foreground">路由：<code class="font-mono font-medium text-foreground">{{ accessResult.route }}</code></span>
-              <span v-if="accessResult.has_token" class="text-muted-foreground font-medium">已注入令牌</span>
-              <span v-else class="text-muted-foreground">未配置令牌，需手动替换 &lt;token&gt;</span>
-            </div>
-
-            <div class="flex items-center justify-between gap-2">
-              <span class="w-10 text-[11px] text-muted-foreground shrink-0">本机</span>
-              <code class="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground bg-muted/70 px-2 py-1 rounded" :title="accessResult.local_url">
-                {{ accessResult.local_url }}
-              </code>
-              <button
-                type="button"
-                @click="copyAccessUrl('local')"
-                title="复制本机地址"
-                aria-label="复制本机地址"
-                class="h-7 w-7 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-              >
-                <Check v-if="accessCopied === 'local'" class="size-3.5" />
-                <Copy v-else class="size-3.5" />
-              </button>
-            </div>
-
-            <div class="flex items-center justify-between gap-2">
-              <span class="w-10 text-[11px] text-muted-foreground shrink-0">公网</span>
-              <code class="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground bg-muted/70 px-2 py-1 rounded" :title="accessResult.public_url">
-                {{ accessResult.public_url }}
-              </code>
-              <button
-                type="button"
-                @click="copyAccessUrl('public')"
-                title="复制公网地址"
-                aria-label="复制公网地址"
-                class="h-7 w-7 rounded-md shrink-0 inline-flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-ring/50 outline-none"
-              >
-                <Check v-if="accessCopied === 'public'" class="size-3.5" />
-                <Copy v-else class="size-3.5" />
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- 客户端与移动端生态 (Clash Meta 等) -->
     <section class="space-y-2.5">
       <div>
@@ -1559,7 +1210,7 @@ onMounted(async () => {
 
     <!-- Clash Meta 配置与二维码弹窗 -->
     <Dialog :open="showClashDialog" @update:open="showClashDialog = $event">
-      <DialogContent class="sm:max-w-md">
+      <DialogContent class="sm:max-w-md p-6">
         <DialogHeader>
           <DialogTitle>Clash Meta / 移动端配置导入</DialogTitle>
           <DialogDescription>
@@ -1567,9 +1218,9 @@ onMounted(async () => {
           </DialogDescription>
         </DialogHeader>
 
-        <div v-if="clashConfig" class="space-y-4 pt-2">
-          <!-- 二维码展示区 -->
-          <div class="flex flex-col items-center justify-center p-4 bg-white rounded-xl border shadow-inner">
+        <div v-if="clashConfig" class="space-y-4 pt-1">
+          <!-- 二维码展示区（去外围边框与内阴影，纯净居中） -->
+          <div class="flex flex-col items-center justify-center p-4 bg-white rounded-xl">
             <div
               class="w-48 h-48 flex items-center justify-center overflow-hidden"
               v-html="clashConfig.qr_svg"
@@ -1577,14 +1228,15 @@ onMounted(async () => {
             <span class="text-[11px] text-zinc-500 mt-2">手机与电脑连接同一局域网 WiFi 扫码即用</span>
           </div>
 
-          <!-- 订阅链接复制 -->
+          <!-- 订阅链接复制（tabindex -1 且聚焦时无 outline/ring，不主动聚焦） -->
           <div class="space-y-1.5">
             <Label class="text-xs text-muted-foreground">订阅 URL</Label>
             <div class="flex items-center gap-2">
-              <Input
+              <input
                 readonly
-                :model-value="clashConfig.subscription_url"
-                class="font-mono text-xs h-8 bg-muted/50"
+                tabindex="-1"
+                :value="clashConfig.subscription_url"
+                class="font-mono text-xs h-8 bg-muted/50 rounded-lg px-2.5 py-1 text-foreground w-full min-w-0 border-0 outline-none focus:outline-none focus:ring-0 select-all"
               />
               <Button
                 variant="secondary"
@@ -1597,28 +1249,6 @@ onMounted(async () => {
                 {{ clashUrlCopied ? '已复制' : '复制' }}
               </Button>
             </div>
-          </div>
-
-          <!-- 操作按钮组 -->
-          <div class="flex items-center justify-between pt-2 border-t border-border/20">
-            <Button
-              variant="outline"
-              size="sm"
-              @click="copyClashYaml"
-              class="text-xs h-8"
-            >
-              <Copy class="size-3.5 mr-1" />
-              {{ clashYamlCopied ? '已复制 YAML' : '复制配置全文' }}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              @click="exportClashFile"
-              class="text-xs h-8"
-            >
-              <Download class="size-3.5 mr-1" />
-              保存到本机
-            </Button>
           </div>
         </div>
       </DialogContent>

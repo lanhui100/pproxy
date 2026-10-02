@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildAccessUrlDev, cleanDomainInput, deriveDataPlane, parseServiceUrlInput } from './urls'
+import { cleanDomainInput, deriveDataPlane, parseServiceUrlInput } from './urls'
 
 // node 测试环境无 localStorage：为 buildAccessUrlDev 的 dev 凭据读取提供最小 mock
 const storage = new Map<string, string>()
@@ -132,43 +132,8 @@ describe('parseServiceUrlInput', () => {
     expect(r?.cleanHost).toBe('127.0.0.1:11434')
     expect(r?.inferredName).toBe('ollama')
   })
-})
 
-describe('buildAccessUrlDev（对齐 Rust proxy_access_url_generate）', () => {
-
-  it('带 https:// 的 Anthropic base_url 推导路由并生成本地/公网地址', () => {
-    const r = buildAccessUrlDev('https://api.anthropic.com')
-    expect(r.route).toBe('anthropic')
-    expect(r.local_url).toBe('http://127.0.0.1:8899/<token>/anthropic')
-    expect(r.public_url).toBe('https://access.example.com/<token>/anthropic')
-    expect(r.has_token).toBe(false)
-  })
-
-  it('不带 scheme 且带路径的 OpenAI base_url 同样正确处理并保留子路径', () => {
-    const r = buildAccessUrlDev('api.openai.com/v1/chat/completions')
-    expect(r.route).toBe('openai')
-    expect(r.local_url).toBe('http://127.0.0.1:8899/<token>/openai/v1/chat/completions')
-  })
-
-  it('已保存 dev token 时令牌段自动填入', () => {
-    const prev = localStorage.getItem('pony-dev-tunnel-token')
-    localStorage.setItem('pony-dev-tunnel-token', 'dev-abc')
-    try {
-      const r = buildAccessUrlDev('https://api.groq.com')
-      expect(r.has_token).toBe(true)
-      expect(r.local_url).toBe('http://127.0.0.1:8899/dev-abc/groq')
-      expect(r.public_url).toBe('https://access.example.com/dev-abc/groq')
-    } finally {
-      if (prev === null) localStorage.removeItem('pony-dev-tunnel-token')
-      else localStorage.setItem('pony-dev-tunnel-token', prev)
-    }
-  })
-
-  it('非法输入抛出可读错误', () => {
-    expect(() => buildAccessUrlDev('   ')).toThrow(/base_url/)
-  })
-
-  it('对齐 Rust 路由推导：huggingface, twitter, 数字开头与 pony_ 前缀防御', async () => {
+  it('路由推导：huggingface, twitter, 数字开头与 pony_ 前缀防御', async () => {
     const { parseServiceUrlInput } = await import('./urls')
     expect(parseServiceUrlInput('https://huggingface.co/models')?.inferredName).toBe('hf')
     expect(parseServiceUrlInput('https://api.twitter.com/2/tweets')?.inferredName).toBe('x')
@@ -178,17 +143,12 @@ describe('buildAccessUrlDev（对齐 Rust proxy_access_url_generate）', () => {
     expect(parseServiceUrlInput('https://generativelanguage.googleapis.com:443')?.inferredName).toBe('gemini')
   })
 
-  it('正确推导 api.b.ai/v1 为 bai 并保留 /v1 子路径（正向用例）', () => {
+  it('正确推导 api.b.ai/v1 为 bai 并保留 /v1 子路径', () => {
     const p = parseServiceUrlInput('api.b.ai/v1')
     expect(p?.inferredName).toBe('bai')
     expect(p?.subPath).toBe('/v1')
-
-    const r = buildAccessUrlDev('api.b.ai/v1', 'pony_31abcbd448a003be0ea27524d60973d8')
-    expect(r.route).toBe('bai')
-    expect(r.local_url).toBe('http://127.0.0.1:8899/pony_31abcbd448a003be0ea27524d60973d8/bai/v1')
-    expect(r.public_url).toBe('https://access.example.com/pony_31abcbd448a003be0ea27524d60973d8/bai/v1')
-    expect(r.has_token).toBe(true)
   })
 })
+
 
 

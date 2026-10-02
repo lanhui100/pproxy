@@ -43,8 +43,7 @@ describe('UI/UX Specification Checks', () => {
     expect(content).toContain('加速名单')
     expect(content).not.toContain('域名名单')
     expect(content).not.toContain('智能分流加速名单')
-    expect(content).toContain('反代令牌')
-    expect(content).not.toContain('反代访问令牌')
+    expect(content).not.toContain('反代令牌')
 
     // 加速名单徽标直接罗列，去长方形卡片背景
     expect(content).toMatch(/<h2 class="text-sm font-bold text-foreground">加速名单<\/h2>[\s\S]*?class="flex flex-wrap gap-2/)
