@@ -173,7 +173,7 @@ function FindProxyForURL(url, host) {{
   }}
 
   // DIRECT 优先级最高：plain host / localhost / private / bypass
-  if (isPlainHostName(h) || h === "localhost" || isPrivateHost(h)) return 'DIRECT';
+  if (isPlainHostName(h) || h === "localhost" || isPrivateHost(h) || strEndsWith(h, ".ts.net") || strEndsWith(h, ".local") || strEndsWith(h, ".internal")) return 'DIRECT';
   var bypass = [{bypass_list}];
   for (var j = 0; j < bypass.length; j++) {{
     var b = bypass[j].toLowerCase();

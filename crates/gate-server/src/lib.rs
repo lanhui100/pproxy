@@ -338,12 +338,15 @@ async fn handle_ws(
             return (StatusCode::PAYMENT_REQUIRED, HeaderMap::new(), "Payment Required: Quota Exceeded").into_response();
         }
 
-        // 检查并发活跃连接数：自包含普通租户并发宽松防护（单机突发上限放宽至 max_conns * 4，避免客户端连接池预热或并发探测被误判拦截）
-        let max_conns = c.max_conns.max(10) * 4;
-        let conns_entry = cfg.user_active_conns.entry(c.sub.clone()).or_insert(0);
-        if *conns_entry >= max_conns {
-            tracing::warn!(uid = %c.sub, conns = *conns_entry, max = max_conns, "User max concurrent connections reached -> 429");
-            return (StatusCode::TOO_MANY_REQUESTS, HeaderMap::new(), "Too Many Requests: Concurrent Connections Limit").into_response();
+        // 检查并发活跃连接数：管理员不限制并发；自包含普通租户并发宽松防护（单机突发上限放宽至 max_conns * 4）
+        let is_admin = c.role == "admin" || c.name == "admin" || c.name.starts_with("admin_");
+        if !is_admin {
+            let max_conns = c.max_conns.max(10) * 4;
+            let conns_entry = cfg.user_active_conns.entry(c.sub.clone()).or_insert(0);
+            if *conns_entry >= max_conns {
+                tracing::warn!(uid = %c.sub, conns = *conns_entry, max = max_conns, "User max concurrent connections reached -> 429");
+                return (StatusCode::TOO_MANY_REQUESTS, HeaderMap::new(), "Too Many Requests: Concurrent Connections Limit").into_response();
+            }
         }
     } else {
         // 回退单口令兼容模式

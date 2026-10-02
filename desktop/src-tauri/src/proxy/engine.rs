@@ -156,7 +156,14 @@ fn decide(host: &str, whitelist_snapshot: &[String], mode: pac::ProxyMode) -> Ro
     let norm = whitelist::normalize_host(host);
     // 防回环：本地与 Bypass 管理面强制 Direct
     let bypass_set = pac::collect_bypass_hosts();
-    if norm == "localhost" || norm == "127.0.0.1" || norm == "::1" || bypass_set.contains(&norm) {
+    if norm == "localhost"
+        || norm == "127.0.0.1"
+        || norm == "::1"
+        || norm.ends_with(".ts.net")
+        || norm.ends_with(".local")
+        || norm.ends_with(".internal")
+        || bypass_set.contains(&norm)
+    {
         return Route::Direct;
     }
     match mode {
