@@ -97,7 +97,34 @@ describe('buildMergedUsageChart', () => {
     expect(m.bars[2].bytes).toBe(5200)
     expect(m.bars[2].title).toContain('总用量: 5.1 KB')
     expect(m.bars[2].title).toContain('调用次数: 42 次')
+    expect(m.bars[2].title).toContain('CF: 30 次 · 3.9 KB')
+    expect(m.bars[2].title).toContain('Vercel: 12 次 · 1.2 KB')
     expect(m.baselineY).toBe(56) // 6 + (72 - 6 - 16)
+  })
+
+  it('支持全出口统计（含 VPS 与 Upstream）汇总与标题格式化', () => {
+    const days = [
+      {
+        date: '2026-08-27',
+        label: '27',
+        cfReq: 10,
+        vReq: 5,
+        cfBytes: 1000,
+        vBytes: 500,
+        rnReq: 20,
+        rnBytes: 3000,
+        upstreamReq: 2,
+        upstreamBytes: 500,
+      },
+    ]
+    const m = buildMergedUsageChart(days, 320, 72)
+    expect(m.bars.length).toBe(1)
+    expect(m.bars[0].bytes).toBe(5000)
+    expect(m.bars[0].reqs).toBe(37)
+    expect(m.bars[0].title).toContain('总用量: 4.9 KB')
+    expect(m.bars[0].title).toContain('调用次数: 37 次')
+    expect(m.bars[0].title).toContain('VPS: 20 次 · 2.9 KB')
+    expect(m.bars[0].title).toContain('Upstream: 2 次 · 500 B')
   })
 
   it('生成 24 小时维度模型，抽样 label 仅包含非空项', () => {

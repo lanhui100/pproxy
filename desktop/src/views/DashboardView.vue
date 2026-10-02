@@ -110,9 +110,13 @@ interface UsageDay {
   vReq: number
   cfBytes: number
   vBytes: number
+  rnReq?: number
+  rnBytes?: number
+  upstreamReq?: number
+  upstreamBytes?: number
 }
 
-/** 近 7 日双出口用量：缺勤日期补零保持 7 天 */
+/** 近 7 日双出口/全出口用量：缺勤日期补零保持 7 天 */
 const weekDays = computed<UsageDay[]>(() => {
   const days = traffic.value?.history ?? []
   const byDate = new Map(days.map((d) => [d.date, d]))
@@ -127,12 +131,16 @@ const weekDays = computed<UsageDay[]>(() => {
       vReq: d?.vercel.requests ?? 0,
       cfBytes: d ? bucketBytes(d.cf) : 0,
       vBytes: d ? bucketBytes(d.vercel) : 0,
+      rnReq: d?.rn?.requests ?? 0,
+      rnBytes: d ? bucketBytes(d.rn) : 0,
+      upstreamReq: d?.upstream?.requests ?? 0,
+      upstreamBytes: d ? bucketBytes(d.upstream) : 0,
     })
   }
   return list
 })
 
-/** 近 24 小时双出口用量：缺勤小时补零保持 24 根柱，抽样标轴 */
+/** 近 24 小时双出口/全出口用量：缺勤小时补零保持 24 根柱，抽样标轴 */
 const hourItems = computed<UsageDay[]>(() => {
   const hours = traffic.value?.hourly ?? []
   const byHour = new Map(hours.map((h) => [h.hour, h]))
@@ -157,6 +165,10 @@ const hourItems = computed<UsageDay[]>(() => {
       vReq: h?.vercel.requests ?? 0,
       cfBytes: h ? bucketBytes(h.cf) : 0,
       vBytes: h ? bucketBytes(h.vercel) : 0,
+      rnReq: h?.rn?.requests ?? 0,
+      rnBytes: h ? bucketBytes(h.rn) : 0,
+      upstreamReq: h?.upstream?.requests ?? 0,
+      upstreamBytes: h ? bucketBytes(h.upstream) : 0,
     })
   }
   return list
@@ -329,10 +341,12 @@ async function refreshTraffic(): Promise<void> {
     const totalUp =
       (stats.total.cf?.bytes_up ?? 0) +
       (stats.total.vercel?.bytes_up ?? 0) +
+      (stats.total.rn?.bytes_up ?? 0) +
       (stats.total.upstream?.bytes_up ?? 0)
     const totalDown =
       (stats.total.cf?.bytes_down ?? 0) +
       (stats.total.vercel?.bytes_down ?? 0) +
+      (stats.total.rn?.bytes_down ?? 0) +
       (stats.total.upstream?.bytes_down ?? 0)
 
     if (prevTotals.value && isRunning.value) {

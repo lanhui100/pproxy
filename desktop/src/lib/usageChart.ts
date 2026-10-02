@@ -96,11 +96,24 @@ export interface MergedUsageChartModel {
   maxBytes: number
 }
 
+export interface MergedUsageItem {
+  date: string
+  label: string
+  cfReq: number
+  vReq: number
+  cfBytes: number
+  vBytes: number
+  rnReq?: number
+  rnBytes?: number
+  upstreamReq?: number
+  upstreamBytes?: number
+}
+
 /**
  * 构建极简单柱（经典 CF 橙黄色）用量图模型（支持 7 日与 24 小时等不同维度）
  */
 export function buildMergedUsageChart(
-  items: { date: string; label: string; cfReq: number; vReq: number; cfBytes: number; vBytes: number }[],
+  items: MergedUsageItem[],
   W = 320,
   H = 72,
 ): MergedUsageChartModel {
@@ -111,8 +124,8 @@ export function buildMergedUsageChart(
 
   const totals = items.map((d) => ({
     ...d,
-    totalBytes: d.cfBytes + d.vBytes,
-    totalReqs: d.cfReq + d.vReq,
+    totalBytes: d.cfBytes + d.vBytes + (d.rnBytes ?? 0) + (d.upstreamBytes ?? 0),
+    totalReqs: d.cfReq + d.vReq + (d.rnReq ?? 0) + (d.upstreamReq ?? 0),
   }))
 
   const maxBytes = Math.max(1, ...totals.map((d) => d.totalBytes))
@@ -135,6 +148,13 @@ export function buildMergedUsageChart(
 
     const barH = d.totalBytes > 0 ? Math.max(2, (d.totalBytes / maxBytes) * ph) : 0
 
+    const details: string[] = []
+    if (d.cfReq > 0 || d.cfBytes > 0) details.push(`CF: ${d.cfReq} 次 · ${formatBytes(d.cfBytes)}`)
+    if (d.vReq > 0 || d.vBytes > 0) details.push(`Vercel: ${d.vReq} 次 · ${formatBytes(d.vBytes)}`)
+    if ((d.rnReq ?? 0) > 0 || (d.rnBytes ?? 0) > 0) details.push(`VPS: ${d.rnReq ?? 0} 次 · ${formatBytes(d.rnBytes ?? 0)}`)
+    if ((d.upstreamReq ?? 0) > 0 || (d.upstreamBytes ?? 0) > 0) details.push(`Upstream: ${d.upstreamReq ?? 0} 次 · ${formatBytes(d.upstreamBytes ?? 0)}`)
+    const detailStr = details.length > 0 ? ` (${details.join(' · ')})` : ''
+
     bars.push({
       x: barX,
       y: baselineY - barH,
@@ -142,7 +162,7 @@ export function buildMergedUsageChart(
       h: barH,
       bytes: d.totalBytes,
       reqs: d.totalReqs,
-      title: `${d.date}\n总用量: ${formatBytes(d.totalBytes)}\n调用次数: ${d.totalReqs} 次 (CF: ${d.cfReq} · Vercel: ${d.vReq})`,
+      title: `${d.date}\n总用量: ${formatBytes(d.totalBytes)}\n调用次数: ${d.totalReqs} 次${detailStr}`,
     })
 
     // 对于 7 天模式，最后一项默认显示“今天”；对于 24 小时模式，最后一项若无 label 则显示“现在”；空 label 则跳过
