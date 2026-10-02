@@ -536,3 +536,33 @@ curl -s -w "\nHTTP_CODE: %{http_code}\n" http://127.0.0.1:8899/
 # 3. 重启恢复主服务
 sudo systemctl restart pproxy
 ```
+
+---
+
+## 开源发布前脱敏规范与检查清单
+
+本项目为开源项目，为了保障在公开发布/开源打包时不泄露内部基础设施信息，同时在本地开发中保留真实的节点拓扑与排障日志记忆，采用**“本地工作区保留真实记忆，发布打包阶段自动化脱敏”**的策略（参见 ADR `.agents/notes/implemented/process/2026-10-01-open-source-sanitization-strategy.md`）。
+
+### 1. 标准映射规范
+
+| 资产类别 | 本地真实记忆 | 开源发布标准映射 | 规范说明 |
+| :--- | :--- | :--- | :--- |
+| **Tailscale 节点 IP** | `100.95.193.103` / `100.105.241.39` 等 | `100.64.0.1` / `100.64.0.2` 等 | RFC 6598 共享 CGNAT 地址段 |
+| **VPS 公网出口 IP** | `192.210.231.8` | `198.51.100.8` | RFC 5737 TEST-NET-2 文档专用测试 IP |
+| **内部中继/Gate 域名** | `*.ponygo.fun` | `*.example.com` | RFC 2606 保留示例域名 |
+
+### 2. 发布前检查与脱敏操作
+
+在执行 `git push` 至开源公开远程仓库、或打包 Release 资产前，执行以下步骤：
+
+```bash
+# 步骤 1：只读扫描检查（检查是否存在未脱敏的内部 IP 或域名）
+python3 scripts/sanitize-for-release.py --check
+
+# 步骤 2：若准备打 Release 分支或发布包，一键导出纯净脱敏副本
+python3 scripts/sanitize-for-release.py --export-dir /tmp/pproxy-release
+
+# 或在发布分支上执行原地脱敏（注意：请勿直接在开发主分支 main 上就地覆盖提交）
+python3 scripts/sanitize-for-release.py --in-place
+```
+
