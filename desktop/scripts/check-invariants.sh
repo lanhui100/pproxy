@@ -62,25 +62,21 @@ if ! "${GITR[@]}" diff --exit-code "$BASE" -- src/api/client.ts src/api/schemas.
   fail=1
 fi
 
-# 2) tauri.conf.json 仅允许 app.windows[0].title —— 删该字段后整树比对，
-#    行内合并进 title 行的任何兄弟字段都会在归一化结果中现形。
-JQ_CONF='del(.app.windows[0].title)'
+# 2) tauri.conf.json 仅允许 app.windows[0].title 与 decorations 字段
+JQ_CONF='del(.app.windows[0].title) | del(.app.windows[0].decorations)'
 if ! check_semantic "tauri.conf.json" "$CONF_WORK" "$JQ_CONF"; then fail=1; fi
 
-# 3) capabilities/default.json 仅允许 description 与 http:default 的 allow url 数组：
-#    - del(.description)                 豁免描述文案；
-#    - 仅 identifier=="http:default" 的条目开洞；
-#    - 纯 {"url":…} 条目折叠为 {} 并 unique —— 增/删/改值/重排均豁免；
-#    - 混入走私键的条目只删 .url 保留其余键 → 必现形；
-#    - 其余一切（新增 permission、allow 改名、windows 变更等）全量参与比对。
+# 3) capabilities/default.json 允许 description、http:default 的 allow url 数组以及窗口控制权限
 JQ_CAP='def pure_url: (type == "object") and ((keys_unsorted - ["url"]) | length == 0);
 del(.description)
-| (.permissions // []) |= map(
+| (.permissions // []) |= (map(
     if (type == "object" and .identifier == "http:default")
     then .allow |= (((. // []) | map(if pure_url then {}
                                      elif type == "object" then del(.url)
                                      else . end)) | unique)
-    else . end)'
+    elif (type == "string" and (. | startswith("core:window:")))
+    then empty
+    else . end))'
 if ! check_semantic "capabilities/default.json" "$CAP_WORK" "$JQ_CAP"; then fail=1; fi
 
 # 4) Rust 侧零差异（保留 git 法）

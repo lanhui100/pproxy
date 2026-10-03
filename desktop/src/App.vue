@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import { Gauge, Settings } from '@lucide/vue'
 
 import ToastHost from '@/components/common/ToastHost.vue'
+import TitleBar from '@/components/common/TitleBar.vue'
 import { checkForUpdate, updateAvailable } from '@/composables/useUpdater'
 import { isConfigured, refreshAppConfigured } from '@/composables/useAppConfig'
 import { isTauri } from '@/lib/config'
@@ -47,40 +48,44 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex h-screen">
-    <nav v-if="isConfigured" class="w-52 shrink-0 bg-card p-3">
-      <div class="mb-5 px-2.5">
-        <p class="text-sm font-semibold tracking-tight">Pony Proxy</p>
-        <p class="mt-0.5 text-xs text-muted-foreground">个人代理网关</p>
-      </div>
-      <RouterLink
-        v-for="item in nav"
-        :key="item.to"
-        :to="item.to"
-        class="mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors duration-150"
-        :class="
-          isActive(item.to)
-            ? 'bg-accent font-medium text-foreground'
-            : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
-        "
+  <div class="flex flex-col h-screen overflow-hidden">
+    <!-- 桌面端原生窗口毛玻璃自定义标题栏 -->
+    <TitleBar />
+    <div class="flex flex-1 min-h-0">
+      <nav v-if="isConfigured" class="w-52 shrink-0 bg-card p-3">
+        <div class="mb-5 px-2.5">
+          <p class="text-sm font-semibold tracking-tight">Pony Proxy</p>
+          <p class="mt-0.5 text-xs text-muted-foreground">个人代理网关</p>
+        </div>
+        <RouterLink
+          v-for="item in nav"
+          :key="item.to"
+          :to="item.to"
+          class="mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors duration-150"
+          :class="
+            isActive(item.to)
+              ? 'bg-accent font-medium text-foreground'
+              : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'
+          "
+        >
+          <component :is="item.icon" class="size-4 shrink-0" />
+          <span class="truncate">{{ item.label }}</span>
+          <span
+            v-if="item.badge === 'update' && updateAvailable"
+            class="ml-auto size-2 shrink-0 rounded-full bg-red-500"
+            title="有新版本"
+          />
+        </RouterLink>
+      </nav>
+      <main
+        class="flex-1 overflow-auto"
+        :class="isConfigured ? 'p-6 lg:p-8' : 'p-0 flex items-center justify-center'"
       >
-        <component :is="item.icon" class="size-4 shrink-0" />
-        <span class="truncate">{{ item.label }}</span>
-        <span
-          v-if="item.badge === 'update' && updateAvailable"
-          class="ml-auto size-2 shrink-0 rounded-full bg-red-500"
-          title="有新版本"
-        />
-      </RouterLink>
-    </nav>
-    <main
-      class="flex-1 overflow-auto"
-      :class="isConfigured ? 'p-6 lg:p-8' : 'p-0 flex items-center justify-center'"
-    >
-      <div :class="isConfigured ? 'mx-auto max-w-4xl' : 'w-full h-full flex flex-col justify-center'">
-        <RouterView />
-      </div>
-    </main>
+        <div :class="isConfigured ? 'mx-auto max-w-4xl' : 'w-full h-full flex flex-col justify-center'">
+          <RouterView />
+        </div>
+      </main>
+    </div>
   </div>
   <!-- 全局 toast 层：仅挂载一次 -->
   <ToastHost />

@@ -73,7 +73,7 @@ async function copyError(id: number, text: string): Promise<void> {
       <div
         v-for="t in toasts"
         :key="t.id"
-        class="toast-frosted-card pointer-events-auto flex w-[min(calc(100vw-3rem),21rem)] min-h-[5.25rem] items-start gap-3 rounded-xl p-3.5 select-none bg-neutral-200/95 text-neutral-900 dark:bg-neutral-900/95 dark:text-neutral-100 backdrop-blur-xl border border-neutral-300/60 dark:border-neutral-700/60"
+        class="toast-frosted-card pointer-events-auto flex w-[min(calc(100vw-3rem),21rem)] min-h-[5.25rem] items-start gap-3 rounded-xl p-3.5 select-none bg-neutral-100/75 text-neutral-900 dark:bg-neutral-900/75 dark:text-neutral-100 backdrop-blur-2xl border border-neutral-300/50 dark:border-neutral-700/50 shadow-lg shadow-black/5 dark:shadow-black/20"
       >
         <!-- 语义图标（仅此处使用语义色彩） -->
         <component
@@ -139,7 +139,7 @@ async function copyError(id: number, text: string): Promise<void> {
  * 同时在 class 与 scoped style 提供双重兜底保证 WebView2 兼容
  */
 .toast-frosted-card {
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
-  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
 }
 </style>
