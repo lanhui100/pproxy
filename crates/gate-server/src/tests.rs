@@ -69,4 +69,50 @@ mod tests {
         let json_over: serde_json::Value = serde_json::from_slice(&body_over).unwrap();
         assert_eq!(json_over["user"]["status"], "quota_exceeded");
     }
+
+    #[tokio::test]
+    async fn test_admin_token_ignores_quota_limit() {
+        let (signer, vk) = TokenSigner::generate();
+        let verifier = Arc::new(pproxy_core::TokenVerifier::new(vk));
+        let active_conns = Arc::new(dashmap::DashMap::new());
+        let used_bytes = Arc::new(dashmap::DashMap::new());
+
+        let cfg = Arc::new(ServerConfig {
+            tunnel_token_hash: "".into(),
+            proxy_secret: "sec".into(),
+            client: reqwest::Client::new(),
+            verifier: Some(verifier),
+            user_active_conns: active_conns.clone(),
+            user_used_bytes: used_bytes.clone(),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: "test-admin".into(),
+        });
+
+        let app = build_router(cfg.clone());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let claims = UserTokenClaims {
+            jti: "jti-admin".into(),
+            sub: "usr_admin".into(),
+            name: "admin".into(),
+            quota_bytes: 1,
+            lease_bytes: 1,
+            exp: now + 3600,
+            iat: now,
+            max_conns: 3,
+            role: "admin".into(),
+        };
+        let token = signer.sign_token(&claims).unwrap();
+        used_bytes.insert("usr_admin".into(), std::sync::atomic::AtomicU64::new(u64::MAX));
+
+        let req = Request::builder()
+            .uri("/api/user/profile")
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["user"]["status"], "active");
+    }
 }

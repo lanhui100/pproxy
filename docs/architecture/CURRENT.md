@@ -73,8 +73,8 @@
 
 ### 5. 多租户 Ed25519 自包含 User Token 验签与流式双向熔断协同 (402 / 4402)
 1. **自包含非对称凭据**：多租户令牌基于 Ed25519 签名，载荷自包含 `jti`（唯一标识）、`sub`（租户 UID）、`quota_bytes`（总周期配额）、`exp`/`iat`（生命周期）及 `max_conns`（并发连接数）。私钥保留在管理签发端，所有出海节点仅持公钥即可完成独立毫秒级验签。
-2. **握手阶段配额门禁 (HTTP 402)**：客户端发起连接或 WebSocket 握手时，出海网关验签 Claims 并核对内存计数器 `user_used_bytes`。若当前已用字节达到或超出 `quota_bytes`，直接返回 `HTTP 402 Payment Required` 拒绝建连；并发连接数达到 `max_conns` 时返回 `HTTP 429 Too Many Requests`，通过原子槽位预占防止并发突发穿越。
-3. **流式传输阶段双向实时熔断 (WS 4402)**：在已建立的出海隧道内，网关实时并发统计上行 (`ws_to_tcp`) 与下行 (`tcp_to_ws`) 传输字节，并原子累加至租户用量。一旦任一传输方向导致累计用量达到或突破配额限制，网关立即触发取消信号中断底层 TCP 连接，并向客户端推送携带 Code `4402`（Reason: `"Quota Exceeded"`）的标准 WebSocket CloseFrame 帧，实现连接双向秒级硬切断。
+2. **握手阶段配额门禁 (HTTP 402)**：客户端发起连接或 WebSocket 握手时，出海网关验签 Claims 并核对内存计数器 `user_used_bytes`。若当前已用字节达到或超出 `quota_bytes`，直接返回 `HTTP 402 Payment Required` 拒绝建连；并发连接数达到 `max_conns` 时返回 `HTTP 429 Too Many Requests`，通过原子槽位预占防止并发突发穿越。`role=admin`/`name=admin*` 的管理员 Token 豁免字节配额与流式 4402，仅保留普通并发之外的基本防护。
+3. **流式传输阶段双向实时熔断 (WS 4402)**：在已建立的出海隧道内，网关实时并发统计上行 (`ws_to_tcp`) 与下行 (`tcp_to_ws`) 传输字节，并原子累加至租户用量。一旦任一传输方向导致累计用量达到或突破配额限制，网关立即触发取消信号中断底层 TCP 连接，并向客户端推送携带 Code `4402`（Reason: `"Quota Exceeded"`）的标准 WebSocket CloseFrame 帧，实现连接双向秒级硬切断。管理员 Token 无字节配额上限，不进入该熔断。
 
 ### 6. 本机回环免认证与安全硬化 (Anti-XFF 穿透)
 1. **纯净回环放行判定**：当且仅当客户端物理连接来源为回环网络（IPv4 `127.0.0.1` 或 IPv6 `::1`），且请求头中**完全不存在**任何代理转发标记（严格匹配 `X-Forwarded-For`、`X-Real-IP`、`Forwarded`）时，系统视为本机受信进程发起，直接免认证放行。

@@ -245,7 +245,7 @@ async fn handle_user_profile(
                     "user": {
                         "sub": claims.sub,
                         "name": claims.name,
-                        "status": if used >= claims.quota_bytes { "quota_exceeded" } else { "active" },
+                        "status": if quota_limit(&claims).is_some_and(|quota| used >= quota) { "quota_exceeded" } else { "active" },
                         "quota_bytes": claims.quota_bytes,
                         "used_bytes": used,
                         "expire_at": claims.exp,
@@ -283,6 +283,18 @@ async fn handle_debug(State(cfg): State<Arc<ServerConfig>>) -> impl IntoResponse
         [("content-type", "application/json")],
         body.to_string(),
     )
+}
+
+fn is_admin_claims(c: &pproxy_core::UserTokenClaims) -> bool {
+    c.role == "admin" || c.name == "admin" || c.name.starts_with("admin_")
+}
+
+fn quota_limit(c: &pproxy_core::UserTokenClaims) -> Option<u64> {
+    if is_admin_claims(c) {
+        None
+    } else {
+        Some(c.quota_bytes)
+    }
 }
 
 async fn handle_ws(
@@ -327,19 +339,21 @@ async fn handle_ws(
 
     // 2. 如果是多租户 Token，检查租约配额与并发（安全审查加固 SEC-P1-01：原子自增预占，堵死 TOCTOU 竞态）
     if let Some(ref c) = claims {
-        // 检查累计配额是否超额
-        let used = cfg.user_used_bytes
-            .entry(c.sub.clone())
-            .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
-            .load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(quota) = quota_limit(c) {
+            // 检查累计配额是否超额
+            let used = cfg.user_used_bytes
+                .entry(c.sub.clone())
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+                .load(std::sync::atomic::Ordering::Relaxed);
 
-        if used >= c.quota_bytes {
-            tracing::warn!(uid = %c.sub, used = used, quota = c.quota_bytes, "User quota exceeded -> 402");
-            return (StatusCode::PAYMENT_REQUIRED, HeaderMap::new(), "Payment Required: Quota Exceeded").into_response();
+            if used >= quota {
+                tracing::warn!(uid = %c.sub, used = used, quota = quota, "User quota exceeded -> 402");
+                return (StatusCode::PAYMENT_REQUIRED, HeaderMap::new(), "Payment Required: Quota Exceeded").into_response();
+            }
         }
 
         // 检查并发活跃连接数：管理员不限制并发；自包含普通租户并发宽松防护（单机突发上限放宽至 max_conns * 4）
-        let is_admin = c.role == "admin" || c.name == "admin" || c.name.starts_with("admin_");
+        let is_admin = is_admin_claims(c);
         if !is_admin {
             let max_conns = c.max_conns.max(10) * 4;
             let conns_entry = cfg.user_active_conns.entry(c.sub.clone()).or_insert(0);
@@ -450,7 +464,7 @@ async fn handle_ws_socket(
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
     let uid_up = claims.as_ref().map(|c| c.sub.clone());
-    let quota_up = claims.as_ref().map(|c| c.quota_bytes);
+    let quota_up = claims.as_ref().and_then(quota_limit);
     let bytes_map_up = cfg.user_used_bytes.clone();
 
     // 审查修复（P0）：使用 CancellationToken 协调双向流式熔断，任一侧超额立即通知另一侧中止
@@ -497,7 +511,7 @@ async fn handle_ws_socket(
     };
 
     let uid_down = claims.as_ref().map(|c| c.sub.clone());
-    let quota_down = claims.as_ref().map(|c| c.quota_bytes);
+    let quota_down = claims.as_ref().and_then(quota_limit);
     let bytes_map_down = cfg.user_used_bytes.clone();
 
     let tcp_to_ws = async move {
