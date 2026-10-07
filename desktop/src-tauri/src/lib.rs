@@ -202,7 +202,7 @@ pub fn run() {
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
       proxy_traffic_stats, proxy_test_egress, proxy_test_site_via, proxy_test_site_local,
       proxy_clash_config_get, proxy_clash_export,
-      proxy_cluster_nodes_get,
+      proxy_cluster_nodes_get, proxy_user_profile,
       open_external_url, proxy_prepare_update_exit, proxy_open_log_dir,
     ])
     .build(ctx)
@@ -871,6 +871,68 @@ fn proxy_tunnel_get() -> serde_json::Value {
     "data_dir_tmp_fallback": data_dir_tmp_fallback(),
     "user_claims": user_claims,
   })
+}
+
+#[tauri::command]
+async fn proxy_user_profile() -> serde_json::Value {
+  let detail = cred_detail_impl(CREDENTIAL_USER_TUNNEL).unwrap_or_default();
+  let Some(token) = detail.value.as_deref().filter(|s| !s.trim().is_empty()) else {
+    return serde_json::json!({ "ok": false, "error": "missing token" });
+  };
+  let token = token.trim();
+  if !token.starts_with("usr_live_") {
+    return serde_json::json!({ "ok": false, "error": "not a user token" });
+  }
+
+  let (eff_url, _) = tunnel_config_load();
+  let gate_urls = eff_url.unwrap_or_else(|| DEFAULT_TUNNEL_URLS.to_string());
+
+  for raw_url in gate_urls.split(';') {
+    let raw_url = raw_url.trim();
+    if raw_url.is_empty() { continue; }
+    let http_base = if raw_url.starts_with("wss://") {
+      raw_url.replacen("wss://", "https://", 1)
+    } else if raw_url.starts_with("ws://") {
+      raw_url.replacen("ws://", "http://", 1)
+    } else {
+      continue;
+    };
+    let base = match url::Url::parse(&http_base) {
+      Ok(u) => {
+        let host = u.host_str().unwrap_or_default();
+        let port_str = u.port().map(|p| format!(":{}", p)).unwrap_or_default();
+        format!("{}://{}{}", u.scheme(), host, port_str)
+      }
+      Err(_) => continue,
+    };
+
+    let profile_url = format!("{}/api/user/profile", base);
+    let client = reqwest::Client::builder()
+      .timeout(std::time::Duration::from_secs(3))
+      .build();
+    let Ok(client) = client else { continue; };
+
+    if let Ok(resp) = client.get(&profile_url)
+      .header("Authorization", format!("Bearer {}", token))
+      .send()
+      .await
+    {
+      if resp.status().is_success() {
+        if let Ok(json) = resp.json::<serde_json::Value>().await {
+          if json.get("code").and_then(|c| c.as_i64()) == Some(0) {
+            if let Some(user) = json.get("user") {
+              return serde_json::json!({
+                "ok": true,
+                "profile": user,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  serde_json::json!({ "ok": false, "error": "failed to query profile from gateway" })
 }
 #[tauri::command]
 fn proxy_tunnel_set_url(url: String) -> Result<(), String> {
@@ -2014,6 +2076,7 @@ async fn proxy_test_site_local(host: String) -> Result<serde_json::Value, String
             "iface": "local",
             "ok": false,
             "ms": 0,
+            "status": "not_running",
             "error": "代理未启用：请先打开系统代理总开关",
         }));
     }

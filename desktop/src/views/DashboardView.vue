@@ -208,31 +208,40 @@ const totalBytes = computed(() => {
 // ---- 出口R (VPS) 专属流量监控指标 (每月 500GB 额度) ----
 const VPS_MONTHLY_LIMIT_BYTES = 500 * 1024 * 1024 * 1024 // 500 GB
 
-function getUserStorageKey(sub: string): string {
-  return `pony-user-base-bytes:${sub}`
+// ---- 服务端权威租户额度 Profile（ADR 2026-10-03：废除全机物理流量假基线） ----
+interface ServerUserProfile {
+  sub: string
+  name: string
+  status: string
+  quota_bytes: number
+  used_bytes: number
+  expire_at: number
+  days_left: number
+  max_conns: number
 }
+const serverUserProfile = ref<ServerUserProfile | null>(null)
 
-function getUserBaselineBytes(sub: string, currentTotal: number): number {
-  if (typeof localStorage === 'undefined') return 0
-  const k = getUserStorageKey(sub)
-  const saved = localStorage.getItem(k)
-  if (saved !== null) {
-    const num = Number(saved)
-    return isNaN(num) ? 0 : num
+async function refreshUserProfile(): Promise<void> {
+  if (!isTauri() || !userClaims.value) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const res = (await invoke('proxy_user_profile')) as { ok: boolean; profile?: ServerUserProfile }
+    if (res && res.ok && res.profile) {
+      serverUserProfile.value = res.profile
+    }
+  } catch (e) {
+    console.debug('Failed to query user profile from gateway:', e)
   }
-  // 初次接入该用户时，记录当前机器已产生的 total 作为此用户的起始基线
-  localStorage.setItem(k, String(currentTotal))
-  return currentTotal
 }
 
 const userQuotaDisplay = computed(() => {
   if (!userClaims.value) return null
   const quota = userClaims.value.quota_bytes
-  const currentTotal = totalBytes.value
-  const baseline = getUserBaselineBytes(userClaims.value.sub, currentTotal)
-  const used = Math.max(0, currentTotal - baseline)
+  // 真相源：优先消费服务端网关实际累计的 used_bytes，未获取到时安全兜底 0，杜绝全机流量污染
+  const used = serverUserProfile.value?.used_bytes ?? 0
   const pct = quota > 0 ? Math.min(100, Math.max(0, (used / quota) * 100)) : 0
   const expDate = new Date(userClaims.value.exp * 1000)
+  const isQuotaExceeded = serverUserProfile.value?.status === 'quota_exceeded' || (quota > 0 && used >= quota)
   return {
     sub: userClaims.value.sub,
     name: userClaims.value.name || userClaims.value.sub,
@@ -242,6 +251,7 @@ const userQuotaDisplay = computed(() => {
     percent: pct.toFixed(1),
     expStr: expDate.toLocaleDateString(),
     isExpired: Date.now() > userClaims.value.exp * 1000,
+    isQuotaExceeded,
   }
 })
 
@@ -403,16 +413,19 @@ const userProxyRow = ref<IfaceRow>({
 async function testUserProxyRow(): Promise<void> {
   if (userProxyRow.value.testing) return
   if (!isRunning.value) {
-    // 代理未开启时无需发起探测
+    // 代理未开启时无需发起探测，保持待命状态
     return
   }
   userProxyRow.value.testing = true
   try {
     const point = await probeSite('google.com')
+    if (point.err?.includes('代理未启用')) return
     userProxyRow.value.history = appendLatencyPoint(userProxyRow.value.history, point)
     saveLatencySeries('iface:user_proxy', userProxyRow.value.history)
   } catch (e) {
-    userProxyRow.value.history = appendLatencyPoint(userProxyRow.value.history, { ts: Date.now(), ok: false, err: String(e) })
+    const errStr = String(e)
+    if (errStr.includes('代理未启用')) return
+    userProxyRow.value.history = appendLatencyPoint(userProxyRow.value.history, { ts: Date.now(), ok: false, err: errStr })
     saveLatencySeries('iface:user_proxy', userProxyRow.value.history)
   } finally {
     userProxyRow.value.testing = false
@@ -459,6 +472,11 @@ function loadAllHistories(): void {
   for (const row of ifaceRows.value) {
     row.history = loadLatencySeries(`iface:${row.id}`)
   }
+  // 清洗 userProxyRow 的假失败点
+  let userProxyHist = loadLatencySeries('iface:user_proxy')
+  userProxyHist = userProxyHist.filter((p) => !p.err?.includes('代理未启用'))
+  userProxyRow.value.history = userProxyHist
+
   for (const row of siteRows.value) {
     // P2-5：站点测速改为经本地引擎（引擎自动选出口），不再持久化用户手动 C/V 选择；
     // 兼容读取旧版按出口存储的时序数据（迁移到统一 site:host 键）。
@@ -574,10 +592,13 @@ function latestText(history: LatencyPoint[]): string {
 }
 
 function latestTooltip(history: LatencyPoint[]): string {
-  if (!isRunning.value) return '加速已停用'
+  if (!isRunning.value) return '加速已停用，开启后自动测速'
   const p = latestPoint(history)
   if (!p) return '暂无测速记录'
-  if (!p.ok) return p.err ? `测速失败原因: ${p.err}` : '测速失败（网络或服务端连接被拒绝）'
+  if (!p.ok) {
+    if (p.err?.includes('代理未启用')) return '加速已停用，开启后自动测速'
+    return p.err ? `测速失败原因: ${p.err}` : '测速失败（网络或服务端连接被拒绝）'
+  }
   return `延迟: ${p.ms ?? 0}ms`
 }
 
@@ -674,6 +695,9 @@ async function refreshStatus() {
 
     const tunnel = await loadTunnelConfig()
     userClaims.value = tunnel.userClaims ?? null
+    if (userClaims.value) {
+      void refreshUserProfile()
+    }
     if (isAdmin.value) {
       void refreshClusterNodes()
     }
@@ -1161,6 +1185,7 @@ async function submitImportOrChained() {
               <span class="flex items-center gap-1">
                 <span>用户配额 ({{ userQuotaDisplay.name }})</span>
                 <span v-if="userQuotaDisplay.isExpired" class="text-rose-500 font-medium">已过期</span>
+                <span v-else-if="userQuotaDisplay.isQuotaExceeded" class="text-rose-500 font-medium">额度已耗尽</span>
               </span>
               <span class="font-mono tabular-nums">
                 {{ formatBytes(userQuotaDisplay.usedBytes) }} / {{ formatBytes(userQuotaDisplay.quotaBytes) }}
