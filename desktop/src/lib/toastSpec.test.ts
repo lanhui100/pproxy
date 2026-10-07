@@ -28,10 +28,12 @@ describe('Toast Component & UX Specification', () => {
     expect(content).toMatch(/w-\[min\(calc\(100vw-3rem\),(19|20|21|22)rem\)\]/)
   })
 
-  it('adopts frosted glass and rounded card container', () => {
+  it('adopts frosted glass, borderless design and rounded card container', () => {
     const content = readFileSync(toastHostPath, 'utf-8')
     // 毛玻璃特性：backdrop-blur 或 backdrop-filter
     expect(content).toMatch(/backdrop-blur|backdrop-filter/)
+    // 无边框设计
+    expect(content).toContain('border-0')
     // 圆角卡片
     expect(content).toMatch(/rounded-(lg|xl)\s/)
   })
