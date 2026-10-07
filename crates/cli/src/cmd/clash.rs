@@ -105,6 +105,8 @@ proxies:
 rules:
   # 1. 服务端公网与局域网直连保护（审查修复 P0-2：置顶优先，加 no-resolve 避免反向解析延迟）
   - DOMAIN-SUFFIX,ponygo.fun,DIRECT
+  - DOMAIN-SUFFIX,ponyjob.top,DIRECT
+  - DOMAIN-SUFFIX,searchxai.cn,DIRECT
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
   - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve

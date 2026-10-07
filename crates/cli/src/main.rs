@@ -286,6 +286,9 @@ enum UserCmd {
         /// 商业化自包含令牌：最大并发连接数（默认 3）
         #[arg(long, short = 'c', default_value = "3")]
         max_conns: usize,
+        /// 签发的令牌角色为管理员（默认普通用户；仅凭此标志判定，不按用户名前缀推断）
+        #[arg(long)]
+        admin: bool,
     },
     /// 生成/初始化集群签名私钥与公钥
     Keygen,
@@ -677,8 +680,8 @@ fn run(cli: Cli) -> Result<i32, RunError> {
     // 2. user 用户管理
     if let Command::User { cmd } = &cli.command {
         return match cmd {
-            UserCmd::Add { username, password, expires_days, quota, max_conns } => {
-                cmd::user::add(username, password.as_deref(), *expires_days, quota.as_deref(), *max_conns).map_err(RunError::Msg)
+            UserCmd::Add { username, password, expires_days, quota, max_conns, admin } => {
+                cmd::user::add(username, password.as_deref(), *expires_days, quota.as_deref(), *max_conns, *admin).map_err(RunError::Msg)
             }
             UserCmd::Keygen => cmd::user::keygen().map_err(RunError::Msg),
             UserCmd::List => cmd::user::list().map_err(RunError::Msg),

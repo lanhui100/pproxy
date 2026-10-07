@@ -81,6 +81,7 @@ pub fn add(
     expires_days: Option<u32>,
     quota_str: Option<&str>,
     max_conns: usize,
+    is_admin: bool,
 ) -> Result<i32, String> {
     if let Some(qs) = quota_str {
         let quota_bytes = parse_quota_bytes(qs)?;
@@ -130,7 +131,9 @@ pub fn add(
         };
 
         let jti = format!("tok-{}", hex::encode(rand::random::<[u8; 8]>()));
-        let role = if username == "admin" || username.starts_with("admin_") {
+        // ADR 2026-10-03：角色仅由显式 --admin 标志判定，废除用户名前缀推断
+        //（否则任意普通租户把 username 填成 admin_xxx 即自动豁免配额熔断）
+        let role = if is_admin {
             "admin".to_string()
         } else {
             "user".to_string()

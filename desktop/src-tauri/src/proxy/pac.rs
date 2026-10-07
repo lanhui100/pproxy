@@ -59,6 +59,10 @@ pub fn collect_bypass_hosts() -> BTreeSet<String> {
         set.insert("access.ponygo.fun".to_string());
         set.insert("access.example.com".to_string());
     }
+    // 4. 核心服务端域名强保直连（防止 PAC 全局模式下绕行海外代理导致延迟与断联）
+    set.insert("ponyjob.top".to_string());
+    set.insert("ponygo.fun".to_string());
+    set.insert("searchxai.cn".to_string());
     set
 }
 

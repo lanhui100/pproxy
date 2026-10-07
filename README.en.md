@@ -109,6 +109,9 @@ pproxy user keygen
 # Issue a self-contained tenant token offline (supports 50G/100M, client displays quota and concurrency limits)
 pproxy user add alice -q 50G -d 30 -c 3
 
+# Issue an administrator token (explicit --admin flag exemptions from byte quota limit)
+pproxy user add admin_ops -q 100G -d 365 --admin
+
 # Revoke a token or user (added to blacklist with real-time hot-reloading across gateway nodes)
 pproxy user revoke usr_alice
 # Or revoke a specific token ID

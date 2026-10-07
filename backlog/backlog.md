@@ -134,14 +134,13 @@
 - 唯一可行替代：海外 VPS 跑轻量 TCP 中继（Vercel 无 TCP 能力，不可行）
 - 触发条件：CF 故障频发 / 单点依赖成为实际痛点
 
-### B005 — 跨节点配额/用量一致性（信用租约） #F-01 #F-02
-- 现象：gate-server 用量为单机内存 DashMap；多节点并发可放大配额（无界透支）
-- 子项：#F-01 用量 Gossip 同步；#F-02 单用户 max_conns 跨节点穿透
-- 方案：令牌 lease_bytes 单节点切片放行 → 增量用量 Gossip → 402 截断；
-  并发用 UID 哈希锚点/接入点亲和性
-- 验收：同令牌两节点各耗 5G（总额 8G），第二节点用量达 8G 返回 402；
-  合计在线连接 >3 时第 4 条返回 429
-- 关联：docs/product/specs/distributed-commercialization/FOLLOW-UPS.md #F-01/#F-02
+### B005 — 跨节点配额/用量一致性（信用租约与唯一真相源） #F-01 #F-02 📋 方案已出（proposed ADR）
+- 现象：gate-server 用量为单机内存 DashMap（重启清零）；桌面端误将全机流量增量归算单租户；多节点并发无界透支
+- 子项：#F-01 信用租约切片与服务端持久化；#F-02 单用户 max_conns 槽位管控；桌面端废除 baseline 改读 /api/user/profile
+- 方案：服务端 user_usage 绝对水位持久化 + 租约切片原子预占放行 + 双向合计明确口径与熔断回滚；桌面端直接消费 profile 权威值
+- 前置阻断（对抗审核收紧）：①租约申请失败分级降级；②SQLite 单写者队列化防死锁；③TCP CONNECT/WS 全入口统一度量；④revoke 签名 tombstone；⑤admin 严格基于 role 豁免
+- 验收：同令牌两节点各耗 5G（总额 8G），第二节点用量达 8G 返回 402；网关重启后用量不丢；桌面端与 profile 数据一致
+- 关联：ADR proposed/architecture/2026-10-03-distributed-quota-credit-leases-and-metering；docs/product/specs/distributed-commercialization/FOLLOW-UPS.md #F-01/#F-02
 
 ### B006 — 撤销（revoke）跨节点传播 #F-03
 - 现象：撤销已实现本机落盘 + 本机 gate-server 热更新闭环；集群其他节点不同步

@@ -115,4 +115,51 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["user"]["status"], "active");
     }
+
+    /// ADR 2026-10-03：name 前缀启发式已废除——普通租户即使 name 为
+    /// `admin_xxx`，role=user 时仍受配额熔断（防伪造 name 绕过豁免）。
+    #[tokio::test]
+    async fn test_name_admin_prefix_does_not_evade_quota() {
+        let (signer, vk) = TokenSigner::generate();
+        let verifier = Arc::new(pproxy_core::TokenVerifier::new(vk));
+        let used_bytes = Arc::new(dashmap::DashMap::new());
+
+        let cfg = Arc::new(ServerConfig {
+            tunnel_token_hash: "".into(),
+            proxy_secret: "sec".into(),
+            client: reqwest::Client::new(),
+            verifier: Some(verifier),
+            user_active_conns: Arc::new(dashmap::DashMap::new()),
+            user_used_bytes: used_bytes.clone(),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: "test-admin".into(),
+        });
+
+        let app = build_router(cfg.clone());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let claims = UserTokenClaims {
+            jti: "jti-admin-prefix".into(),
+            sub: "usr_admin_bob".into(),
+            name: "admin_bob".into(), // 恶意/误导性 name，但 role 是普通用户
+            quota_bytes: 100,
+            lease_bytes: 50,
+            exp: now + 3600,
+            iat: now,
+            max_conns: 3,
+            role: "user".into(),
+        };
+        let token = signer.sign_token(&claims).unwrap();
+        used_bytes.insert("usr_admin_bob".into(), std::sync::atomic::AtomicU64::new(200)); // 已超额
+
+        let req = Request::builder()
+            .uri("/api/user/profile")
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["user"]["status"], "quota_exceeded", "role=user 不得因 name 前缀豁免");
+    }
 }

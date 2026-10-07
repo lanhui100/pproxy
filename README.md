@@ -115,6 +115,9 @@ pproxy user keygen
 # 离线签发自包含租户令牌（支持 50G/100M，离线验签，客户端直显额度与并发限制）
 pproxy user add alice -q 50G -d 30 -c 3
 
+# 签发系统管理员令牌（带 --admin 显式参数，豁免流量额度熔断）
+pproxy user add admin_ops -q 100G -d 365 --admin
+
 # 一键废止令牌或用户（实时加入黑名单，热推送全网网关拦截）
 pproxy user revoke usr_alice
 # 或废止指定具体令牌 ID

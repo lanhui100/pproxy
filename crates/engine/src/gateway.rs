@@ -128,6 +128,15 @@ proxy-groups:
       - DIRECT
 
 rules:
+  # 服务端公网直连保护
+  - DOMAIN-SUFFIX,ponygo.fun,DIRECT
+  - DOMAIN-SUFFIX,ponyjob.top,DIRECT
+  - DOMAIN-SUFFIX,searchxai.cn,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+
   # AI 与大模型服务
   - DOMAIN-SUFFIX,openai.com,PROXY
   - DOMAIN-SUFFIX,chatgpt.com,PROXY

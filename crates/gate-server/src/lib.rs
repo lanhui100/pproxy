@@ -285,8 +285,11 @@ async fn handle_debug(State(cfg): State<Arc<ServerConfig>>) -> impl IntoResponse
     )
 }
 
+/// 管理员判定（ADR 2026-10-03 收紧）：仅凭自包含令牌 `role == "admin"`，
+/// 废除 `name == "admin"` / `name.starts_with("admin_")` 前缀启发式——
+/// 否则任意普通租户签发时把 name 填成 `admin_xxx` 即永久豁免配额熔断。
 fn is_admin_claims(c: &pproxy_core::UserTokenClaims) -> bool {
-    c.role == "admin" || c.name == "admin" || c.name.starts_with("admin_")
+    c.role == "admin"
 }
 
 fn quota_limit(c: &pproxy_core::UserTokenClaims) -> Option<u64> {
@@ -482,6 +485,11 @@ async fn handle_ws_socket(
                     match msg {
                         Some(Ok(Message::Binary(bin))) => {
                             let len = bin.len() as u64;
+                            // 先交付成功再计费（ADR 2026-10-03：杜绝"未发出却已扣费"；
+                            // 原实现 fetch_add 在前，超额/写失败时该帧已入账但未投递）
+                            if tcp_write.write_all(&bin).await.is_err() {
+                                break;
+                            }
                             if let Some(ref uid) = uid_up {
                                 let total_used = if let Some(cell) = bytes_map_up.get(uid) {
                                     cell.fetch_add(len, std::sync::atomic::Ordering::Relaxed) + len
@@ -495,9 +503,6 @@ async fn handle_ws_socket(
                                         break;
                                     }
                                 }
-                            }
-                            if tcp_write.write_all(&bin).await.is_err() {
-                                break;
                             }
                         }
                         Some(Ok(Message::Ping(_))) => {}
@@ -528,6 +533,10 @@ async fn handle_ws_socket(
                         Ok(0) => break,
                         Ok(n) => {
                             let len = n as u64;
+                            // 先交付成功再计费（同 upload 侧口径，ADR 2026-10-03）
+                            if ws_sender.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
+                                break;
+                            }
                             if let Some(ref uid) = uid_down {
                                 let total_used = if let Some(cell) = bytes_map_down.get(uid) {
                                     cell.fetch_add(len, std::sync::atomic::Ordering::Relaxed) + len
@@ -542,9 +551,6 @@ async fn handle_ws_socket(
                                         break;
                                     }
                                 }
-                            }
-                            if ws_sender.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
-                                break;
                             }
                         }
                         Err(_) => break,

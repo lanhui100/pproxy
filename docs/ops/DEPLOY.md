@@ -414,14 +414,29 @@ ls -l ~/.pony/cluster_signing_key.hex
   # 验证轻量 gate-server 日志回显
   journalctl -u gate-server -n 20 | grep "User Token Verifier enabled"
   ```
+- **Nginx 反向代理配置（若网关前置 Nginx）**：
+  需确保反向代理放行 `/api/user` 路由以允许公网客户端查询 Profile（`/api/user/profile`）与管理端热撤销（`/api/user/revoke`）：
+  ```nginx
+  location ~ ^/(api/user|api/client/telemetry|api/proxy|proxy) {
+      proxy_pass http://127.0.0.1:3101;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto https;
+  }
+  ```
 
 ### 3. 租户令牌签发与撤销热生效
 
 #### 3.1 签发租户商业化令牌
 在离线管理机执行命令（私钥自动参与签名）：
 ```bash
-# 签发 30 天有效、配额 50GB、最大 3 并发的租户令牌
+# 签发 30 天有效、配额 50GB、最大 3 并发的普通租户令牌
 pproxy user add alice --quota 50G --expires-days 30 --max-conns 3
+
+# 签发系统管理员令牌（带 --admin 显式参数，豁免流量额度熔断）
+pproxy user add admin_ops --quota 100G --expires-days 365 --admin
 ```
 
 #### 3.2 撤销令牌 / 封禁租户热生效
