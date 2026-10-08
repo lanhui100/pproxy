@@ -1,0 +1,14 @@
+=== RED EVIDENCE 2026-10-08 (frozen before wave) ===
+--- [1a] doctor CONNECT probe ---
+[fail] test anthropic: edge 自身错误（status 404），未到达源站
+[fail] test bai: edge 自身错误（status 403），未到达源站
+[fail] test github: edge 自身错误（status 200），未到达源站
+[fail] test opencode-cf: edge 自身错误（status 200），未到达源站
+[fail] CONNECT tunnel probe: oauth2.googleapis.com:443 → HTTP 400: HTTP/1.1 400 Bad Request
+--- [1b] live worker with config secret ---
+edge.ponygo.fun proxy http=404
+--- [2] status systemd line ---
+systemd (pproxy-server [user]): inactive
+--- [3] VERCEL_HOSTS default ---
+21:const VERCEL_HOSTS: &[&str] = &["api.openai.com", "opencode.ai"];
+322:        if VERCEL_HOSTS.contains(&target_host.to_ascii_lowercase().as_str()) {
