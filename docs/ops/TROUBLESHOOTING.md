@@ -9,11 +9,12 @@
 
 ### OpenAI 返回 403 unsupported_country_region_territory
 - **原因**：请求走了 CF Worker 上游（AS13335 被 OpenAI 整段拉黑）
-- **解决**：确认路由走 vercel 上游（config.json route_upstreams.openai=vercel）
+- **解决**：确认路由走 vps 原生上游（config.json route_upstreams.openai=vps；
+  运行期经管理面 `/api/routes` 的 override_upstream 一致）
 
 ### zen 返回 RegionError
 - **原因**：同上（CF→CF 内部流量传播入口国家）
-- **解决**：走 vercel 上游
+- **解决**：走 vps 原生上游（CF 腿失败是预期，vps/worker 主备 failover 兜底）
 
 ### zen 返回 DataPolicyError
 - **原因**：账号未 opt-in 数据政策（非链路问题）
@@ -34,7 +35,7 @@
 
 ### Google 429
 - **原因**：CF 出口 IP 被 Google 限流（瞬时）
-- **解决**：重试；持续出现则考虑该路由切 vercel
+- **解决**：重试；持续出现则考虑该路由切 vps 原生上游
 
 ### Facebook/上游偶发 000 或 Broken pipe
 - **原因**：上游瞬时抖动或客户端提前断开（日志可见 client error: Broken pipe，无害）

@@ -1,0 +1,22 @@
+{
+  "task": "pproxy 代理运维漂移修复（vercel 死上游清理 + CLI 管理面寻址对齐）",
+  "grade": "B",
+  "grade_triggers": ["external-network-io", "multi-file"],
+  "wave": 1,
+  "baseline_commit": "f4f7da9 style(desktop): toast 组件去除边框并增强毛玻璃透明效果",
+  "members": {
+    "lead": "space-bunny-free",
+    "admin-addr-fixer": "executor (task A)",
+    "route-migrator": "executor (task B)"
+  },
+  "tasks": {
+    "A": {"status": "completed", "red_evidence": "pproxy status exit=3 admin api unreachable", "green_evidence": "pproxy status exit=0"},
+    "B": {"status": "completed", "red_evidence": "route test upstream not configured", "green_evidence": "routes eff=vps, curl 401"},
+    "C": {"status": "completed", "evidence": "verify-note.sh exit=0"}
+  },
+  "acceptance_cmd": "bash scripts/pproxy-accept.sh（set -euo pipefail；4 个 AI host 经 127.0.0.1:8899 均须 401；pproxy status 须 exit 0；/api/routes 全表不得含 vercel；实测 ACCEPTANCE PASS exit=0）",
+  "residual_risks": [
+    "crates/core/src/route.rs VERCEL_HOSTS 默认回退仍指向已下线 Vercel，新建同类 host 路由必须显式 override（ADR 已记录）",
+    "pproxy status 打印 systemd (pproxy-server [user]): inactive：单位名 pproxy-server 与真实 pproxy.service 不一致，属另一处命名漂移（本变更未处理，上报用户决策）"
+  ]
+}
