@@ -760,12 +760,13 @@ let router = data_router(GatewayState {
         let routes = Arc::new(
             pproxy_core::RouteTable::new(Arc::clone(&store), Arc::new(HashMap::new())).unwrap(),
         );
-        // opencode 属 VERCEL_HOSTS 主机规则，无 override 也解析到 vercel 上游
+        // opencode 显式钉住 vercel 上游（旧 VERCEL_HOSTS 无 override 回退已于
+        // 2026-10 移除；本测试意图是验证路径剥离，而非上游默认规则）
         routes
             .create_route(&pproxy_core::store::NewRoute {
                 name: "opencode".into(),
                 target_host: "opencode.ai".into(),
-                override_upstream: None,
+                override_upstream: Some("vercel".into()),
                 backup_upstream: None,
             })
             .unwrap();

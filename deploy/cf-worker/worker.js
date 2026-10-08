@@ -87,6 +87,10 @@ export default {
 
     const resp = await fetch(targetUrl.toString(), init);
     const respHeaders = new Headers(resp.headers);
+    // 透传源站响应标记头：route.rs test_route 以此头判定"链路通"（任意源站状态码）；
+    // edge 自身错误路径（未授权伪装 404 / 缺 url 404 / 非法 url 400）均在上方早退分支返回，
+    // 不经此透传路径，天然不带该头。
+    respHeaders.set("x-proxy-edge", "worker");
     if (env.ALLOWED_ORIGINS) {
       respHeaders.set("Access-Control-Allow-Origin", env.ALLOWED_ORIGINS);
     }

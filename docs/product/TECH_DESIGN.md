@@ -37,12 +37,11 @@ crates/
 **路由与上游自动选择**
 ```rust
 enum Upstream { Worker, Vercel }
-fn pick_upstream(target_host: &str) -> Upstream {
-    match target_host {
-        // 已知对 CF 数据中心 IP 敏感
-        "api.openai.com" | "opencode.ai" => Upstream::Vercel,
-        _ => Upstream::Worker,   // 默认
+fn pick_upstream(target_host: &str, override_upstream: Option<&str>) -> Upstream {
+    if let Some(o) = override_upstream {
+        return parse_upstream(o);   // 显式 override 优先（含 Named/Worker/Vercel）
     }
+    Upstream::Worker   // 默认（2026-10：Vercel 下线，无 override 恒 Worker，不再按 host 特判）
 } // route.upstream_override 可覆盖
 ```
 

@@ -136,7 +136,8 @@ success/info 3s、error 6s 自动消失，aria-live polite）、`components/comm
 
   （Facebook 不做模板——PRD 无此条；存量 facebook 路由仍作为普通行正常管理。
   PRD 提到的 zen 服务无法给出可信 host，不上线，记录于交付报告。）
-  上游决策预期与 crates/core VERCEL_HOSTS 自动规则一致，模板不传 override。
+  上游决策预期与 crates/core 一致：无 override 默认 Worker（CF 池化），
+  显式 override（vps/vercel/worker/Named）由管理面路由配置决定，模板不传 override。
 - 创建失败反馈必须在 Dialog 内部 error 区渲染，表单不清空、Dialog 不关。
 - 列表列：名称 / 目标 / 上游（CF Worker/Vercel 出口，中文徽标）/ 状态（Switch）/ 连通性 / 操作。
   「测速」结果：`正常 · 123ms` / `失败：<原因>`；失败态附内联动作「切换线路 ▾（CF Worker/Vercel，

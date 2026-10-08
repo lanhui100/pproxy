@@ -98,16 +98,13 @@ pub struct NewRoute {
 ```rust
 pub fn pick_upstream(&self, target_host: &str, override_upstream: Option<&str>) -> Upstream {
     if let Some(o) = override_upstream {
-        if !o.is_empty() {  // F8：空串视作未设置，回退 host 规则
+        if !o.is_empty() {  // F8：空串视作未设置，回退默认 Worker
             return parse_upstream(o).unwrap_or_else(|| {
                 Upstream::Worker  // 非法值视作 Worker 并 warn（DB 手工篡改兜底）
             });
         }
     }
-    match target_host.to_ascii_lowercase().as_str() {
-        "api.openai.com" | "opencode.ai" => Upstream::Vercel,
-        _ => Upstream::Worker,
-    }
+    Upstream::Worker   // 默认（2026-10：Vercel 下线，无 override 恒 Worker，不再按 host 特判）
 }
 // F8：parse_upstream 接受任意非空值——"worker"|"vercel" 归一为对应变体，
 // 其余归一为 Named(名字)。
@@ -167,7 +164,7 @@ T1（Store/RouteRow）。`test_route` 需要 EdgeClient（core 已有，经 `new
 
 ## 8. 单元测试清单
 
-1. `pick_upstream`：`api.openai.com`→Vercel、`opencode.ai`→Vercel、`api.anthropic.com`→Worker、`www.google.com`→Worker、大小写不敏感（`API.OPENAI.COM`→Vercel）；override="vercel" 的 anthropic → Vercel；override 非法值 → Worker。
+1. `pick_upstream`：无 override 一律 `Worker`（`api.openai.com`→Worker、`opencode.ai`→Worker、`api.anthropic.com`→Worker、`www.google.com`→Worker、大小写不敏感（`API.OPENAI.COM`→Worker））；override="vercel" 的 anthropic → Vercel；override 非法值 → Worker。
 2. override 优先：override="worker" 的 openai 路由 → Worker。
 3. `effective_upstream`（C-P1-5）：存在路由 → 与 resolve 决策一致；不存在 → None。
 4. resolve 拼装：§5 全部向量（含 `""`、`"/"`、带 query）。

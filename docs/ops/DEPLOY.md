@@ -212,6 +212,18 @@ npx wrangler rollback <上一可用版本ID>
 > - **验证口径**：灰度窗口至少包含一次真实隧道会话（客户端连一次
 >   `wss://<gate域名>/ws`），仅 curl /debug 不足以证明 WS 桥正常；
 >   一键脚本 `--verify-token` 可自动做该会话检查。
+> - **PROXY_SECRET 必须与 config.json 的 `worker_secret` 对齐**（2026-10-08 实测线上漂移）：
+>   实测以仓库 config.json 的 `worker_secret` 值向线上 edge 域名（`https://edge.example.com/?url=...`）
+>   请求仍返回 worker.js:31-36 的未授权伪装 404，判定线上 `PROXY_SECRET` 环境变量与 config.json
+>   **不一致（值已漂移）**。对齐步骤 = `npx wrangler secret put PROXY_SECRET`，值取
+>   **config.json 的 `worker_secret` 字段**（即上游共享 `proxy_secret`，同一值）；
+>   **以仓库 config.json 为唯一权威源**，明文值严禁写入文档/提交（wrangler 4 若拒绝裸
+>   `secret put`，改用 `wrangler versions secret put`，须在 upload 前完成，随后重新 upload + versions deploy）。
+> - **edge 部署后验证（部署方执行）**：`bash scripts/accept-legacy-items.sh --with-deploy`
+>   ——A/B 段须 PASS、C 段须 PASS。C 段经 admin API `POST /api/routes/{anthropic,github}/test`
+>   断言 `ok:true`，依赖本条 worker.js 透传标记头（`x-proxy-edge: worker`）与 PROXY_SECRET
+>   对齐均已上线；标记头未上线前运行（不带 `--with-deploy`）则 C 段显式跳过
+>   （`[RED DEGRADED: DEPLOY-DEFERRED]`，本环境无 CF 凭据、重部署留待持凭据运维执行）。
 
 ### 更新 Vercel 函数
 ```bash

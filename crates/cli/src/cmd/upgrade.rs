@@ -392,20 +392,44 @@ fn download_binary(
     Err(format!("所有候选下载源均失败: {last_err}"))
 }
 
-/// 检查是否有活跃的后台 systemd 代理服务
+/// 检查是否有活跃的后台 systemd 代理服务。
+/// 与 service.rs status 检测对齐：对 ["pproxy-server", "pproxy"] 每单位先查
+/// user 作用域、非 active 时补查 system 作用域，任一作用域 active 即判定
+/// "后台守护在跑"；提示文案单位名与实际命中的一致（pproxy.service 规范系统
+/// 单位与 install.sh 另装的 pproxy-server.service 两命名并存）。
 fn check_running_service_notice() {
     #[cfg(unix)]
     {
-        let is_active = std::process::Command::new("systemctl")
-            .args(["--user", "is-active", "--quiet", "pproxy-server"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        // matched: (单位名, 作用域 user/system)；任一 active 立即采用（优先
+        // active），顺序先 user 后 system、先 pproxy-server 后 pproxy（与
+        // service.rs status 检测同语义）。
+        let mut matched: Option<(&str, &str)> = None;
+        'units: for svc in ["pproxy-server", "pproxy"] {
+            for (scope, args) in [
+                ("user", vec!["--user", "is-active", "--quiet", svc]),
+                ("system", vec!["is-active", "--quiet", svc]),
+            ] {
+                let active = std::process::Command::new("systemctl")
+                    .args(&args)
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if active {
+                    matched = Some((svc, scope));
+                    break 'units;
+                }
+            }
+        }
 
-        if is_active {
+        if let Some((svc, scope)) = matched {
+            let (scope_word, restart_hint) = if scope == "user" {
+                ("用户", format!("systemctl --user restart {svc}"))
+            } else {
+                ("系统", format!("systemctl restart {svc}"))
+            };
             println!();
-            println!("\x1b[1;36m💡 提示: 检测到后台用户守护进程 pproxy-server 正在运行。\x1b[0m");
-            println!("  建议运行: \x1b[32mpproxy restart\x1b[0m (或 systemctl --user restart pproxy-server) 以生效新版本。");
+            println!("\x1b[1;36m💡 提示: 检测到后台{scope_word}守护进程 {svc} 正在运行。\x1b[0m");
+            println!("  建议运行: \x1b[32mpproxy restart\x1b[0m (或 {restart_hint}) 以生效新版本。");
         }
     }
 }

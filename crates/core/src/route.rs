@@ -17,9 +17,6 @@ use crate::store::{NewRoute, RouteRow, Store, StoreError};
 /// test_route 总超时（S-P2-6）：管理面实测不得被数据面 120s 长超时拖累。
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// 上游自动选择规则（§3.1）：命中则 Vercel，其余 Worker。
-const VERCEL_HOSTS: &[&str] = &["api.openai.com", "opencode.ai"];
-
 #[derive(Debug)]
 pub enum RouteError {
     UnknownRoute,
@@ -302,12 +299,17 @@ impl RouteTable {
         Ok((build_target_url(&row.target_host, path_query), upstream))
     }
 
-    /// 上游自动选择（C-P1-5 改 pub）：override 优先，否则按 host 规则。
+    /// 上游选择（C-P1-5 改 pub）：override 优先，否则一律 Worker。
     /// T6 /api/routes 列表的 effective_upstream 字段与 resolve 共用此决策。
+    ///
+    /// 2026-10：Vercel 部署已下线（DEPLOYMENT_DISABLED），原 VERCEL_HOSTS
+    /// host 规则默认回退移除——无 override 恒为 Worker（治理"新路由无 override
+    /// 时的默认行为"）；显式 Some("vercel") 仍解析为 Upstream::Vercel（未来
+    /// Vercel 恢复可显式启用），valid_override 白名单不变。
     ///
     /// F8：override 值域扩展——除 "worker"|"vercel" 外，迁移导入的
     /// route_upstreams 绑定名（任意已配置上游名）同样生效；空串视作未设置
-    /// （回退 host 规则）。
+    /// （回退默认 Worker）。
     pub fn pick_upstream(&self, target_host: &str, override_upstream: Option<&str>) -> Upstream {
         if let Some(o) = override_upstream {
             if !o.is_empty() {
@@ -319,11 +321,7 @@ impl RouteTable {
                 });
             }
         }
-        if VERCEL_HOSTS.contains(&target_host.to_ascii_lowercase().as_str()) {
-            Upstream::Vercel
-        } else {
-            Upstream::Worker
-        }
+        Upstream::Worker
     }
 
     /// 实时生效的上游（C-P1-5）：T6 GET /api/routes 的 effective_upstream 字段来源。
@@ -415,8 +413,9 @@ impl RouteTable {
 
     /// 连通性实测：经对应上游请求 https://{target_host}/ 首页（C-P1-5）。
     ///
-    /// 成功判定（2026-08 修订）：两个 edge（cf-worker/vercel）在**透传源站响应**时
-    /// 都会附加 `x-proxy-edge` 标记头；edge 自身错误（鉴权 403/参数 400/上游
+    /// 成功判定（2026-10 修订）：三个透传 edge（vps/vercel/cf-worker）在
+    /// **透传源站响应**时都会附加 `x-proxy-edge` 标记头（cf-worker 的标记头
+    /// 随 worker 部署生效）；edge 自身错误（鉴权 403/参数 400/上游
     /// 502/未配置 500）不带该头。因此：
     /// - 收到带标记头的响应 → 源站可达 → ok=true（**任意状态码**——
     ///   api.anthropic.com 首页 404、api.x.ai 返回 421 都不代表链路不通）；
@@ -531,13 +530,13 @@ mod tests {
     #[test]
     fn pick_upstream_rules() {
         let (_dir, rt) = table("pick");
-        assert_eq!(rt.pick_upstream("api.openai.com", None), Upstream::Vercel);
-        assert_eq!(rt.pick_upstream("opencode.ai", None), Upstream::Vercel);
+        assert_eq!(rt.pick_upstream("api.openai.com", None), Upstream::Worker);
+        assert_eq!(rt.pick_upstream("opencode.ai", None), Upstream::Worker);
         assert_eq!(rt.pick_upstream("api.anthropic.com", None), Upstream::Worker);
         assert_eq!(rt.pick_upstream("www.google.com", None), Upstream::Worker);
         // 大小写不敏感
-        assert_eq!(rt.pick_upstream("API.OPENAI.COM", None), Upstream::Vercel);
-        // override 优先于 host 规则；已知名归一为枚举值
+        assert_eq!(rt.pick_upstream("API.OPENAI.COM", None), Upstream::Worker);
+        // override 优先于默认 Worker；已知名归一为枚举值
         assert_eq!(
             rt.pick_upstream("api.anthropic.com", Some("vercel")),
             Upstream::Vercel
@@ -547,7 +546,7 @@ mod tests {
             Upstream::Worker
         );
         // F8：Named 绑定（迁移导入的 route_upstreams 名）原样生效；
-        // 空串视作未设置，回退 host 规则。
+        // 空串视作未设置，回退默认 Worker。
         assert_eq!(
             rt.pick_upstream("echo.example.com", Some("localstub")),
             Upstream::Named("localstub".into())
@@ -565,7 +564,7 @@ mod tests {
         let (_, up) = rt.resolve("openai", "/").unwrap();
         assert_eq!(up, Upstream::Worker);
 
-        // F8：Named 绑定在 resolve 中同样优先于 host 规则（须已配置上游名）
+        // F8：Named 绑定在 resolve 中同样优先于默认（须已配置上游名）
         let (_dir2, rt2) = table_with_stub("override_named");
         rt2.create_route(&new_route("echo", "echo.example.com", Some("localstub")))
             .unwrap();

@@ -58,31 +58,41 @@ pub fn status(http: &AdminClient) -> Result<i32, String> {
         print!("{}", t.render());
     }
 
-    // systemd 行：非 Linux 或无 systemctl 则跳过
+    // systemd 行：非 Linux 或无 systemctl 则跳过。
+    // 单位漂移修复：非 root 对每个候选单位先查 user 作用域，非 active 时补查
+    // system 作用域（is-active 为只读查询，非 root 可读），系统级 pproxy.service
+    // 不再被误判为 inactive。
     #[cfg(target_os = "linux")]
     {
         if which_systemctl().is_some() {
             let is_root = unsafe { libc::geteuid() == 0 };
             let services = ["pproxy-server", "pproxy"];
-            let mut matched = None;
-            for svc in services {
-                let cmd_args = if is_root {
-                    vec!["is-active", svc]
-                } else {
-                    vec!["--user", "is-active", svc]
-                };
-                if let Ok(out) = Command::new("systemctl").args(&cmd_args).output() {
+            // matched: (单位, 状态, 作用域 user/system)。
+            // 任一作用域返回 active 立即采用（优先 active）；否则采用第一个有状态
+            // 输出的（保持现状语义：无 active 时展示首个状态）。
+            let mut matched: Option<(&str, String, &str)> = None;
+            'units: for svc in services {
+                // root 只查 system 作用域（保持原语义）；非 root 先 user 后 system。
+                let scopes: &[&str] = if is_root { &["system"] } else { &["user", "system"] };
+                for scope in scopes {
+                    let cmd_args = if *scope == "user" {
+                        vec!["--user", "is-active", svc]
+                    } else {
+                        vec!["is-active", svc]
+                    };
+                    let Ok(out) = Command::new("systemctl").args(&cmd_args).output() else {
+                        continue;
+                    };
                     let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if state == "active" {
-                        matched = Some((svc, state));
-                        break;
+                        matched = Some((svc, state, scope));
+                        break 'units;
                     } else if matched.is_none() {
-                        matched = Some((svc, state));
+                        matched = Some((svc, state, scope));
                     }
                 }
             }
-            if let Some((svc, state)) = matched {
-                let mode = if is_root { "system" } else { "user" };
+            if let Some((svc, state, mode)) = matched {
                 println!("systemd ({svc} [{mode}]): {state}");
             }
         }

@@ -856,6 +856,10 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         .clone()
         .or_else(|| cfg.data_plane.clone().filter(|s| !s.is_empty()))
         .or_else(|| config::derive_data_plane(&cfg).ok());
+    // doctor 第 5 段 CONNECT 探针目标：仅显式 --data-plane（本地自检 → 本机网关，
+    // spec §3.7）；cfg.data_plane 是远程 tunnel gate（CF worker 路径），对裸 CONNECT
+    // 永不回 200，不得传入探针段（第 4 段数据面抽样仍用 data_plane_base）。
+    let explicit_data_plane: Option<String> = cli.data_plane.clone();
 
     // cmd/* 层错误统一为 Msg 类别（退出码 1）；本地配置错误只可能出自 load()
     let dispatched: Result<i32, String> = match &cli.command {
@@ -891,6 +895,7 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             &http,
             probe_token.as_deref(),
             data_plane_base,
+            explicit_data_plane,
             tunnel_host.as_deref().unwrap_or("oauth2.googleapis.com:443"),
         ),
         Command::Config {

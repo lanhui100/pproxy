@@ -1,22 +1,40 @@
 {
-  "task": "pproxy 代理运维漂移修复（vercel 死上游清理 + CLI 管理面寻址对齐）",
-  "grade": "B",
-  "grade_triggers": ["external-network-io", "multi-file"],
-  "wave": 1,
-  "baseline_commit": "f4f7da9 style(desktop): toast 组件去除边框并增强毛玻璃透明效果",
-  "members": {
-    "lead": "space-bunny-free",
-    "admin-addr-fixer": "executor (task A)",
-    "route-migrator": "executor (task B)"
-  },
-  "tasks": {
-    "A": {"status": "completed", "red_evidence": "pproxy status exit=3 admin api unreachable", "green_evidence": "pproxy status exit=0"},
-    "B": {"status": "completed", "red_evidence": "route test upstream not configured", "green_evidence": "routes eff=vps, curl 401"},
-    "C": {"status": "completed", "evidence": "verify-note.sh exit=0"}
-  },
-  "acceptance_cmd": "bash scripts/pproxy-accept.sh（set -euo pipefail；4 个 AI host 经 127.0.0.1:8899 均须 401；pproxy status 须 exit 0；/api/routes 全表不得含 vercel；实测 ACCEPTANCE PASS exit=0）",
-  "residual_risks": [
-    "crates/core/src/route.rs VERCEL_HOSTS 默认回退仍指向已下线 Vercel，新建同类 host 路由必须显式 override（ADR 已记录）",
-    "pproxy status 打印 systemd (pproxy-server [user]): inactive：单位名 pproxy-server 与真实 pproxy.service 不一致，属另一处命名漂移（本变更未处理，上报用户决策）"
+  "waves": [
+    {
+      "wave": 1,
+      "task": "vercel 死上游清理 + CLI 管理面寻址对齐",
+      "grade": "B",
+      "baseline_commit": "f4f7da9",
+      "members": {"admin-addr-fixer": "executor A", "route-migrator": "executor B"},
+      "tasks": {
+        "A": {"status": "completed", "green": "pproxy status exit=0"},
+        "B": {"status": "completed", "green": "routes eff=vps, curl 401"},
+        "C": {"status": "completed", "green": "verify-note.sh exit=0"}
+      },
+      "acceptance_cmd": "bash scripts/pproxy-accept.sh（4 host 401 + status exit 0 + 无 vercel 残留；实测 PASS exit=0）"
+    },
+    {
+      "wave": 2,
+      "task": "遗留修复：doctor 探针假阴性 / status 单位名漂移 / VERCEL_HOSTS 死回退 / worker 标记头",
+      "grade": "B",
+      "baseline_commit": "601a7ff",
+      "members": {"legacy-qa": "test agent", "cli-fixer": "executor A", "core-fixer": "executor B", "worker-fixer": "executor C"},
+      "tasks": {
+        "T1": {"status": "completed", "red": "A=400 / B=inactive（旧二进制实测，red-phase-legacy.md）"},
+        "A": {"status": "completed", "green": "doctor CONNECT [pass] → 200；status systemd (pproxy [system]): active；cargo test -p pproxy-cli 119 passed"},
+        "B": {"status": "completed", "green": "cargo test -p pproxy-core 106 passed；gateway.rs 衍生夹具 8 passed"},
+        "C": {"status": "completed", "green": "node --check exit 0；[RED DEGRADED: DEPLOY-DEFERRED]（无 CF 凭据，未重部署）"},
+        "T2": {"status": "completed", "green": "accept-legacy-items.sh A/B PASS、route_default_upstream 2 passed、cargo build --release exit 0"}
+      },
+      "acceptance_cmd": "PPROXY_BIN=./target/release/pproxy bash scripts/accept-legacy-items.sh（A doctor→200、B status active；C 部署后 --with-deploy）；实测 ACCEPT_EXIT=0",
+      "residual_risks": [
+        "CF worker 线上效果 deploy-deferred：标记头 + PROXY_SECRET 对齐需持凭据重部署（wrangler versions），部署后跑 scripts/accept-legacy-items.sh --with-deploy 验证",
+        "PATH 上 ~/.local/bin/pproxy 旧二进制需 Lead 收口安装新构建后，accept 脚本默认 pproxy 才指向新版本"
+      ]
+    }
+  ],
+  "l3_reviews": [
+    {"perspective": "B 安全/协议", "verdict": "PASS", "findings": 0},
+    {"perspective": "A 状态/逻辑", "verdict": "FAIL→已修", "finding": "upgrade.rs 补查漏 pproxy.service 单位名（已对齐双名双作用域）"}
   ]
 }

@@ -23,6 +23,7 @@ pub(crate) fn run(
     http: &AdminClient,
     probe_token: Option<&str>,
     data_plane_override: Option<String>,
+    explicit_data_plane: Option<String>,
     tunnel_host: &str,
 ) -> Result<i32, String> {
     tokio_block(async move {
@@ -137,8 +138,12 @@ pub(crate) fn run(
             }
         }
 
-        // 5. CONNECT 隧道探针（零机密，spec §3.7）
-        match tunnel_probe(&data_plane, tunnel_host) {
+        // 5. CONNECT 隧道探针（零机密，spec §3.7）。
+        // 目标语义：本地自检 → 本机网关。仅显式 --data-plane 优先，否则由 admin
+        // base 推导 host:8899；忽略 cfg.data_plane——那是远程 tunnel gate
+        // （CF worker 路径），对裸 CONNECT 永不回 200，§3.7 判据不适用。
+        let connect_plane = connect_plane(&explicit_data_plane, http.base_url());
+        match tunnel_probe(&connect_plane, tunnel_host) {
             TunnelProbeResult::Pass => {
                 println!("[pass] CONNECT tunnel probe: {tunnel_host} → 200");
                 passed += 1;
@@ -163,6 +168,17 @@ pub(crate) enum TunnelProbeResult {
     Pass,
     Skip(&'static str),
     Fail(String),
+}
+
+/// 构造 CONNECT 隧道探针请求（纯函数可测）。
+/// 必须携带 Host 头：数据面网关（hyper）按 HTTP/1.1 校验请求，缺 Host 会回 400 Bad Request。
+/// `host` 由调用方经字符白名单校验（无空格/CR/LF），此处保持防御：debug 构建下断言。
+fn connect_request(host: &str) -> String {
+    debug_assert!(
+        !host.contains('\r') && !host.contains('\n') && !host.contains(' '),
+        "connect_request: host 含非法字符（空格/CR/LF）: {host:?}"
+    );
+    format!("CONNECT {host} HTTP/1.1\r\nHost: {host}\r\n\r\n")
 }
 
 /// 执行 CONNECT 隧道探针：裸 TCP 连数据面，发 CONNECT 读响应行。
@@ -221,7 +237,7 @@ fn tunnel_probe(data_plane: &Option<String>, host: &str) -> TunnelProbeResult {
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-    let req = format!("CONNECT {host} HTTP/1.1\r\n\r\n");
+    let req = connect_request(host);
     if let Err(e) = stream.write_all(req.as_bytes()) {
         return TunnelProbeResult::Fail(format!("写 CONNECT 失败: {e}"));
     }
@@ -324,6 +340,13 @@ fn derive_from_base(server: &str) -> Option<String> {
     let host = host_of(server)?;
     let scheme = if server.starts_with("https://") { "https" } else { "http" };
     Some(format!("{scheme}://{host}:8899"))
+}
+
+/// CONNECT 探针目标（纯函数可测，spec §3.7）：显式 --data-plane 优先，否则由
+/// admin base 推导 host:8899 → 本机网关。忽略 cfg.data_plane——那是远程 tunnel
+/// gate（CF worker 路径），对裸 CONNECT 永不回 200，§3.7 判据不适用。
+fn connect_plane(explicit: &Option<String>, base: &str) -> Option<String> {
+    explicit.clone().or_else(|| derive_from_base(base))
 }
 
 /// 提取 base URL 的 host（`http(s)://host[:port]/path` → host）。纯函数可测。
@@ -612,5 +635,45 @@ mod tests {
         assert_eq!(normalize_host_port("192.168.1.100"), Some("192.168.1.100:8899".to_string()));
         assert_eq!(normalize_host_port("192.168.1.100:8080"), Some("192.168.1.100:8080".to_string()));
         assert_eq!(normalize_host_port(""), None);
+    }
+
+    // ---- connect_request（CONNECT 探针请求构造，§3.7 Host 头）----
+
+    #[test]
+    fn connect_request_has_host_header_and_format() {
+        let req = connect_request("oauth2.googleapis.com:443");
+        assert_eq!(
+            req,
+            "CONNECT oauth2.googleapis.com:443 HTTP/1.1\r\nHost: oauth2.googleapis.com:443\r\n\r\n"
+        );
+        assert!(req.starts_with("CONNECT oauth2.googleapis.com:443 HTTP/1.1\r\n"));
+        assert!(req.ends_with("\r\n\r\n"), "请求应以空行结尾: {req:?}");
+    }
+
+    #[test]
+    fn connect_request_ipv6_keeps_brackets_in_host_header() {
+        let req = connect_request("[::1]");
+        assert!(req.starts_with("CONNECT [::1] HTTP/1.1\r\n"));
+        assert!(req.contains("\r\nHost: [::1]\r\n"));
+        assert!(req.ends_with("\r\n\r\n"), "请求应以空行结尾: {req:?}");
+    }
+
+    // ---- connect_plane（CONNECT 探针目标选择，spec §3.7：忽略 cfg.data_plane）----
+
+    #[test]
+    fn connect_plane_derives_from_admin_base() {
+        assert_eq!(
+            connect_plane(&None, "http://100.95.193.103:8900"),
+            Some("http://100.95.193.103:8899".to_string())
+        );
+        assert_eq!(connect_plane(&None, "not a url"), None);
+    }
+
+    #[test]
+    fn connect_plane_explicit_overrides_derive() {
+        assert_eq!(
+            connect_plane(&Some("http://192.0.2.9:8899".to_string()), "http://100.95.193.103:8900"),
+            Some("http://192.0.2.9:8899".to_string())
+        );
     }
 }
