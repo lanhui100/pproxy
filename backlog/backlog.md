@@ -170,4 +170,4 @@
 - 现象：worker 上游 4 条路由（anthropic/bai/github/opencode-cf）连通性 test 假阴性；线上 edge.ponygo.fun 对 config.json 正确 secret 仍回伪装 404（线上 PROXY_SECRET 漂移）
 - 方案（代码已落地，待持凭据部署）：deploy/cf-worker/worker.js 透传响应加 x-proxy-edge 标记头（已提交 59bb523）；`npx wrangler secret put PROXY_SECRET`（值=config.json worker_secret，唯一权威源）→ wrangler versions 版本化上传（禁裸 deploy）→ 部署后验证
 - 验收（重跑条款）：`bash scripts/accept-legacy-items.sh --with-deploy` 三段全 PASS；随后 `POST /api/routes/{anthropic,github}/test` 应 ok:true，pproxy doctor 4 条 worker 路由 fail 消除
-- 主责：持 CF 凭据的运维；状态：deploy-deferred（2026-10-08 实测无凭据，wrangler 未认证）
+- 主责：持 CF 凭据的运维；状态：**已完成**（2026-10-08 部署：versions 5%→100% canary 上线，PROXY_SECRET 对齐；doctor 10 passed/0 failed，accept --with-deploy 三段全 PASS）
