@@ -302,7 +302,7 @@ pub struct TunnelPool {
     _tx: tokio::sync::watch::Sender<(Option<String>, Option<String>)>,
 }
 
-const POOL_SIZE: usize = 2;
+const POOL_SIZE: usize = 4;
 
 impl TunnelPool {
     pub fn new(cfg: TunnelConfig) -> Arc<Self> {
@@ -473,16 +473,18 @@ pub async fn handle_connect_raw(
         } else {
             None
         };
-        let used_pool = pooled_session.is_some();
+        let mut used_pool = false;
         let result = match pooled_session {
-            Some((tx, rx)) => {
-                let bind_res = bind_target(tx, rx, &host, port).await;
-                if bind_res.is_err() {
-                    establish_with_endpoints(pool.config(), &ordered_refs, &host, port).await
-                } else {
-                    bind_res
+            Some((tx, rx)) => match bind_target(tx, rx, &host, port).await {
+                Ok(pair) => {
+                    used_pool = true;
+                    Ok(pair)
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(host = %host, error = %e, "pooled session bind failed, falling back to cold establish");
+                    establish_with_endpoints(pool.config(), &ordered_refs, &host, port).await
+                }
+            },
             None => establish_with_endpoints(pool.config(), &ordered_refs, &host, port).await,
         };
         match result {

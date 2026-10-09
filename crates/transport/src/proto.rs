@@ -20,7 +20,7 @@ pub const QUOTA_402_MARKER: &str = "HTTP error: 402 Payment Required: Quota Exce
 #[cfg(not(test))]
 pub const DIAL_TIMEOUT: Duration = Duration::from_millis(8000);
 #[cfg(not(test))]
-pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(5000);
+pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(8000);
 
 #[cfg(test)]
 pub const DIAL_TIMEOUT: Duration = Duration::from_millis(800);

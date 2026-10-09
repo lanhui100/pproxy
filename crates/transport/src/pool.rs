@@ -14,8 +14,8 @@ use tokio::task::JoinHandle;
 use crate::proto::{connect_ws, WsSink, WsStream};
 use crate::route::{classify_egress, is_native_vps_endpoint, Egress};
 
-// 默认生产连接生命周期与补给频率
-const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(30);
+// 默认生产连接生命周期与补给频率（Gate 等待首帧为 60s，客户端 TTL 设为 25s 确保绝不命中对端超时）
+const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(25);
 const DEFAULT_REFILL_INTERVAL: Duration = Duration::from_secs(2);
 const DEFAULT_REFILL_BACKOFF: Duration = Duration::from_secs(5);
 

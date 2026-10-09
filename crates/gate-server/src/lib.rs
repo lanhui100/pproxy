@@ -414,8 +414,8 @@ async fn handle_ws_socket(
     );
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // 1. Wait for first frame: {"host":"...","port":443}
-    let first_msg = match tokio::time::timeout(Duration::from_secs(10), ws_receiver.next()).await {
+    // 1. Wait for first frame: {"host":"...","port":443} (待命池会话最长保持 60 秒等待目标声明)
+    let first_msg = match tokio::time::timeout(Duration::from_secs(60), ws_receiver.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => text,
         _ => {
             let _ = ws_sender.close().await;
