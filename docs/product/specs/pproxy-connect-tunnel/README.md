@@ -112,7 +112,7 @@ crates/server 网关 127.0.0.1:8899（hyper http1, header_read_timeout=30s 既�
 ### 3.3 改造点 B：新模块 `crates/server/src/connect.rs`
 
 - `TunnelConfig { gate_url: String, token: String, allowlist: Vec<String> }`：
-  - `from_env()`：`PPROXY_TUNNEL_GATE_URL` + `PPROXY_TUNNEL_TOKEN` + `PPROXY_TUNNEL_ALLOWLIST`（逗号分隔，trim，空段丢弃）；**任一缺失/为空 → None（fail-closed）**；两者只配其一同样 None + warn。
+  - `from_env()`：`PPROXY_TUNNEL_GATE_URL` + `PPROXY_TUNNEL_TOKEN_DATA`（数据面优先，operator 明文令牌）/`PPROXY_TUNNEL_TOKEN`（回退）/`PPROXY_TUNNEL_ALLOWLIST`（逗号分隔，trim，空段丢弃）；**任一缺失/为空 → None（fail-closed）**；两者只配其一同样 None + warn。数据面/下发凭据分离开关见 §3.4。
   - **`gate_url` 仅接受 `wss://`**（数据面强制；与 `tunnel.rs:24` 管理面宽松校验的偏离在注释中记录——管理面下发后由桌面端自校验，数据面 Bearer token 直上该 URL，明文 ws:// 不可接受）。
   - allowlist 条目启动时健壮性 warn：含 scheme/端口/前导点/空白/单标签过宽（如 `com`）→ 提示可疑。
 - `allowlist_match(host, entries)`：移植 `normalize_host` + `suffix_match`（host==entry 或 `*.entry`，dot-boundary 防 `notgoogleapis.com`）。**明确不含**桌面 `alias_match`（含通用 `.com.xx` 区域规则）；区分性测试：`matches("googleapis.com.hk", ["googleapis.com"]) == false`（§8.1 采纳 #17）。
@@ -128,6 +128,11 @@ crates/server 网关 127.0.0.1:8899（hyper http1, header_read_timeout=30s 既�
 - **本方案新增数据面消费者**：`connect.rs::TunnelConfig::from_env` → CONNECT 隧道。
 
 在 dev 上设置这组 env（已设置，见 §0 预核查）即同时激活两者——此耦合为既成事实，非本 spec 引入；spec 义务是记录并保证两者校验独立（数据面额外强制 wss:// 与 allowlist 非空才启用）。
+**数据面/下发凭据分离（2026-10-09）**：数据面消费者（`connect.rs`）优先读取
+`PPPROXY_TUNNEL_TOKEN_DATA`（与 gate `TUNNEL_TOKEN_HASH` 对应的 operator 明文令牌），
+未配置时回退 `PPPROXY_TUNNEL_TOKEN`；管理面下发消费者（`tunnel.rs`）只用
+`PPPROXY_TUNNEL_TOKEN`（租户令牌）。分离动机：租户令牌对 RN gate 走 `usr_live_`
+并发/配额判定（额度占满 → 429），且不匹配 CF worker 的 sha256 鉴权（恒 401）。
 载体：`~/pproxy/.pproxy.env`（User=pproxy 属主、600、systemd `EnvironmentFile` 已挂载）；**机密只进该文件，systemd drop-in 只放非机密变量**（防 644 drop-in 泄 token）。config.json 零改动。
 
 ### 3.5 安全语义（v0.2 修订）

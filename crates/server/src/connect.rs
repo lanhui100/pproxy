@@ -141,11 +141,20 @@ impl TunnelConfig {
 
     /// 智能推导装配（PoolConfig + 环境变量覆盖）：
     /// 1. gate_url: PPROXY_TUNNEL_GATE_URL 优先；缺省时由 pool_config.worker_url 自动推导
-    /// 2. token: PPROXY_TUNNEL_TOKEN 优先；缺省时继承 pool_config.worker_secret
+    /// 2. token: PPROXY_TUNNEL_TOKEN_DATA 优先（数据面专用 operator 明文 gate token），
+    ///    缺省时继承 PPROXY_TUNNEL_TOKEN，再缺省时继承 pool_config.worker_secret。
+    ///    数据面/下发分离（2026-10-09 修复）：PPROXY_TUNNEL_TOKEN 同时被管理面
+    ///    tunnel.rs 下发到桌面端（租户令牌），若数据面也共用它，则数据面建连计入
+    ///    租户并发额度（RN gate 对 usr_live_ 用户令牌按 max_conns*4 熔断 429），
+    ///    且用户令牌不匹配 CF worker 的 sha256(TUNNEL_TOKEN_HASH)（恒 401）。
+    ///    PPROXY_TUNNEL_TOKEN_DATA 指向与 gate TUNNEL_TOKEN_HASH 对应的明文令牌，
+    ///    两端点均免租户额度判定。
     /// 3. allowlist: PPROXY_TUNNEL_ALLOWLIST 追加到 DEFAULT_ALLOWLIST
     pub fn from_pool_config_and_env(pool_config: &pproxy_core::PoolConfig) -> Option<Self> {
         let env_url = std::env::var("PPROXY_TUNNEL_GATE_URL").ok();
-        let env_token = std::env::var("PPROXY_TUNNEL_TOKEN").ok();
+        let env_token = std::env::var("PPROXY_TUNNEL_TOKEN_DATA")
+            .ok()
+            .or_else(|| std::env::var("PPROXY_TUNNEL_TOKEN").ok());
         let env_allowlist = std::env::var("PPROXY_TUNNEL_ALLOWLIST").ok();
 
         let derived_url = env_url.or_else(|| {
@@ -754,6 +763,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
         std::env::remove_var("PPROXY_TUNNEL_TOKEN");
+        std::env::remove_var("PPROXY_TUNNEL_TOKEN_DATA");
         std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
         assert!(TunnelConfig::from_env().is_none());
 
@@ -775,6 +785,42 @@ mod tests {
 
         std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
         std::env::remove_var("PPROXY_TUNNEL_TOKEN");
+        std::env::remove_var("PPROXY_TUNNEL_TOKEN_DATA");
+        std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
+    }
+
+    /// 数据面凭据分离（2026-10-09）：PPROXY_TUNNEL_TOKEN_DATA 优先于
+    /// PPROXY_TUNNEL_TOKEN，缺省时回退 PPROXY_TUNNEL_TOKEN（向后兼容）。
+    #[test]
+    fn from_env_prefers_data_plane_token_over_provision_token() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let pool_cfg = pproxy_core::PoolConfig {
+            worker_url: Some("https://edge.example.com".into()),
+            worker_secret: Some("sec-secret-123".into()),
+            ..Default::default()
+        };
+
+        std::env::set_var("PPROXY_TUNNEL_GATE_URL", "wss://g.example/ws");
+        std::env::set_var("PPROXY_TUNNEL_TOKEN", "usr_live_tenant-token");
+        std::env::set_var("PPROXY_TUNNEL_TOKEN_DATA", "gate_operator-token");
+        std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
+
+        let c = TunnelConfig::from_pool_config_and_env(&pool_cfg).unwrap();
+        assert_eq!(c.token, "gate_operator-token", "数据面必须优先使用独立 operator 令牌");
+
+        // DATA 缺省 → 回退 PPROXY_TUNNEL_TOKEN（既有行为不变）
+        std::env::remove_var("PPROXY_TUNNEL_TOKEN_DATA");
+        let c2 = TunnelConfig::from_pool_config_and_env(&pool_cfg).unwrap();
+        assert_eq!(c2.token, "usr_live_tenant-token");
+
+        // 两者皆缺省 → 继承 worker_secret
+        std::env::remove_var("PPROXY_TUNNEL_TOKEN");
+        let c3 = TunnelConfig::from_pool_config_and_env(&pool_cfg).unwrap();
+        assert_eq!(c3.token, "sec-secret-123");
+
+        std::env::remove_var("PPROXY_TUNNEL_GATE_URL");
+        std::env::remove_var("PPROXY_TUNNEL_TOKEN");
+        std::env::remove_var("PPROXY_TUNNEL_TOKEN_DATA");
         std::env::remove_var("PPROXY_TUNNEL_ALLOWLIST");
     }
 

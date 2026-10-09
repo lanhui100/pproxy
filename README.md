@@ -190,7 +190,7 @@ pproxy serve
 | `PONY_DIST_URL` | CLI 自更新（`pproxy upgrade`）分发源 |
 | `PPROXY_DESKTOP_DIST_DIR` | `/dsk/` 静态分发目录（默认 `/opt/pony-desktop-releases`） |
 | `PPROXY_CONFIG` | server 配置文件路径（默认 `/etc/pproxy/config.json`） |
-| `PPROXY_TUNNEL_GATE_URL` / `PPROXY_TUNNEL_TOKEN` / `PPROXY_TUNNEL_ALLOWLIST` | 隧道端点/令牌/白名单（server 侧 `.pproxy.env`） |
+| `PPROXY_TUNNEL_GATE_URL` / `PPROXY_TUNNEL_TOKEN_DATA` / `PPROXY_TUNNEL_TOKEN` / `PPROXY_TUNNEL_ALLOWLIST` | 隧道端点/数据面令牌（优先）/下发租户令牌/白名单（server 侧 `.pproxy.env`） |
 | `PPROXY_LISTEN_ADMIN` | 管理面监听地址（tailnet 重绑，systemd drop-in） |
 | `PPROXY_SERVICE_USER` | `m4_test.sh` 断言的服务运行用户（默认 `pproxy`） |
 
