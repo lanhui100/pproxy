@@ -386,11 +386,15 @@ impl fmt::Display for EstablishError {
 /// 响应语义（spec §3.6，枚举固定，不携带内部细节）：
 /// 403 `tunnel_not_configured` / `port_not_allowed` / `no_tunnel_route`，
 /// 502 `tunnel_failed`（establish 失败，详情仅入日志）。
+///
+/// wave-pproxy-accept-loop 契约 §3：relay 有界生命周期（空闲/绝对 deadline）由
+/// `relay()` 承担，`conn_id` 供超时事件日志（trace_id/conn_id 字段）。
 pub async fn handle_connect_raw(
     state: GatewayState,
     head: &str,
     leftover: Vec<u8>,
     mut stream: TcpStream,
+    conn_id: &str,
 ) {
     use tokio::io::AsyncWriteExt;
 
@@ -498,7 +502,7 @@ pub async fn handle_connect_raw(
                 // 写 200 Connection Established（裸 TCP，非 hyper）
                 let _ = stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
                 // 直接双向透传（不经过 hyper upgrade）
-                relay(stream, leftover, ws_tx, ws_rx).await;
+                relay(stream, leftover, ws_tx, ws_rx, conn_id).await;
                 return;
             }
             Err(e) => {
@@ -583,14 +587,76 @@ async fn bind_target(tx: WsTx, rx: WsRx, host: &str, port: u16) -> Result<(WsTx,
         })
 }
 
-/// 双向透传：支持 WS Ping/Pong 保活和 TCP 半关闭。
-async fn relay(mut client: TcpStream, leftover: Vec<u8>, mut ws_tx: WsTx, ws_rx: WsRx) {
+/// CONNECT relay 有界生命周期默认值（契约 §3）：空闲超时 30s = 10×外部调用基准 3s；
+/// 绝对上限 6h（单 relay 从写 200 起的总时长硬界）。均经 env 注入缩短供测试：
+/// `PPROXY_RELAY_IDLE_TIMEOUT_MS` / `PPROXY_RELAY_ABSOLUTE_TIMEOUT_MS`。
+const RELAY_IDLE_DEFAULT_MS: u64 = 30_000;
+const RELAY_ABSOLUTE_DEFAULT_MS: u64 = 21_600_000;
+
+/// relay 期限注入（契约 §2.3）：env > 默认；非法/0 → 回落默认并 warn（含 raw）。
+fn relay_timeout_from_env(name: &str, default_ms: u64) -> Duration {
+    match std::env::var(name) {
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(v) if v > 0 => Duration::from_millis(v),
+            _ => {
+                tracing::warn!(
+                    env = name,
+                    raw = %raw.trim(),
+                    default_ms,
+                    "relay timeout env invalid or zero; falling back to default"
+                );
+                Duration::from_millis(default_ms)
+            }
+        },
+        Err(_) => Duration::from_millis(default_ms),
+    }
+}
+
+/// 双向透传（契约 §3）：给既有 relay 套有界生命周期——空闲超时（双向连续无字节
+/// 窗口，活动即重置）+ 绝对上限（单次 relay 总时长硬界），死隧道必须释放 permit。
+/// 超时命中 → 强制断连（transport 双端关闭语义）+ 释放 permit + 结构化日志
+/// （trace_id/conn_id/reason/elapsed_ms）。沿用现有超时结构（tokio::time），不重复造轮子。
+async fn relay(
+    mut client: TcpStream,
+    leftover: Vec<u8>,
+    mut ws_tx: WsTx,
+    ws_rx: WsRx,
+    conn_id: &str,
+) {
     if !leftover.is_empty() && ws_tx.send(Message::Binary(leftover)).await.is_err() {
         let _ = client.shutdown().await;
         return;
     }
 
-    let _ = pproxy_transport::relay_bidir_ws(client, ws_tx, ws_rx, pproxy_transport::Egress::Cf, &()).await;
+    let idle = relay_timeout_from_env("PPROXY_RELAY_IDLE_TIMEOUT_MS", RELAY_IDLE_DEFAULT_MS);
+    let absolute = relay_timeout_from_env(
+        "PPROXY_RELAY_ABSOLUTE_TIMEOUT_MS",
+        RELAY_ABSOLUTE_DEFAULT_MS,
+    );
+    let started = tokio::time::Instant::now();
+    let outcome = pproxy_transport::relay_bidir_ws_bounded(
+        client,
+        ws_tx,
+        ws_rx,
+        pproxy_transport::Egress::Cf,
+        &(),
+        Some(idle),
+        Some(absolute),
+    )
+    .await;
+    if let Ok(Some(hit)) = outcome {
+        let reason = match hit {
+            pproxy_transport::RelayDeadlineHit::Idle => "relay_idle_timeout",
+            pproxy_transport::RelayDeadlineHit::Absolute => "relay_absolute_timeout",
+        };
+        tracing::warn!(
+            trace_id = %conn_id,
+            conn_id = %conn_id,
+            reason,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "tunnel relay deadline hit, forcing disconnect and releasing permit"
+        );
+    }
 }
 
 

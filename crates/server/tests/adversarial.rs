@@ -8,14 +8,29 @@
 //!    读窗上限 30s 内持 permit）；
 //! ② 超大畸形首行/请求头（垃圾首行 64KB、单行请求头 1MB、超长 CONNECT 头 >16KB）
 //!    —— 断言确定终止（4xx/关闭）且不挂死、不占满上限；
-//! ③ 确定性竞态：固定种子 LCG（确定性抖动）+ tokio::sync::Barrier 同步起跑 +
-//!    固定迭代次数，禁止纯 sleep 概率等待。
+//! ③ 确定性竞态（rev2 重冻结，2026-10-09）：固定种子 LCG（确定性抖动）+
+//!    tokio::sync::Barrier 同步起跑 + 固定迭代次数，禁止纯 sleep 概率等待。
 //!
-//! 红相判据（当前实现）：
+//! 红相判据（未修复实现）：
 //!   AT-1：env=2 未生效（上限恒 256）→ 超限连接被服务（200）非 503 → 红；
-//!   AT-3 逾限轮：10 条并发全部被服务 → served > 注入上限 2 → 红。
-//!   AT-2 当前实现已满足（hyper/handle_conn 原生限界终止）—— 属回归守护，绿不破坏
+//!   AT-3 逾限轮：半开占满未生效 → 6 条并发全部被服务 → served>0 断言红。
+//!   AT-2 原生实现已满足（hyper/handle_conn 原生限界终止）—— 属回归守护，绿不破坏
 //!   套件红相（AT-1/AT-3 红）。
+//!
+//! AT-3 rev1→rev2 重冻结记录（executor-pproxy 机器证据 6 跑 3 败，非实现缺陷）：
+//!   rev1 缺陷①：逾限轮断言 served<=上限 —— 并发上限约束的是"同时持 permit 数"而
+//!     非"已完成请求数"；客户端读完 head 即 drop → 服务端任务 EOF → permit 归还 →
+//!     后续连接合法 200（六跑中 served=3×2 / served=2×4 → 概率断言，FLAKY）。
+//!   rev1 缺陷②：轮间无同步 —— 上一轮 keep-alive 连接 permit 未释放即起跑下一轮 →
+//!     轮内连接偶发 503（run4）。
+//!   rev2 确定性方案（本文件现态）：
+//!     a) AT-3 全部请求带 `Connection: close` 并读到 EOF 才算完成 —— 服务端
+//!        serve_connection 结束（响应后关闭连接）必然释放 permit，客户端读到 EOF
+//!        即观测到"该连接 permit 已释放"，天然消除 keep-alive 滞留窗口；所有 handle
+//!        join 后 sem 必然全空 → 下一轮起跑恒有满容量（无需轮询同步）。
+//!     b) 逾限轮先用 open_half_open(上限) 的静默半开连接占满 sem（peek 永久阻塞、
+//!        永不 EOF → permits 恒满），再 Barrier 齐发 OVER_BURST 真实请求 → 全部
+//!        503/closed、served(200)==0 确定成立（FIFO：半开先行入队，真实请求队尾）。
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -106,6 +121,48 @@ async fn exchange(addr: SocketAddr, req: &[u8], bound_ms: u64) -> Outcome {
                 let status: u16 = head.split_whitespace().nth(1).unwrap_or("0").parse().unwrap_or(0);
                 return Some((status, head));
             }
+        }
+    })
+    .await;
+    match read_res {
+        Ok(Some((s, h))) => Outcome::Served(s, h),
+        Ok(None) => Outcome::Closed,
+        Err(_) => Outcome::TimedOut,
+    }
+}
+
+/// 打开 n 个半开连接：connect 成功但**不发任何字节**（peek 永久阻塞 → 恒持 permit 且
+/// 永不 EOF）。AT-3 逾限轮用其占满 sem（FIFO：先行入队，真实请求必然队尾）。
+async fn open_half_open(addr: SocketAddr, n: usize) -> Vec<TcpStream> {
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n {
+        v.push(TcpStream::connect(addr).await.unwrap());
+    }
+    v
+}
+
+/// 确定性交换（AT-3 专用）：请求带 `Connection: close`，**读到 EOF 才算完成**。
+/// 对端完全 close ⇒ 服务端 `serve_connection` 已结束 ⇒ 该连接 permit 必已释放
+/// （消除 keep-alive 滞留窗口 = Lead 裁决"对端完全 close"确认的确定性实现）。
+/// 503 fast-fail 路径按契约 §1 亦为 close 后断开 → 同样读到 EOF。
+async fn exchange_close(addr: SocketAddr, req: &[u8], bound_ms: u64) -> Outcome {
+    let mut c = TcpStream::connect(addr).await.unwrap();
+    c.write_all(req).await.unwrap();
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    let read_res = tokio::time::timeout(Duration::from_millis(bound_ms), async {
+        loop {
+            let n = c.read(&mut tmp).await.unwrap();
+            if n == 0 {
+                // 有头则解析状态，无头 = 直接关闭
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf).into_owned();
+                    let status: u16 = head.split_whitespace().nth(1).unwrap_or("0").parse().unwrap_or(0);
+                    return Some((status, head));
+                }
+                return None;
+            }
+            buf.extend_from_slice(&tmp[..n]);
         }
     })
     .await;
@@ -214,8 +271,9 @@ async fn oversized_malformed_first_line_and_headers_terminate() {
     println!("PASS: oversized/garbage first-line & headers all terminate, service unaffected");
 }
 
-/// ③ 确定性竞态：固定种子 LCG + Barrier 同步起跑 + 固定迭代次数。
-/// 轮内并发（≤ 上限）全部须 200；逾限轮（> 上限）须出现 fast-fail 且不挂死。
+/// ③ 确定性竞态（rev2 重冻结）：固定种子 LCG + Barrier 同步起跑 + 固定迭代次数。
+/// 轮内并发（≤ 上限）全部须 200；逾限轮以半开连接占满 sem → 全部 503/关闭、
+/// served(200)==0 确定成立。rev1→rev2 缺陷与方案见文件头。
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn deterministic_race_fixed_seed_barrier_fixed_iterations() {
     let _guard = env_lock();
@@ -235,7 +293,8 @@ async fn deterministic_race_fixed_seed_barrier_fixed_iterations() {
     let addr = start_gateway(gw_state("at3")).await;
     let mut rng = Lcg::new(0x5EED_2026);
 
-    // 固定迭代轮：轮内并发 == 注入上限，全部应被服务 200。
+    // 固定迭代轮（rev2-a：Connection: close + 读到 EOF ⇒ handle join 后 sem 必全空，
+    // 轮间零滞留窗口，无需轮询即确定性满容量进入下一轮）。
     for round in 0..RACE_ROUNDS {
         let barrier = Arc::new(Barrier::new(IN_BURST));
         let mut handles = Vec::new();
@@ -245,10 +304,10 @@ async fn deterministic_race_fixed_seed_barrier_fixed_iterations() {
             let pad_len = rng.next_in(64) + 1;
             handles.push(tokio::spawn(async move {
                 barrier.wait().await;
-                let mut req = b"GET / HTTP/1.1\r\nX-Jitter: ".to_vec();
+                let mut req = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Jitter: ".to_vec();
                 req.extend(std::iter::repeat(b'j').take(pad_len));
-                req.extend_from_slice(b"\r\n\r\n");
-                exchange(addr, &req, CONTRACT_BOUND_MS).await
+                req.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+                exchange_close(addr, &req, CONTRACT_BOUND_MS).await
             }));
         }
         for (i, h) in handles.into_iter().enumerate() {
@@ -256,20 +315,25 @@ async fn deterministic_race_fixed_seed_barrier_fixed_iterations() {
             assert!(
                 matches!(&o, Outcome::Served(200, _)),
                 "L2-AT ③ 轮 {round} 违约: 轮内并发(≤上限 {INJECTED_LIMIT}) 第 {i} 条连接必须在 \
-                 {CONTRACT_BOUND_MS}ms 内 200, 实际 {o:?}"
+                 {CONTRACT_BOUND_MS}ms 内 200（读到 EOF），实际 {o:?}"
             );
         }
+        // 所有 handle 已读到 EOF ⇒ 服务端 serve_connection 全结束 ⇒ permit 全释放
+        // （Lead 裁决"对端完全 close"确认的确定性实现，非轮询概率）。
     }
 
-    // 逾限轮：OVER_BURST(6) > 注入上限 2 —— 全部连接须确定终止（200 或 503/关闭），
-    // 且被服务数 ≤ 注入上限。当前实现 env 未生效（上限 256）→ 全部 200（served=6>2）→ 红。
+    // 逾限轮（rev2-b）：半开连接占满 sem（peek 永久阻塞、永不 EOF → permits 恒满，
+    // FIFO 先行入队）→ OVER_BURST 真实请求全部 fast-fail 503/关闭、served==0 确定。
+    // 当前（未修复）实现 env 未生效（上限 256，未饱和）→ 全部 200 → served>0 → 红。
+    let _holders = open_half_open(addr, INJECTED_LIMIT).await;
     let barrier = Arc::new(Barrier::new(OVER_BURST));
     let mut handles = Vec::new();
     for _ in 0..OVER_BURST {
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
             barrier.wait().await;
-            exchange(addr, GET_ROOT, CONTRACT_BOUND_MS).await
+            let req = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n".to_vec();
+            exchange_close(addr, &req, CONTRACT_BOUND_MS).await
         }));
     }
     let mut served = 0usize;
@@ -294,11 +358,16 @@ async fn deterministic_race_fixed_seed_barrier_fixed_iterations() {
         "L2-AT ③ 逾限轮违约: 终止连接数 != {OVER_BURST}（served={served}, fast_failed={fast_failed}）"
     );
     assert!(
-        served <= INJECTED_LIMIT,
-        "L2-AT ③ 逾限轮违约: 并发上限 {INJECTED_LIMIT} 下被服务连接 ={served} > {INJECTED_LIMIT} —— \
-         红相判据：当前实现不读 env PPROXY_MAX_CONNECTIONS（上限恒 256），逾限未被 fast-fail"
+        fast_failed > 0,
+        "L2-AT ③ 逾限轮违约: fast_failed=0 —— 半开占满上限后无任何 fast-fail。\
+         红相判据：当前实现不读 env PPROXY_MAX_CONNECTIONS（上限恒 256，未饱和）→ 逾限未被拒绝"
+    );
+    assert_eq!(
+        served, 0,
+        "L2-AT ③ 逾限轮违约: 半开占满上限（{INJECTED_LIMIT} 条恒持 permit）后真实请求 served={served} \
+         != 0 —— 并发占满未被 fast-fail（红相判据：env 注入未生效，上限恒 256 未饱和）"
     );
     println!(
-        "PASS: deterministic race — served={served} (<= limit {INJECTED_LIMIT}), fast-failed={fast_failed}, iterations={RACE_ROUNDS}"
+        "PASS: deterministic race — served={served}, fast_failed={fast_failed} (== OVER_BURST), iterations={RACE_ROUNDS}"
     );
 }

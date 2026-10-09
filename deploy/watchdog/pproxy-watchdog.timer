@@ -1,0 +1,17 @@
+# pproxy accept 队列看门狗 timer（契约 wave-pproxy-accept-loop §4）
+#
+# 每 5s 触发一次 scripts/pproxy-watchdog.sh：Recv-Q ≥ 64 连续 3 次采样 →
+# sudo systemctl restart pproxy；触发后 60s 冷却（防重启循环）。
+# 模式对齐既有 pproxy-self-check.timer（OnBootSec / Persistent）。
+
+[Unit]
+Description=pproxy accept-queue watchdog (5s interval)
+After=network-online.target
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

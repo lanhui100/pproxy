@@ -25,10 +25,33 @@ use pproxy_core::{EdgeClient, ForwardRequest, TokenService};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
-/// 全局并发连接上限（T3 §2.3 S-P1-额外）：排队即天然背压，不做主动拒绝。
+/// 全局并发连接上限（T3 §2.3 S-P1-额外 + wave-pproxy-accept-loop 契约 §1/§2）：
+/// 饱和 fast-fail 语义——达到上限时新连接立即 503/关闭（不排队、不阻塞 accept 循环）。
+/// `PPROXY_MAX_CONNECTIONS` env 优先，常量保留为 fallback（默认值）；
+/// 非法/0 回落 256 并 warn（含 raw 值）。
 pub const MAX_CONCURRENT_CONNECTIONS: usize = 256;
 /// 请求 body 上限（沿旧实现）：超限 413。
 pub const MAX_BODY_SIZE: usize = 32 * 1024 * 1024;
+
+/// 读取并发上限（契约 §2 注入模式）：env > 常量；非法/0 → 回落 256 并 warn。
+/// 每次调用读取（serve_data_plane 每 listener 一次），测试经 set_var 注入即时生效。
+pub fn max_connections_from_env() -> usize {
+    match std::env::var("PPROXY_MAX_CONNECTIONS") {
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(v) if v > 0 => v,
+            _ => {
+                tracing::warn!(
+                    env = "PPROXY_MAX_CONNECTIONS",
+                    raw = %raw.trim(),
+                    default = MAX_CONCURRENT_CONNECTIONS,
+                    "PPROXY_MAX_CONNECTIONS invalid or zero; falling back to default"
+                );
+                MAX_CONCURRENT_CONNECTIONS
+            }
+        },
+        Err(_) => MAX_CONCURRENT_CONNECTIONS,
+    }
+}
 
 const X_PONY_TOKEN: &str = "x-pony-token";
 
@@ -460,36 +483,87 @@ fn not_found() -> Response {
 /// 直接由 connect::handle_connect 走 WS 隧道；其余由 hyper http1 驱动（axum 路由）。
 /// Semaphore 说明：permit 在 `hyper::serve_connection` 或 tunnel 连接结束时释放。
 /// 隧道连接持 permit 至 relay 结束（长连接场景下实际上限由 OS TCP 连接数构成第二道槛）。
+///
+/// wave-pproxy-accept-loop 根治（契约 §1）：permit 获取**永不阻塞 accept 循环**——
+/// `try_acquire_owned()` 成功 → spawn 持有 permit 的任务；失败 → 原地立即写
+/// 503/关闭（不 spawn、不排队、不获取许可），accept() 持续排空内核队列。
+/// 饱和时新连接快速收到 `503 Service Unavailable` + `connection: close` +
+/// `x-pproxy-reason: saturation`（契约 §1 fast-fail，终局 0 重试）。
 pub async fn serve_data_plane(listener: TcpListener, state: GatewayState) -> std::io::Result<()> {
-    let sem = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let cap = max_connections_from_env();
+    let sem = Arc::new(Semaphore::new(cap));
     let router = data_router(state.clone());
+    // 连接级合成 trace id（契约日志条款）：conn_<seq>_<unix_ms>
+    let mut conn_seq: u64 = 0;
     loop {
         let (stream, _) = listener.accept().await?;
+        conn_seq += 1;
         // 入站 socket 禁用 Nagle：小包响应（headers/首 chunk）不再等 40ms+
         // delayed-ACK 凑包，hyper 手动 serve_connection 不会代为设置。
         let _ = stream.set_nodelay(true);
-        let permit = Arc::clone(&sem).acquire_owned().await;
-        let router = router.clone();
-        let state = state.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            handle_conn(stream, router, state).await;
-        });
+        let conn_id = format!(
+            "conn_{conn_seq}_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        match Arc::clone(&sem).try_acquire_owned() {
+            Ok(permit) => {
+                let router = router.clone();
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    handle_conn(stream, router, state, &conn_id).await;
+                });
+            }
+            Err(_) => {
+                // 并发上限已满：快速 503/关闭（契约 §1 fast-fail，日志条款字段齐备）
+                let sem_used = cap - sem.available_permits();
+                tracing::warn!(
+                    trace_id = %conn_id,
+                    reason = "saturation",
+                    conn_id = %conn_id,
+                    sem_used,
+                    sem_capacity = cap,
+                    action = "close_503",
+                    "accept saturation fast-fail: 503/close without blocking accept loop"
+                );
+                reject_saturation(stream).await;
+            }
+        }
     }
+}
+
+/// 饱和 fast-fail：写契约 503 头后关闭（契约 §1），绝不进入 peek/relay 路径。
+/// 不 spawn 不排队——原地立即终止，防任务堆积（契约 §5 参考）。
+async fn reject_saturation(mut stream: tokio::net::TcpStream) {
+    use tokio::io::AsyncWriteExt;
+    let resp = b"HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\nx-pproxy-reason: saturation\r\ncontent-length: 0\r\n\r\n";
+    let _ = stream.write_all(resp).await;
+    let _ = stream.shutdown().await;
 }
 
 /// 单连接处理：peek 首行分流 CONNECT 与普通 HTTP。
 /// F3：header_read_timeout 由 hyper 覆盖（非 CONNECT 路径）；CONNECT 路径读头后
 /// 需在 30s 内完成首行接收（防慢速连接占满 Semaphore 配额）。
+/// wave-pproxy-accept-loop：peek 同样加 30s 首字节窗口（对齐 CONNECT 首行 30s 预算，
+/// F3 既有策略）——半开连接（connect 后不发任何字节）不得无限期占 permit。
 async fn handle_conn(
     mut stream: tokio::net::TcpStream,
     router: Router,
     state: GatewayState,
+    conn_id: &str,
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut peek_buf = [0u8; 16];
-    let n = match stream.peek(&mut peek_buf).await {
-        Ok(n) if n > 0 => n,
+    let n = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        stream.peek(&mut peek_buf),
+    )
+    .await
+    {
+        Ok(Ok(n)) if n > 0 => n,
         _ => return,
     };
     let first = &peek_buf[..n];
@@ -523,7 +597,7 @@ async fn handle_conn(
             None => (&buf[..], Vec::new()),
         };
         let head = String::from_utf8_lossy(head_bytes);
-        let _ = crate::connect::handle_connect_raw(state, &head, leftover, stream).await;
+        let _ = crate::connect::handle_connect_raw(state, &head, leftover, stream, conn_id).await;
         return;
     }
     // 普通 HTTP：axum Router 经适配器作为 hyper Service 驱动（TokioIo 桥接 tokio stream）。

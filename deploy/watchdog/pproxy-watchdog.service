@@ -1,0 +1,17 @@
+# pproxy accept 队列看门狗 service（由 pproxy-watchdog.timer 每 5s 触发，契约 wave-pproxy-accept-loop §4）
+
+[Unit]
+Description=pproxy accept-queue watchdog (Recv-Q saturation -> restart)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dm
+WorkingDirectory=/home/dm/pproxy
+ExecStart=/home/dm/pproxy/scripts/pproxy-watchdog.sh
+# 判据/间隔/冷却均可经 Environment= 注入（默认 64 / 3 次 / 5s / 60s 冷却）
+# Environment=PPROXY_WATCHDOG_THRESHOLD=64
+# Environment=PPROXY_WATCHDOG_SAMPLES=3
+# Environment=PPROXY_WATCHDOG_COOLDOWN_S=60
+# 测试接缝：Environment=PPROXY_WATCHDOG_DRYRUN=1（打印 restart 命令不执行）
+# 依赖：dm 具备 sudo NOPASSWD（systemctl restart pproxy，本机已配置）
