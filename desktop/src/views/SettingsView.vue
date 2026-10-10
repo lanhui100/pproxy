@@ -530,7 +530,10 @@ interface ClashConfigData {
   port: number
   has_token: boolean
   token: string | null
+  is_tunnel?: boolean
+  tunnel_host?: string | null
   subscription_url: string
+  clash_scheme_url?: string
   yaml: string
   qr_svg: string
 }
@@ -539,6 +542,7 @@ const clashConfig = ref<ClashConfigData | null>(null)
 const loadingClash = ref(false)
 const showClashDialog = ref(false)
 const clashUrlCopied = ref(false)
+const clashSchemeCopied = ref(false)
 
 async function fetchClashConfig(): Promise<void> {
   loadingClash.value = true
@@ -579,6 +583,18 @@ async function copyClashUrl(): Promise<void> {
     clashUrlCopied.value = true
     toast.success('已复制订阅链接', clashConfig.value.subscription_url)
     setTimeout(() => { clashUrlCopied.value = false }, 2500)
+  } catch {
+    toast.error('复制失败')
+  }
+}
+
+async function copyClashScheme(): Promise<void> {
+  if (!clashConfig.value?.clash_scheme_url) return
+  try {
+    await navigator.clipboard.writeText(clashConfig.value.clash_scheme_url)
+    clashSchemeCopied.value = true
+    toast.success('已复制一键导入链接', clashConfig.value.clash_scheme_url)
+    setTimeout(() => { clashSchemeCopied.value = false }, 2500)
   } catch {
     toast.error('复制失败')
   }
@@ -1225,7 +1241,23 @@ onMounted(async () => {
               class="w-48 h-48 flex items-center justify-center overflow-hidden"
               v-html="clashConfig.qr_svg"
             />
-            <span class="text-[11px] text-zinc-500 mt-2">手机与电脑连接同一局域网 WiFi 扫码即用</span>
+            <div class="flex items-center gap-1.5 mt-2">
+              <span
+                v-if="clashConfig.is_tunnel"
+                class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-800"
+              >
+                公网隧道漫游模式
+              </span>
+              <span
+                v-else
+                class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-800"
+              >
+                局域网直连模式
+              </span>
+              <span class="text-[11px] text-zinc-500">
+                {{ clashConfig.is_tunnel ? '支持手机公网蜂窝及任意 Wi-Fi 扫码即用' : '手机需与电脑连接同一局域网 Wi-Fi' }}
+              </span>
+            </div>
           </div>
 
           <!-- 订阅链接复制（tabindex -1 且聚焦时无 outline/ring，不主动聚焦） -->
@@ -1247,6 +1279,29 @@ onMounted(async () => {
                 <Check v-if="clashUrlCopied" class="size-3.5 mr-1 text-emerald-600" />
                 <Copy v-else class="size-3.5 mr-1" />
                 {{ clashUrlCopied ? '已复制' : '复制' }}
+              </Button>
+            </div>
+          </div>
+
+          <!-- 一键唤起 / DeepLink 复制 -->
+          <div v-if="clashConfig.clash_scheme_url" class="space-y-1.5 pt-1">
+            <Label class="text-xs text-muted-foreground">一键导入链接 (DeepLink)</Label>
+            <div class="flex items-center gap-2">
+              <input
+                readonly
+                tabindex="-1"
+                :value="clashConfig.clash_scheme_url"
+                class="font-mono text-xs h-8 bg-muted/50 rounded-lg px-2.5 py-1 text-foreground w-full min-w-0 border-0 outline-none focus:outline-none focus:ring-0 select-all"
+              />
+              <Button
+                variant="secondary"
+                size="sm"
+                @click="copyClashScheme"
+                class="h-8 shrink-0 text-xs"
+              >
+                <Check v-if="clashSchemeCopied" class="size-3.5 mr-1 text-emerald-600" />
+                <Copy v-else class="size-3.5 mr-1" />
+                {{ clashSchemeCopied ? '已复制' : '复制' }}
               </Button>
             </div>
           </div>

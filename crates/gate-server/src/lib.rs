@@ -108,6 +108,8 @@ struct GateFirstFrame {
 
 pub fn build_router(cfg: Arc<ServerConfig>) -> Router {
     Router::new()
+        .route("/clash", get(handle_clash_subscription))
+        .route("/api/clash", get(handle_clash_subscription))
         .route("/debug", get(handle_debug))
         .route("/ws", get(handle_ws))
         .route("/api/ws", get(handle_ws))
@@ -267,6 +269,123 @@ async fn handle_root() -> impl IntoResponse {
         StatusCode::OK,
         [("content-type", "text/plain; charset=utf-8")],
         "Pony Gate Native Rust is running.\n",
+    )
+}
+
+/// 供移动端（Clash Meta / Mihomo / 小火箭）订阅的公网端点
+/// 支持通过 GET /clash?token=... 或 GET /api/clash?token=... 直接拉取对齐公网隧道的 YAML 配置
+async fn handle_clash_subscription(
+    State(_cfg): State<Arc<ServerConfig>>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let token = params.get("token").cloned().or_else(|| {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|s| s.to_string())
+    });
+
+    let host = headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("rn.ponygo.fun")
+        .split(':')
+        .next()
+        .unwrap_or("rn.ponygo.fun");
+
+    let yaml = generate_clash_meta_yaml(host, token.as_deref());
+
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/yaml; charset=utf-8"),
+            ("content-disposition", "inline; filename=\"clash.yaml\""),
+        ],
+        yaml,
+    )
+}
+
+/// 动态合成标准 Clash Meta / Mihomo 配置文件 YAML（对准公网 Gate 隧道）
+fn generate_clash_meta_yaml(gate_host: &str, token: Option<&str>) -> String {
+    let token_val = token.unwrap_or("");
+    format!(
+        r#"# ================================================================
+#  Pony Proxy — Clash Meta / Mihomo 全网漫游出海配置
+# ================================================================
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+
+proxies:
+  - name: "Pony-Tunnel"
+    type: ws
+    server: {gate_host}
+    port: 443
+    tls: true
+    sni: {gate_host}
+    skip-cert-verify: false
+    ws-opts:
+      path: /ws
+      headers:
+        Authorization: "Bearer {token_val}"
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    url: "http://cp.cloudflare.com/generate_204"
+    interval: 300
+    proxies:
+      - "Pony-Tunnel"
+      - DIRECT
+
+rules:
+  # 1. 服务端与内网直连保护
+  - DOMAIN-SUFFIX,{gate_host},DIRECT
+  - DOMAIN-SUFFIX,ponygo.fun,DIRECT
+  - DOMAIN-SUFFIX,ponyjob.top,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+
+  # 2. 探活直连保护
+  - DOMAIN,connectivitycheck.gstatic.com,DIRECT
+  - DOMAIN,connectivitycheck.android.com,DIRECT
+  - DOMAIN,clients3.google.com,DIRECT
+  - DOMAIN,msftconnecttest.com,DIRECT
+  - DOMAIN,captive.apple.com,DIRECT
+  - DOMAIN,cp.cloudflare.com,DIRECT
+
+  # 3. 核心海外 AI 服务
+  - DOMAIN-SUFFIX,openai.com,PROXY
+  - DOMAIN-SUFFIX,chatgpt.com,PROXY
+  - DOMAIN-SUFFIX,oaistatic.com,PROXY
+  - DOMAIN-SUFFIX,oaiusercontent.com,PROXY
+  - DOMAIN-SUFFIX,anthropic.com,PROXY
+  - DOMAIN-SUFFIX,claude.ai,PROXY
+  - DOMAIN-SUFFIX,deepmind.google,PROXY
+  - DOMAIN-SUFFIX,perplexity.ai,PROXY
+  - DOMAIN-SUFFIX,huggingface.co,PROXY
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-SUFFIX,googleapis.com,PROXY
+  - DOMAIN-SUFFIX,youtube.com,PROXY
+  - DOMAIN-SUFFIX,googlevideo.com,PROXY
+  - DOMAIN-SUFFIX,x.com,PROXY
+  - DOMAIN-SUFFIX,twitter.com,PROXY
+  - DOMAIN-SUFFIX,telegram.org,PROXY
+  - DOMAIN-SUFFIX,t.me,PROXY
+  - DOMAIN-SUFFIX,github.com,PROXY
+  - DOMAIN-SUFFIX,githubusercontent.com,PROXY
+
+  # 国内直连
+  - DOMAIN-SUFFIX,cn,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,DIRECT
+"#
     )
 }
 

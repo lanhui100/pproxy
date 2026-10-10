@@ -57,6 +57,22 @@ mod tests {
         assert_eq!(json["user"]["quota_bytes"], 100 * 1024 * 1024);
         assert_eq!(json["user"]["status"], "active");
 
+        // 3. 验证 /clash 订阅端点对齐公网隧道与 token
+        let req_clash = Request::builder()
+            .uri(format!("/clash?token={}", token))
+            .header("Host", "rn.ponygo.fun")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp_clash = app.clone().oneshot(req_clash).await.unwrap();
+        assert_eq!(resp_clash.status(), StatusCode::OK);
+        let clash_bytes = axum::body::to_bytes(resp_clash.into_body(), 1024 * 1024).await.unwrap();
+        let clash_yaml = String::from_utf8(clash_bytes.to_vec()).unwrap();
+        assert!(clash_yaml.contains("name: \"Pony-Tunnel\""));
+        assert!(clash_yaml.contains("server: rn.ponygo.fun"));
+        assert!(clash_yaml.contains(&format!("Authorization: \"Bearer {}\"", token)));
+        assert!(clash_yaml.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
+
         // 2. 模拟超额情况
         used_bytes.insert("usr_alice".into(), std::sync::atomic::AtomicU64::new(100 * 1024 * 1024));
         let req_over = Request::builder()

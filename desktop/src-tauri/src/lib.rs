@@ -2223,10 +2223,26 @@ fn get_desktop_lan_ip() -> String {
 }
 
 /// 生成标准 Clash Meta / Mihomo 配置文件 YAML
-fn build_clash_meta_yaml(server_ip: &str, port: u16, token: Option<&str>) -> String {
-    let auth_section = match token {
-        Some(t) if !t.trim().is_empty() => format!("    username: \"{}\"\n    password: \"{}\"\n", t.trim(), t.trim()),
-        _ => String::new(),
+/// 支持公网隧道模式（tunnel_host: Some）与局域网 HTTP 模式（tunnel_host: None）
+fn build_clash_meta_yaml(server_ip: &str, port: u16, token: Option<&str>, tunnel_host: Option<&str>) -> String {
+    let (proxy_block, group_members) = match tunnel_host {
+        Some(host) => {
+            let tok = token.unwrap_or("").trim();
+            let proxy = format!(
+                "  - name: \"Pony-Tunnel\"\n    type: ws\n    server: {host}\n    port: 443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    ws-opts:\n      path: /ws\n      headers:\n        Authorization: \"Bearer {tok}\"\n"
+            );
+            (proxy, "      - \"Pony-Tunnel\"\n      - DIRECT".to_string())
+        }
+        None => {
+            let auth_section = match token {
+                Some(t) if !t.trim().is_empty() => format!("    username: \"{}\"\n    password: \"{}\"\n", t.trim(), t.trim()),
+                _ => String::new(),
+            };
+            let proxy = format!(
+                "  - name: \"Pony-Proxy\"\n    type: http\n    server: {server_ip}\n    port: {port}\n{auth_section}"
+            );
+            (proxy, "      - \"Pony-Proxy\"\n      - DIRECT".to_string())
+        }
     };
 
     format!(
@@ -2240,23 +2256,18 @@ log-level: info
 ipv6: false
 
 proxies:
-  - name: "Pony-Proxy"
-    type: http
-    server: {server_ip}
-    port: {port}
-{auth_section}
-proxy-groups:
+{proxy_block}proxy-groups:
   - name: "PROXY"
     type: select
     url: "http://cp.cloudflare.com/generate_204"
     interval: 300
     proxies:
-      - "Pony-Proxy"
-      - DIRECT
+{group_members}
 
 rules:
   # 1. 服务端公网与局域网直连保护
   - DOMAIN-SUFFIX,ponygo.fun,DIRECT
+  - DOMAIN-SUFFIX,ponyjob.top,DIRECT
   - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
   - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
@@ -2346,8 +2357,39 @@ fn proxy_clash_config_get(custom_lan_ip: Option<String>, custom_port: Option<u16
     let token = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten()
         .filter(|t| !t.trim().is_empty());
 
-    let yaml = build_clash_meta_yaml(&lan_ip, port, token.as_deref());
-    let subscription_url = format!("http://{lan_ip}:{port}/clash.yaml");
+    // 探测公网隧道端点（优先对齐公网 Gate，实现全网漫游）
+    let (eff_url, _) = tunnel_config_load();
+    let gate_host = eff_url.as_deref().and_then(|u| {
+        let first = u.split(',').next()?.trim();
+        let stripped = first
+            .trim_start_matches("wss://")
+            .trim_start_matches("ws://")
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        let hostport = stripped.split('/').next().unwrap_or("").trim();
+        let host = hostport.split(':').next()?.trim();
+        if host.is_empty() { None } else { Some(host.to_string()) }
+    });
+
+    let (yaml, subscription_url, is_tunnel) = match gate_host.as_deref() {
+        Some(ghost) if token.is_some() => {
+            // 公网隧道模式：订阅直接走公网 Gate，节点直连公网 Gate 隧道
+            let tok_str = token.as_deref().unwrap_or("");
+            let y = build_clash_meta_yaml(&lan_ip, port, token.as_deref(), Some(ghost));
+            let sub = format!("https://{ghost}/api/clash?token={tok_str}");
+            (y, sub, true)
+        }
+        _ => {
+            // 局域网模式（无公网隧道配置时的保底）
+            let y = build_clash_meta_yaml(&lan_ip, port, token.as_deref(), None);
+            let sub = format!("http://{lan_ip}:{port}/clash.yaml");
+            (y, sub, false)
+        }
+    };
+
+    // DeepLink Scheme：clash://install-config?url=...
+    let encoded_url = url::form_urlencoded::byte_serialize(subscription_url.as_bytes()).collect::<String>();
+    let clash_scheme_url = format!("clash://install-config?url={encoded_url}&name=PonyProxy");
 
     // 生成二维码：手机扫描订阅链接最为通用
     let qr_svg = render_qr_svg(&subscription_url)?;
@@ -2357,7 +2399,10 @@ fn proxy_clash_config_get(custom_lan_ip: Option<String>, custom_port: Option<u16
         "port": port,
         "has_token": token.is_some(),
         "token": token,
+        "is_tunnel": is_tunnel,
+        "tunnel_host": gate_host,
         "subscription_url": subscription_url,
+        "clash_scheme_url": clash_scheme_url,
         "yaml": yaml,
         "qr_svg": qr_svg,
     }))
@@ -2873,14 +2918,20 @@ mod tests {
 
     #[test]
     fn test_clash_meta_yaml_and_qr_svg_generation() {
-        let yaml = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"));
-        assert!(yaml.contains("server: 192.168.1.50"));
-        assert!(yaml.contains("port: 8899"));
-        assert!(yaml.contains("username: \"token_abc\""));
-        assert!(yaml.contains("password: \"token_abc\""));
-        assert!(yaml.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
+        let yaml_lan = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"), None);
+        assert!(yaml_lan.contains("server: 192.168.1.50"));
+        assert!(yaml_lan.contains("port: 8899"));
+        assert!(yaml_lan.contains("username: \"token_abc\""));
+        assert!(yaml_lan.contains("password: \"token_abc\""));
+        assert!(yaml_lan.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
 
-        let qr = render_qr_svg("http://192.168.1.50:8899/clash.yaml");
+        let yaml_tunnel = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"), Some("rn.ponygo.fun"));
+        assert!(yaml_tunnel.contains("name: \"Pony-Tunnel\""));
+        assert!(yaml_tunnel.contains("server: rn.ponygo.fun"));
+        assert!(yaml_tunnel.contains("Authorization: \"Bearer token_abc\""));
+        assert!(yaml_tunnel.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
+
+        let qr = render_qr_svg("https://rn.ponygo.fun/api/clash?token=token_abc");
         assert!(qr.is_ok());
         let svg = qr.unwrap();
         assert!(svg.contains("<svg"));
