@@ -297,11 +297,14 @@ async fn handle_clash_subscription(
 
     let yaml = generate_clash_meta_yaml(host, token.as_deref());
 
+    // 补充标准 Clash 订阅响应头，杜绝移动端/Mihomo 在拉取订阅时 EOF
     (
         StatusCode::OK,
         [
             ("content-type", "application/yaml; charset=utf-8"),
             ("content-disposition", "inline; filename=\"clash.yaml\""),
+            ("subscription-userinfo", "upload=0; download=0; total=107374182400; expire=0"),
+            ("profile-update-interval", "24"),
         ],
         yaml,
     )
@@ -322,16 +325,14 @@ ipv6: false
 
 proxies:
   - name: "Pony-Tunnel"
-    type: ws
+    type: http
     server: {gate_host}
     port: 443
     tls: true
     sni: {gate_host}
     skip-cert-verify: false
-    ws-opts:
-      path: /ws
-      headers:
-        Authorization: "Bearer {token_val}"
+    headers:
+      Authorization: "Bearer {token_val}"
 
 proxy-groups:
   - name: "PROXY"

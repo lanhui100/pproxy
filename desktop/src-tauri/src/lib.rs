@@ -2229,7 +2229,7 @@ fn build_clash_meta_yaml(server_ip: &str, port: u16, token: Option<&str>, tunnel
         Some(host) => {
             let tok = token.unwrap_or("").trim();
             let proxy = format!(
-                "  - name: \"Pony-Tunnel\"\n    type: ws\n    server: {host}\n    port: 443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    ws-opts:\n      path: /ws\n      headers:\n        Authorization: \"Bearer {tok}\"\n"
+                "  - name: \"Pony-Tunnel\"\n    type: http\n    server: {host}\n    port: 443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    headers:\n      Authorization: \"Bearer {tok}\"\n"
             );
             (proxy, "      - \"Pony-Tunnel\"\n      - DIRECT".to_string())
         }
@@ -2927,6 +2927,9 @@ mod tests {
 
         let yaml_tunnel = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"), Some("rn.ponygo.fun"));
         assert!(yaml_tunnel.contains("name: \"Pony-Tunnel\""));
+        assert!(yaml_tunnel.contains("type: http"));
+        assert!(!yaml_tunnel.contains("type: ws"), "Clash Meta 严禁非法 type: ws 出站代理");
+        assert!(yaml_tunnel.contains("tls: true"));
         assert!(yaml_tunnel.contains("server: rn.ponygo.fun"));
         assert!(yaml_tunnel.contains("Authorization: \"Bearer token_abc\""));
         assert!(yaml_tunnel.contains("DOMAIN-SUFFIX,openai.com,PROXY"));

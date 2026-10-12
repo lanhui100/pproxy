@@ -69,9 +69,9 @@ fn generate_clash_yaml_mode(
     // Clash 严格校验拒绝加载）。
     let (proxy_block, group_members) = match tunnel_host {
         Some(host) => {
+            let tok = token.unwrap_or("");
             let proxy = format!(
-                "  - name: \"Pony-Tunnel\"\n    type: ws\n    server: {host}\n    port: 443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    ws-opts:\n      path: /ws\n      headers:\n        Authorization: \"Bearer {}\"\n",
-                token.unwrap_or("")
+                "  - name: \"Pony-Tunnel\"\n    type: http\n    server: {host}\n    port: 443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    headers:\n      Authorization: \"Bearer {tok}\"\n"
             );
             (proxy, "      - \"Pony-Tunnel\"\n      - DIRECT".to_string())
         }
@@ -421,20 +421,21 @@ mod tests {
 
     #[test]
     fn test_generate_clash_yaml_tunnel_aligns_gate_host() {
-        // B015：隧道模式 server/SNI/HOST 自动对准 gate 域名，Bearer 鉴权走 ws-opts headers
+        // B015：隧道模式 server/SNI/HOST 自动对准 gate 域名，Bearer 鉴权走 headers
         let yaml = generate_clash_yaml_tunnel("gate.ponygo.fun", Some("tok_123")).unwrap();
-        assert!(yaml.contains("type: ws"), "隧道模式是 ws 代理");
+        assert!(yaml.contains("type: http"), "隧道模式采用标准 http tls 代理");
+        assert!(!yaml.contains("type: ws"), "严禁非法 type: ws 出站代理");
+        assert!(yaml.contains("tls: true"));
         assert!(yaml.contains("server: gate.ponygo.fun"));
         assert!(yaml.contains("port: 443"));
         assert!(yaml.contains("sni: gate.ponygo.fun"), "SNI 对准 gate 域名");
-        assert!(yaml.contains("path: /ws"), "对齐 gate /ws 路径");
         assert!(yaml.contains("Authorization: \"Bearer tok_123\""), "token 走 Bearer");
         assert!(!yaml.contains("username:"), "隧道模式不用 http 基本认证");
         // 对抗审核 P1：group 成员必须与 proxies 定义一致（隧道模式只有 Pony-Tunnel）
         assert!(!yaml.contains("\"Pony-Proxy\""), "隧道模式不得引用未定义的 Pony-Proxy");
         assert!(yaml.contains("\"Pony-Tunnel\""));
         // YAML 结构完整：proxies 后有 proxy-groups，缩进合法
-        assert!(yaml.contains("proxies:\n  - name: \"Pony-Tunnel\"\n    type: ws"));
+        assert!(yaml.contains("proxies:\n  - name: \"Pony-Tunnel\"\n    type: http"));
     }
 
     #[test]

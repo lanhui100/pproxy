@@ -66,9 +66,17 @@ mod tests {
 
         let resp_clash = app.clone().oneshot(req_clash).await.unwrap();
         assert_eq!(resp_clash.status(), StatusCode::OK);
+        assert!(resp_clash.headers().contains_key("subscription-userinfo"));
+        assert_eq!(
+            resp_clash.headers().get("profile-update-interval").and_then(|h| h.to_str().ok()),
+            Some("24")
+        );
         let clash_bytes = axum::body::to_bytes(resp_clash.into_body(), 1024 * 1024).await.unwrap();
         let clash_yaml = String::from_utf8(clash_bytes.to_vec()).unwrap();
         assert!(clash_yaml.contains("name: \"Pony-Tunnel\""));
+        assert!(clash_yaml.contains("type: http"));
+        assert!(!clash_yaml.contains("type: ws"), "Clash Meta 严禁非法 type: ws 出站代理");
+        assert!(clash_yaml.contains("tls: true"));
         assert!(clash_yaml.contains("server: rn.ponygo.fun"));
         assert!(clash_yaml.contains(&format!("Authorization: \"Bearer {}\"", token)));
         assert!(clash_yaml.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
