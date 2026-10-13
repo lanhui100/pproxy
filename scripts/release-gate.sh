@@ -39,7 +39,32 @@ echo "versions: package.json=$PKG_V tauri.conf.json=$TAURI_V Cargo.toml=$CARGO_V
 [[ "$PKG_V" == "$EXPECTED" ]] || fail "期望版本 $EXPECTED 与 package.json $PKG_V 不一致"
 pass "版本一致性"
 
-# ---- 2) 前端：类型检查 + 单测 + 生产构建 ----
+# ---- 2) 前端：类型检查 + 单测 + 生产构建 + Tauri 插件版本一致性 ----
+echo "→ 检查 Tauri 前端插件与 Rust Crate 版本对齐"
+python3 -c '
+import json, re, sys
+
+pkg = json.load(open("desktop/package.json"))
+cargo = open("desktop/src-tauri/Cargo.toml").read()
+deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+
+errors = []
+for p, v in deps.items():
+    if p.startswith("@tauri-apps/plugin-"):
+        crate_name = p.replace("@tauri-apps/plugin-", "tauri-plugin-")
+        clean_v = v.lstrip("^~")
+        m = re.search(rf"{crate_name}\s*=\s*\{{[^}}]*version\s*=\s*\"([^\"]+)\"", cargo)
+        if m:
+            crate_v = m.group(1).lstrip("^~")
+            # 校验 major.minor 必须完全一致，防止 Tauri CLI 抛 Found version mismatched packages 阻断构建
+            if clean_v.split(".")[:2] != crate_v.split(".")[:2]:
+                errors.append(f"{p} ({v}) 与 {crate_name} ({crate_v}) major.minor 不一致！")
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    sys.exit(1)
+' || fail "Tauri 插件前端版本与 Rust Crate 失配（发版将被 tauri build 阻断，请锁定一致）"
+pass "Tauri 插件版本对齐门禁"
 echo "→ pnpm check (vue-tsc)"
 (cd desktop && pnpm check) || fail "vue-tsc 类型检查未通过"
 echo "→ pnpm test (vitest)"
