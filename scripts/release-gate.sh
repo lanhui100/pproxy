@@ -44,8 +44,8 @@ echo "→ 检查 Tauri 前端插件与 Rust Crate 版本对齐"
 python3 -c '
 import json, re, sys
 
-pkg = json.load(open("desktop/package.json"))
-cargo = open("desktop/src-tauri/Cargo.toml").read()
+pkg = json.load(open("desktop/package.json", encoding="utf-8"))
+cargo = open("desktop/src-tauri/Cargo.toml", encoding="utf-8").read()
 deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
 
 errors = []
