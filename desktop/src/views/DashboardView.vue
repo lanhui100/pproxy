@@ -13,6 +13,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useToast } from '@/composables/useToast'
+import { captureProxyDiagnostic } from '@/lib/sentry'
 import { importConnectCode, isTauri, isUserAdmin, loadTunnelConfig, parseGateInput, saveTunnelToken, type UserClaims } from '@/lib/config'
 import {
   appendLatencyPoint,
@@ -420,11 +421,24 @@ async function testUserProxyRow(): Promise<void> {
   try {
     const point = await probeSite('google.com')
     if (point.err?.includes('代理未启用')) return
+    if (!point.ok && point.err) {
+      captureProxyDiagnostic({
+        category: 'probe_failure',
+        target: 'google.com',
+        error: point.err,
+        durationMs: point.ms,
+      })
+    }
     userProxyRow.value.history = appendLatencyPoint(userProxyRow.value.history, point)
     saveLatencySeries('iface:user_proxy', userProxyRow.value.history)
   } catch (e) {
     const errStr = String(e)
     if (errStr.includes('代理未启用')) return
+    captureProxyDiagnostic({
+      category: 'probe_failure',
+      target: 'google.com',
+      error: errStr,
+    })
     userProxyRow.value.history = appendLatencyPoint(userProxyRow.value.history, { ts: Date.now(), ok: false, err: errStr })
     saveLatencySeries('iface:user_proxy', userProxyRow.value.history)
   } finally {
@@ -545,11 +559,24 @@ async function testSiteRow(row: SiteRow, isManual = false): Promise<void> {
   try {
     const point = await probeSite(row.host)
     if (point.err?.includes('代理未启用')) return
+    if (!point.ok && point.err) {
+      captureProxyDiagnostic({
+        category: 'probe_failure',
+        target: row.host,
+        error: point.err,
+        durationMs: point.ms,
+      })
+    }
     row.history = appendLatencyPoint(row.history, point)
     saveLatencySeries(siteSeriesKey(row.host), row.history)
   } catch (e) {
     const errStr = String(e)
     if (errStr.includes('代理未启用')) return
+    captureProxyDiagnostic({
+      category: 'probe_failure',
+      target: row.host,
+      error: errStr,
+    })
     row.history = appendLatencyPoint(row.history, { ts: Date.now(), ok: false, err: errStr })
     saveLatencySeries(siteSeriesKey(row.host), row.history)
   } finally {
@@ -597,9 +624,27 @@ function latestTooltip(history: LatencyPoint[]): string {
   if (!p) return '暂无测速记录'
   if (!p.ok) {
     if (p.err?.includes('代理未启用')) return '加速已停用，开启后自动测速'
-    return p.err ? `测速失败原因: ${p.err}` : '测速失败（网络或服务端连接被拒绝）'
+    return p.err ? `测速失败原因: ${p.err}（点击查看详情与排障）` : '测速失败（网络或服务端连接被拒绝，点击查看）'
   }
   return `延迟: ${p.ms ?? 0}ms`
+}
+
+const diagnosticModalOpen = ref(false)
+const diagnosticTitle = ref('')
+const diagnosticError = ref('')
+
+function showDiagnosticDetail(title: string, history: LatencyPoint[]): void {
+  const p = latestPoint(history)
+  if (!p || p.ok) return
+  diagnosticTitle.value = title
+  diagnosticError.value = p.err || '网络连接被拒绝或超时，未能连通网关'
+  diagnosticModalOpen.value = true
+}
+
+function copyDiagnosticInfo(): void {
+  const content = `[PProxy Diagnostic]\nTarget: ${diagnosticTitle.value}\nTime: ${new Date().toISOString()}\nError: ${diagnosticError.value}\nMode: ${proxyMode.value}\nRunning: ${isRunning.value}`
+  navigator.clipboard.writeText(content)
+  toast.success('排障诊断信息已复制到剪贴板')
 }
 
 function latestClass(history: LatencyPoint[]): string {
@@ -1266,6 +1311,7 @@ async function submitImportOrChained() {
                 class="w-14 shrink-0 text-right text-xs font-mono tabular-nums cursor-help"
                 :class="latestClass(userProxyRow.history)"
                 :title="latestTooltip(userProxyRow.history)"
+                @click="showDiagnosticDetail(userProxyRow.name, userProxyRow.history)"
               >
                 {{ latestText(userProxyRow.history) }}
               </span>
@@ -1330,6 +1376,7 @@ async function submitImportOrChained() {
                 class="w-14 shrink-0 text-right text-xs font-mono tabular-nums cursor-help"
                 :class="latestClass(row.history)"
                 :title="latestTooltip(row.history)"
+                @click="showDiagnosticDetail(row.name, row.history)"
               >
                 {{ latestText(row.history) }}
               </span>
@@ -1413,6 +1460,42 @@ async function submitImportOrChained() {
           </div>
         </div>
       </section>
+
+      <!-- 排障诊断弹窗 -->
+      <div
+        v-if="diagnosticModalOpen"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4"
+        @click.self="diagnosticModalOpen = false"
+      >
+        <div class="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-lg space-y-4">
+          <div class="flex items-center justify-between">
+            <h4 class="text-sm font-semibold flex items-center gap-2">
+              <span class="h-2 w-2 rounded-full bg-rose-500"></span>
+              {{ diagnosticTitle }} 连接诊断详情
+            </h4>
+            <button
+              class="text-xs text-muted-foreground hover:text-foreground cursor-pointer"
+              @click="diagnosticModalOpen = false"
+            >
+              关闭
+            </button>
+          </div>
+          <div class="rounded-lg bg-muted p-3 text-xs font-mono text-rose-500 break-all select-all">
+            {{ diagnosticError }}
+          </div>
+          <div class="text-[11px] text-muted-foreground leading-relaxed">
+            诊断提示：此错误已同步记录并可上报 Sentry。如果为超时或拒绝连接，请优先检查公网 DNS 解析、服务器安全组与端口、或前往「设置」重新核验授权 Token。
+          </div>
+          <div class="flex justify-end gap-2 pt-2">
+            <Button size="sm" variant="outline" @click="copyDiagnosticInfo">
+              复制排障日志
+            </Button>
+            <Button size="sm" @click="diagnosticModalOpen = false">
+              我知道了
+            </Button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
