@@ -66,6 +66,7 @@ jobs:
               defaultGh,
               "https://dl.ponygo.fun/latest.json",
               "https://access.ponygo.fun/dsk/latest.json",
+              "http://100.95.193.103:9000/pproxy-releases/dsk/latest.json",
             ];
             // 确保官方 GitHub 端点始终保留在列表首位作为可靠兜底
             const endpoints = Array.from(new Set([defaultGh, ...(src.length ? src : def)]));

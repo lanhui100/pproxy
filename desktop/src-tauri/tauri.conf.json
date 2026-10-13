@@ -53,7 +53,8 @@
       "endpoints": [
         "https://github.com/lanhui100/pproxy/releases/latest/download/latest.json",
         "https://dl.example.com/latest.json",
-        "https://access.example.com/dsk/latest.json"
+        "https://access.example.com/dsk/latest.json",
+        "http://100.95.193.103:9000/pproxy-releases/dsk/latest.json"
       ]
     }
   },

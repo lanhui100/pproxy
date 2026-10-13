@@ -46,6 +46,7 @@ pub fn collect_bypass_hosts() -> BTreeSet<String> {
         "https://dl.ponygo.fun/latest.json",
         "https://access.ponygo.fun/dsk/latest.json",
         "https://access.example.com/dsk/latest.json",
+        "http://100.95.193.103:9000/pproxy-releases/dsk/latest.json",
     ] {
         if let Ok(p) = url::Url::parse(ep) {
             if let Some(h) = p.host_str() {
