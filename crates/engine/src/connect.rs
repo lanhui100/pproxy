@@ -370,6 +370,38 @@ pub async fn handle_connect_raw(
         tracing::info!(host = %host, allowlisted = listed, "tunnel establish (allowlist advisory only)");
     }
 
+    // 2026-10-15：YouTube 流媒体分流（优先走 Muse 专属中继）
+    // 若配置了 PPROXY_YOUTUBE_PROXY，且目标属于 YouTube/googlevideo，则直接通过该代理转发，
+    // 完全免除 RackNerd 原生 VPS 的流量消耗与 429 风险。
+    if pproxy_transport::is_youtube_host(&host) {
+        if let Ok(proxy_addr) = std::env::var("PPROXY_YOUTUBE_PROXY") {
+            let proxy_addr = proxy_addr.trim().to_string();
+            if !proxy_addr.is_empty() {
+                tracing::info!(host = %host, proxy = %proxy_addr, "routing youtube host to dedicated proxy");
+                let upstream = if proxy_addr.starts_with("socks5://") {
+                    let addr = proxy_addr.trim_start_matches("socks5://");
+                    pproxy_core::relay::socks5_connect(addr, &host, port).await
+                } else {
+                    let addr = proxy_addr.trim_start_matches("http://");
+                    pproxy_core::relay::http_connect_ext(addr, &host, port).await.map(|(s, _)| s)
+                };
+                match upstream {
+                    Ok(mut up_stream) => {
+                        let _ = stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
+                        if !leftover.is_empty() {
+                            let _ = up_stream.write_all(&leftover).await;
+                        }
+                        pproxy_core::relay::relay(stream, up_stream).await;
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(host = %host, error = %e, "dedicated youtube proxy failed, falling back to standard tunnel");
+                    }
+                }
+            }
+        }
+    }
+
     // 端点顺序按目标 host 决定（Cloud Code 系必须优先合规物理出口，见 transport::route）。
     let ordered_urls = pproxy_transport::ordered_gate_urls(&pool.config().gate_url, &host);
     let ordered_refs: Vec<&str> = ordered_urls.iter().map(String::as_str).collect();

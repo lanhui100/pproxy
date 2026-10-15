@@ -105,6 +105,32 @@ const COMPLIANT_EGRESS_SUFFIXES: &[&str] = &[
     "cloudaicompanion.googleapis.com",
 ];
 
+/// YouTube 家族域名（视频流、网页、静态资源及 CDN）
+const YOUTUBE_SUFFIXES: &[&str] = &[
+    "youtube.com",
+    "googlevideo.com",
+    "ytimg.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+    "ggpht.com",
+];
+
+/// 判定目标域名是否属于 YouTube 家族流媒体站点
+pub fn is_youtube_host(host: &str) -> bool {
+    let lowered = host.trim().to_ascii_lowercase();
+    let h = lowered.trim_end_matches('.');
+    if h.is_empty() {
+        return false;
+    }
+    YOUTUBE_SUFFIXES.iter().any(|s| {
+        if !h.ends_with(s) {
+            return false;
+        }
+        let rest = &h[..h.len() - s.len()];
+        rest.is_empty() || rest.ends_with('.')
+    })
+}
+
 /// 目标是否属于"必须合规出口"的 host（后缀匹配，dot-boundary；容忍 FQDN 末尾点）。
 pub fn requires_compliant_egress(host: &str) -> bool {
     let lowered = host.trim().to_ascii_lowercase();
@@ -273,6 +299,30 @@ mod tests {
 
         for h in ["github.com", "youtube.com", "baidu.com", "notgoogleapis.com"] {
             assert!(!is_google_or_ai_host(h), "不应识别为 Google/AI: {h}");
+        }
+    }
+
+    #[test]
+    fn test_is_youtube_host() {
+        for h in [
+            "youtube.com",
+            "www.youtube.com",
+            "m.youtube.com",
+            "googlevideo.com",
+            "rr1---sn-4g5ednks.googlevideo.com",
+            "redirector.googlevideo.com",
+            "ytimg.com",
+            "i.ytimg.com",
+            "youtu.be",
+            "youtube-nocookie.com",
+            "ggpht.com",
+            "yt3.ggpht.com",
+        ] {
+            assert!(is_youtube_host(h), "应识别为 YouTube 家族: {h}");
+        }
+
+        for h in ["google.com", "github.com", "notyoutube.com", "myoutube.com"] {
+            assert!(!is_youtube_host(h), "不应识别为 YouTube 家族: {h}");
         }
     }
 

@@ -25,7 +25,7 @@ pub use relay::{
 };
 pub use route::{
     classify_egress, compliant_egress_endpoints, is_google_host, is_google_or_ai_host,
-    is_strict_ai_host, is_vercel_endpoint, order_endpoints, order_endpoints_with,
+    is_strict_ai_host, is_vercel_endpoint, is_youtube_host, order_endpoints, order_endpoints_with,
     ordered_gate_urls, requires_compliant_egress, Egress,
 };
 
