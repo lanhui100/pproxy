@@ -1141,7 +1141,7 @@ onMounted(async () => {
               当前未开启：手机无法接入本机代理，局域网模式下扫码导入后无法出网
             </div>
             <div v-else-if="!tunnelHasToken" class="text-[11px] text-rose-500">
-              未配置令牌，局域网接入将被拒绝（请先在方案 A 填写授权码）
+              未配置令牌，局域网接入将被拒绝（请先在上方「接入令牌」处填写授权码）
             </div>
             <div v-else-if="!lanListening" class="text-[11px] text-rose-500">
               监听未就绪，请关闭后重新开启
