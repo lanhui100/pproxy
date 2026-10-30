@@ -37,7 +37,8 @@ START_S="$(date +%s)"
 TMPROOT=""
 
 # 冻结用例集（顺序即执行顺序）。任何 id 缺失都不得放行。
-REQUIRED_CASES="G0-SELFTEST G1-NO-TRACKED-SECRETS G2-SECRET-GATE G3-NOTE-1.10 G4-SENTINEL-LOCAL G5-REMOTE-GATE G6-ADAPTATION G7-IMPLEMENTED-REPRODUCIBLE G8-DOCS G9-HYGIENE"
+# Wave-1（G0..G9，冻结于 e0acfe3，断言不可变更）｜Wave-2（G10..G16 追加，Lead 授权契约演进）
+REQUIRED_CASES="G0-SELFTEST G1-NO-TRACKED-SECRETS G2-SECRET-GATE G3-NOTE-1.10 G4-SENTINEL-LOCAL G5-REMOTE-GATE G6-ADAPTATION G7-IMPLEMENTED-REPRODUCIBLE G8-DOCS G9-HYGIENE G10-SUPERSESSION G11-ROADMAP-INDEX G12-COMMITMENTS G13-PREPUSH G14-ARCHIVE-SEAL G15-HOOK-TIMEOUT G16-OBSERVE-DECISION"
 
 CASE_TABLE=(
   "G0-SELFTEST|case_G0_SELFTEST"
@@ -50,6 +51,13 @@ CASE_TABLE=(
   "G7-IMPLEMENTED-REPRODUCIBLE|case_G7_IMPLEMENTED_REPRODUCIBLE"
   "G8-DOCS|case_G8_DOCS"
   "G9-HYGIENE|case_G9_HYGIENE"
+  "G10-SUPERSESSION|case_G10_SUPERSESSION"
+  "G11-ROADMAP-INDEX|case_G11_ROADMAP_INDEX"
+  "G12-COMMITMENTS|case_G12_COMMITMENTS"
+  "G13-PREPUSH|case_G13_PREPUSH"
+  "G14-ARCHIVE-SEAL|case_G14_ARCHIVE_SEAL"
+  "G15-HOOK-TIMEOUT|case_G15_HOOK_TIMEOUT"
+  "G16-OBSERVE-DECISION|case_G16_OBSERVE_DECISION"
 )
 
 cleanup() {
@@ -170,6 +178,21 @@ main() {
   source "$GOV_DIR/cases/g8_docs.sh"
   # shellcheck source=cases/g9_hygiene.sh
   source "$GOV_DIR/cases/g9_hygiene.sh"
+  # Wave-2（G10..G16）追加用例
+  # shellcheck source=cases/g10_supersession.sh
+  source "$GOV_DIR/cases/g10_supersession.sh"
+  # shellcheck source=cases/g11_roadmap_index.sh
+  source "$GOV_DIR/cases/g11_roadmap_index.sh"
+  # shellcheck source=cases/g12_commitments.sh
+  source "$GOV_DIR/cases/g12_commitments.sh"
+  # shellcheck source=cases/g13_prepush.sh
+  source "$GOV_DIR/cases/g13_prepush.sh"
+  # shellcheck source=cases/g14_archive_seal.sh
+  source "$GOV_DIR/cases/g14_archive_seal.sh"
+  # shellcheck source=cases/g15_hook_timeout.sh
+  source "$GOV_DIR/cases/g15_hook_timeout.sh"
+  # shellcheck source=cases/g16_observe_decision.sh
+  source "$GOV_DIR/cases/g16_observe_decision.sh"
 
   local entry id fn
   for entry in "${CASE_TABLE[@]}"; do

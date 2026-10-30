@@ -3,7 +3,9 @@
 > 归属：独立 Test Agent（L2-T）。写域仅 `tests/governance/**`。
 > 本套件与 `tests/acceptance/`（业务出海验收）**相互独立**：后者验产品行为，本套件验治理层（密钥、决策记录门禁、
 > 本地/远端接线、文档落地、仓库卫生）。
-> 合同唯一依据：Lead 冻结的 G0..G9 契约矩阵（下方 §1）。冻结后本目录只读，任何改动须 Lead 明确指令。
+> 合同唯一依据：Lead 冻结的契约矩阵 —— Wave-1 `G0..G9`（§1，冻结于 `e0acfe3`，**断言不可变更**）
+> 与 Wave-2 `G10..G16` 追加（§1.1，Lead 授权契约演进，**只追加不改 Wave-1**）。
+> 冻结后本目录只读，任何改动须 Lead 明确指令。
 
 ---
 
@@ -28,6 +30,30 @@
 2. **G7 基线前移**：Lead 已提交 `b7f1387`，HEAD 的 `gateway.rs` 应含 `forward_proxy_unsupported`；判定式不变。
 3. **G3 夹具位置**：临时 note 必须落在仓库外（`$TMPROOT`，如 `/tmp`）并**显式传相对路径参数**调用 `verify-note.sh`
    —— 带参模式只校验给定文件；无参即整树模式，会额外判 1.9 并扫描仓库全部决策记录，与本用例目标不符。
+
+---
+
+## 1.1 Wave-2 追加矩阵（G10..G16，Lead 授权契约演进）
+
+> 纪律：**只追加**。Wave-1（G0..G9）断言一行未改；`REQUIRED_CASES` 与 `CASE_TABLE` 仅在尾部追加。
+> Wave-2 的每个检测器都做过「合成绿相夹具 + 负相突变」双向验证（见 §3.2），确保既能变绿、又不会假绿。
+
+| # | 用例 id | 判定命令（原文即契约） | 用例函数 | W2 红相(HEAD 464852b) |
+|:-:|:--|:--|:--|:-:|
+| 11 | `G10-SUPERSESSION` | `implemented/architecture/2026-10-07-desktop-toast-borderless-frosted.md` 含 `Supersedes:` 且指向 2026-09-26 / 2026-09-27 两条；两条旧 note 各含一行「被 …2026-10-07… 取代」 | `case_G10_SUPERSESSION` | FAIL |
+| 12 | `G11-ROADMAP-INDEX` | `README.md` 文档索引行含 `M1-M7`（不再是 `M1-M6`）；`docs/product/ROADMAP.md` 含 `## M7` | `case_G11_ROADMAP_INDEX` | FAIL |
+| 13 | `G12-COMMITMENTS` | `.meta/gates/instance-commitments.md` 存在，且含 `secret-scan`、`release-gate`、`check-egress-parity`、`check-update-feed` 四条「承诺→命令」行；alt-governance note 链到它 | `case_G12_COMMITMENTS` | FAIL |
+| 14 | `G13-PREPUSH` | `.githooks/pre-push` 存在、可执行、`bash -n` 通过，且调用 `tests/governance/run.sh`（或等价 `bash .meta/gates/secret-scan.sh` + `verify-note`） | `case_G13_PREPUSH` | FAIL |
+| 15 | `G14-ARCHIVE-SEAL` | `.meta/gates/archive-seal.sh` 支持 `--check`（存在 manifest 时 exit 0）与 `--write`；在临时副本里篡改 `archived/*.md` 后 `--check` 必须非零；manifest 落 `.agents/notes/archived/SHA256SUMS` | `case_G14_ARCHIVE_SEAL` | FAIL |
+| 16 | `G15-HOOK-TIMEOUT` | `.githooks/pre-commit` 中 `cargo check` 被 `timeout` 包裹（`grep -q 'timeout'`） | `case_G15_HOOK_TIMEOUT` | FAIL |
+| 17 | `G16-OBSERVE-DECISION` | 存在 `.agents/notes/implemented/process/*observe*` note，明确「可观测性四维暂不接」+ 理由 + 重估触发条件；`ponygo observe status` 仍为缺失（不强制 init） | `case_G16_OBSERVE_DECISION` | FAIL |
+
+### Wave-2 判据的容错边界（只放宽书写形态，不放宽语义）
+- **G10**：`supersedes` 大小写不敏感、允许列表/加粗/frontmatter 写法；但「新声明指向两条日期」与「旧 note 同行含日期+取代」两向都必须成立（单向断链即 FAIL）。
+- **G12**：命令载体允许折到命中行的**下一行**（markdown 表格/列表常见写法）；但"只有承诺名、全表无 `bash`/`*.sh`/`gates/`"仍判 FAIL（口号不是门禁）。
+- **G14**：篡改/删除/重建全部在仓库外镜像副本（`$TMPROOT/g14`，含 `git init` + 基线提交）内进行，绝不写被验收仓库；断言链为 基线 `--check=0` → 篡改后 `≠0` → 删 manifest 后 `--write=0` → 重建后 `--check=0`（回环一致）。
+- **G15**：`timeout` 允许同行、上一行续行、`timeout … cargo` 变量化写法；但 `cargo check` 裸调用（无任何 timeout 包裹证据）判 FAIL；且"删除 `cargo check` 段落"同样判 FAIL（契约以"包裹 cargo check"为前提）。
+- **G16**：文档语义判据只能做**关键词组**判定（维度/暂不接/理由/重估触发条件四组，同义写法在 `cases/g16_observe_decision.sh` 头部枚举）；四组任一缺失即 FAIL 并回报命中情况（fail-closed，不做"看起来有道理"的自由裁量）。
 
 ---
 
@@ -73,6 +99,22 @@ GOV_KEEP=1 bash tests/governance/run.sh     # 保留临时夹具目录排障
 6. **零仓库污染**：全部夹具（假密钥仓库、影子决策记录树、坏哨兵样本、stub 校验器）落在 `mktemp -d` 的
    仓库外目录，`trap cleanup` 回收；假密钥在运行期拼接生成，源码中不存在可被 G1/G2 命中的完整密钥。
 
+### 3.2 Wave-2 检测器的双向验证（只追加也要可信）
+
+新增 7 条检测器在冻结前做过两轮实证（仓库外 `/tmp` 合成夹具，**不进仓库**）：
+
+1. **变绿能力**（防"永久红"）：按契约实现一份参考版本（含 archive-seal 的 `--check/--write` 参考实现、
+   承诺表、alt-governance 链接、pre-push、`timeout 180 cargo check`、observe 决策 note），
+   以 `bash tests/governance/run.sh '^G1[0-6]'` 运行 → **7/7 PASS、ACCEPT_EXIT=0**。
+2. **假绿能力**（防"永远绿"）：对参考版本逐条注入突变 → 全部如实 FAIL：
+   - seal 换成 `exit 0` 空转 → G14「篡改后 --check 仍 exit 0（封条形同虚设）」
+   - pre-push 去可执行位 → G13「不可执行（mode=664）」
+   - pre-commit 去掉 `timeout` → G15「未出现 timeout」
+   - 承诺表删 `check-update-feed` 行 → G12「承诺→命令行不全」
+   - 新 note 删 `Supersedes` → G10「缺 Supersedes 字段」
+   - 旧 note 删取代行 → G10「缺『被 …2026-10-07… 取代』行（链断一半）」
+   - observe note 删「重估触发条件」段 → G16「缺重估触发条件」
+
 ---
 
 ## 4. 文件清单
@@ -91,6 +133,13 @@ GOV_KEEP=1 bash tests/governance/run.sh     # 保留临时夹具目录排障
 | `cases/g7_implemented_reproducible.sh` | G7 |
 | `cases/g8_docs.sh` | G8 |
 | `cases/g9_hygiene.sh` | G9 |
+| `cases/g10_supersession.sh` | G10 决策取代双向链 |
+| `cases/g11_roadmap_index.sh` | G11 索引与里程碑真源一致 |
+| `cases/g12_commitments.sh` | G12 承诺→命令映射表 + 决策链接 |
+| `cases/g13_prepush.sh` | G13 push 前本地拦截层 |
+| `cases/g14_archive_seal.sh` | G14 归档封条（镜像副本内篡改/回环） |
+| `cases/g15_hook_timeout.sh` | G15 pre-commit 的 cargo check 超时保护 |
+| `cases/g16_observe_decision.sh` | G16 可观测性四维「暂不接」决策 |
 
 ---
 
@@ -142,10 +191,56 @@ ACCEPT_EXIT=1
 
 ---
 
+## 5.2 Wave-2 红相快照（G10..G16 追加后，原始输出）
+
+命令：`cd /home/dm/pproxy && bash tests/governance/run.sh`
+仓库状态：`HEAD=464852b`（Wave-1 收口后）、branch=`master`、`ELAPSED=3s`、进程退出码 `1`。
+要点：Wave-1 十条**全部维持 PASS**（追加未引入回归），Wave-2 七条如实报红。
+
+```
+[PASS] G0-SELFTEST 自检 8/8 通过：探测器对假违规样本均返回非零、对合规样本返回 0；记账层与 MISSING-CASE 兜底无假绿
+[PASS] G1-NO-TRACKED-SECRETS git grep -lE 无输出：追踪文件 0 命中（repo=/home/dm/pproxy）
+[PASS] G2-SECRET-GATE 门禁 rc=0（干净仓库放行）；spec rc=0（负样本被拒；spec 引用门禁 3 处/拒绝分支 5 处）
+[PASS] G3-NOTE-1.10 1.10 生效：缺节 note rc=1（被拒）；合法 note rc=0（放行）
+[PASS] G4-SENTINEL-LOCAL 哨兵配对（.githooks/pre-commit）+ .meta/gates/adr-verify.sh 存在 + ponygo status rc=0（关键行：治理级：L2 级自洽验证：通过（L0-L2 机械判据全部 PASS） ）
+[PASS] G5-REMOTE-GATE 传递闭包成立：.github/workflows/ponygo-governance.yml → .meta/gates/ci-verify.sh → verify-note.sh（引用行数 3 / 3）
+[PASS] G6-ADAPTATION 适配决策已落盘（.agents/notes/implemented/process/2026-10-30-alt-governance-dual-track.md）；ponygo status 无「适配决策未登记」（status rc=0）
+[PASS] G7-IMPLEMENTED-REPRODUCIBLE git log -S 命中 1 个提交（最新 b7f1387 …）；HEAD:crates/server/src/gateway.rs 含 forward_proxy_unsupported 5 处
+[PASS] G8-DOCS desktop/README.md 存在；README.md 含 PPROXY_YOUTUBE_PROXY 1 处；docs/AGENTS.md 占位 0 处
+[PASS] G9-HYGIENE .agents/tests 追踪文件 25 个，其中 .log/.txt/.csv 产物 0 个（豁免 PLAN.md）
+[FAIL] G10-SUPERSESSION .agents/notes/implemented/architecture/2026-10-07-desktop-toast-borderless-frosted.md 缺 Supersedes 字段（未声明它取代了哪些旧决策）
+[FAIL] G11-ROADMAP-INDEX README.md 索引行未升级到 M1-M7：232:| [docs/product/ROADMAP.md](docs/product/ROADMAP.md) | 里程碑 M1-M6 |
+[FAIL] G12-COMMITMENTS 缺 .meta/gates/instance-commitments.md（承诺→命令映射表不存在）
+[FAIL] G13-PREPUSH 缺 .githooks/pre-push（push 前无本地拦截层）
+[FAIL] G14-ARCHIVE-SEAL 缺 .meta/gates/archive-seal.sh（归档封条门不存在，archived 决策可被静默改写）
+[FAIL] G15-HOOK-TIMEOUT .githooks/pre-commit 未出现 timeout（cargo check 无超时保护，钩子可无限挂起）
+[FAIL] G16-OBSERVE-DECISION 缺 .agents/notes/implemented/process/*observe* 决策 note（可观测性四维接不接没有记录）
+PASS=10 FAIL=7
+ACCEPT_EXIT=1
+```
+
+### Wave-2 红相失败清单（给修复方）
+
+| 用例 | 根因（实测） | 修复方向（不构成契约，仅定位） |
+|:--|:--|:--|
+| G10 | `2026-10-07-desktop-toast-borderless-frosted.md` 全文无 `Supersedes`；两条旧 note（`2026-09-26-desktop-toast-style-redesign.md`、`2026-09-27-desktop-toast-light-gray-redesign.md`）无「被 …2026-10-07… 取代」行 | 新 note 加 `Supersedes: 2026-09-26-…, 2026-09-27-…`；两条旧 note 各加一行回指 |
+| G11 | `README.md:232` 仍为「里程碑 M1-M6」（`docs/product/ROADMAP.md` 的 `## M7` 已在位） | 索引行升级为 `M1-M7`，勿留 `M1-M6` 残句 |
+| G12 | `.meta/gates/instance-commitments.md` 不存在 | 建表：四条承诺各配可执行命令；并在 alt-governance note 中链接该表 |
+| G13 | `.githooks/pre-push` 不存在 | 新增可执行 pre-push，调用 `tests/governance/run.sh`（或 secret-scan.sh + verify-note） |
+| G14 | `.meta/gates/archive-seal.sh` 与 `.agents/notes/archived/SHA256SUMS` 均不存在 | 实现 `--check/--write` 并落 manifest；篡改须被检出 |
+| G15 | `pre-commit` 第 25 行 `cargo check --tests --quiet --workspace` 为裸调用 | 用 `timeout <N> cargo check …` 包裹（保留 `cargo check` 段落） |
+| G16 | 无 `implemented/process/*observe*` 决策 note（`ponygo observe status` 当前确为「声明: 缺失」，该半条已满足） | 落一条决策：四维暂不接 + 理由 + 重估触发条件；**不要**执行 `observe init` |
+
+---
+
 ## 6. 冻结与只读纪律
 
 - 冻结后本目录**只读**：实施者（Executor）不得修改 `run.sh` / `lib.sh` / `cases/**` / 本 README。
-- 冻结指纹（逐文件 `sha256sum`）与冻结时 `HEAD` 由 Test Agent 只读记录后**随消息上报 Lead**，
+- 本项目采用**两段冻结**：
+  - Wave-1：`e0acfe3 test(wave-1-governance): freeze red-phase governance acceptance tests`（G0..G9，内容指纹 `406f77b9…`）。
+  - Wave-2：G10..G16 追加后由 Lead 重新锚定提交（`test(wave-2-governance): extend acceptance (G10-G16)`），
+    锚点前本目录处于"追加中"状态；锚点后即只读。
+- 冻结指纹（逐文件 `sha256sum` + 汇总）与冻结时 `HEAD` 由 Test Agent 只读记录后**随消息上报 Lead**，
   不写入本目录（避免"改文件即改指纹"的自证循环）。
 - 绿相验收：仅当 Lead 通知修复完成，Test Agent 才运行全量 `bash tests/governance/run.sh`，
   回报**原始输出与进程退出码**，不做二次加工。
