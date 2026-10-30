@@ -1,0 +1,53 @@
+{
+ "verdict": "PASS",
+ "audited_scopes": [
+  ".meta/gates/secret-scan.sh",
+  ".meta/gates/adr-verify.sh",
+  ".meta/gates/ci-verify.sh",
+  ".githooks/pre-commit",
+  ".github/workflows/ponygo-governance.yml",
+  ".meta/gates/secret-scan.spec.sh",
+  "tests/governance"
+ ],
+ "findings": [
+  {
+   "file": ".githooks/pre-commit",
+   "line": 3,
+   "rule": "CONTRACT_BREAK",
+   "counterexample_cmd": "哨兵块先于 secret-scan 执行：格式 FAIL 会短路凭据扫描；实测两者任一命中均阻断提交，故为顺序语义问题而非绕过",
+   "severity": "ADVISORY"
+  },
+  {
+   "file": ".meta/gates/ci-verify.sh",
+   "line": 36,
+   "rule": "CONTRACT_BREAK",
+   "counterexample_cmd": "PONYGO_IN_SPEC=1 bash .meta/gates/ci-verify.sh -> SKIPPED 仍报通过 rc=0（模板资产语义，未改以保零 drift）",
+   "severity": "ADVISORY"
+  },
+  {
+   "file": ".meta/gates/adr-verify.sh",
+   "line": 88,
+   "rule": "CORRECTNESS",
+   "counterexample_cmd": "中文名 ADR 在暂存区被 C 引号转义 -> is_adr 匹配失败静默跳过（模板资产；全树 A4 仍覆盖，故非放行）",
+   "severity": "ADVISORY"
+  },
+  {
+   "file": ".github/workflows/ponygo-governance.yml",
+   "line": 9,
+   "rule": "CONTRACT_BREAK",
+   "counterexample_cmd": "gh api repos/lanhui100/pproxy/branches/master/protection -> 404：默认分支无保护，红灯需设为 required check 才阻断合并（GitHub 语义边界）",
+   "severity": "ADVISORY"
+  }
+ ],
+ "schema_version": 2,
+ "reviewer": {
+  "kind": "subagent",
+  "session_id": "7ae632c6-93ba-48be-a43d-98d57b821064",
+  "fresh_context": true
+ },
+ "executed_by": "7ae632c6-93ba-48be-a43d-98d57b821064",
+ "reviewed_commit": "e0ccdbc",
+ "attestation": {
+  "self_signed": false
+ }
+}

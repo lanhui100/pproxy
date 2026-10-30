@@ -1,58 +1,31 @@
-# 元框架复盘：clash-meta-scan-no-proxy（C 级）
+# 元框架复盘：治理修复 governance-remediation-2026-10-30（C 级）
 
 ## 1. 通信拓扑与信噪比（Topology & Noise）
 
-- **名册**：Lead + 3 Executor（gate-connect / clash-config / desktop-lan）+ 1 Test Agent（qa）= 5，
-  审查一律走 Subagent（2 路 L3），未挤占常驻槽位。符合 Roster ≤ 8 与拓扑公理。
-- **探索者外派**：2 份 E1 侦察在立项阶段并行下发（公网 gate 部署面 / 桌面引擎监听面），
-  各回 25 与 10 条带 `path:line` 的事实条目；Lead 只做定点复核（CONNECT 实测、8899 进程归属），
-  未把侦察原始输出吞进主上下文。**这是本会话信噪比最高的动作**——两条根因各自 5 分钟内定论，
-  且后续三个 Executor 的 prompt 直接复用这些事实，没有一个人重复调研。
-- **零废话协议**：三个 Executor 的回报全部为「文件表 + 验收命令原始输出 + 遗留风险」三段式，
-  无客套、无过程复述。Test Agent 主动做了**自查纠错**（发现 `run_helper` 管道吞掉非零退出码
-  导致 G7-desktop 假绿），并把它固化成常驻门禁 `HARNESS-SELFTEST`——这是本次最有价值的单点产出。
-- **重复命令率**：低。唯一的重复是 `cargo test --workspace` 跑了 3 次（基线 / 全量 / 隔离验证），
-  每次目的不同（基线对照、回归、暂存态隔离验证），属门禁必需而非浪费。
+- **名册**：Lead + Test Agent + Executor = 3 常驻（≤8），另挂 6 个 Subagent（3 路 L3 审查、1 路方案逆向、1 路 L3-P、1 路复审），审查全部走计算池、未挤占常驻槽位。3 人团队对应「写域强耦合」的实况：安全脚本、pre-commit、CI、文档高度共享同一批文件，并行 Executor 只会互相踩，k=1 串行是对的。
+- **信噪比**：Execute 侧三次波次回报都是「文件清单 + 原始命令 + 退出码 + 遗留项」三段式，无复述；Test Agent 在冻结前主动给出逐文件 sha256 指纹并在冻结点自证未漂移，这条动作把「改测试换绿」的嫌疑从根上堵死，是本会话最有价值的单点产出。
+- **重复命令率**：低。`tests/governance/run.sh` 被有意重复 5 次（红相 1、Lead 抽验 2、Test Agent 三次一致性含 cwd=/tmp），每次都能回答不同问题（红/绿/确定性/cwd 无关），属门禁必需。真正的浪费在**审查侧**：3 路 L3 审查跑了 15–25 分钟，Lead 其间只能空等（无法 steer 已派生的 subagent），墙钟成本明显高于实施本身。
+- **探索者/审查者路由**：审查一律 Subagent 是正确选择（无状态、交付即解耦），但缺少时限契约，导致长尾。
 
 ## 2. 门禁穿透与误杀率（Gate Penetration / False Negatives & Positives）
 
-- **真实拦截**：验收套件 R2 变异测试（把 `port 8443` 改回 443 / 把 Basic 改回 Bearer /
-  把 `MATCH,PROXY` 改回 `MATCH,DIRECT`）三处**全部被咬住**——这证明断言不是"跑得过就行"的
-  空转绿灯，而是真的钉在契约上。另加 `META-AT1-NEGCTRL` 负控制（哑服务必须被判红），
-  堵住"helper 自己坏了导致假绿"的通道。
-- **一次真实假绿被抓住**：Test Agent 首版 helper 管道吞退出码 → 我复核时该用例显示 PASS 但
-  内部输出含 `FAIL:` 字样。**教训**：`[PASS]` 字样的存在本身不是证据，必须验"断言失败能否
-  真的让脚本非零退出"。此后该模式被固化为常驻自检用例。
-- **门禁穿透（本会话真实缺口）**：C6（兜底 `MATCH,DIRECT → MATCH,PROXY`）在派单时漏派给
-  desktop-lan，只写进了共享契约文件。desktop 侧的 C6 是在 Test Agent 首轮报红后由 Lead 补发 CR
-  才修好的。**根因是"契约文件写了 ≠ 每个 Executor 都拿到了"**——我依赖 Executor 自己读契约，
-  但三个 Executor 的 prompt 里我只逐条点名了自己认为相关的那几条。改进项见第 4 节。
-- **误杀率**：0。L3 审查未产生需要驳回的误判（两路 findings 见 `.dev-team/review-l3*.json`）。
+- **红相先行有效**：Test Agent 的冻结套件红相 PASS=2/FAIL=8，实施后 10/10 绿；`tests/governance` 自 `e0acfe3` 起逐字节未动（`git diff e0acfe3..HEAD -- tests/governance` 为空），排除「改考卷换绿」。
+- **汇聚栅栏真实拦截（本会话核心价值）**：第一轮 3 路 L3/L3-P 全部判 FAIL，抓出 3 个真 BLOCKING——① `secret-scan` 扫工作树而非索引（暂存含凭据、工作区改净时可放行，评审给了可复现反例）；② CI 远端没有凭据步（A1「本地+CI 各一次」只做到本地）；③ `docs/AGENTS.md` 声称 `rejected/` 有家而目录不存在。另有一条 P1：`implemented` 的 admin quota ADR 文本与 `lib.rs:502` 现实相反。**这些都是机械测试全绿时仍然存在的东西**——说明「测试绿 ≠ 承诺成立」，L2 的「承诺可验」必须配独立审查，不能只看 CI 绿灯。
+- **误杀率**：可接受。复审时把「HEAD 残留默认 FAIL + SKIP_HISTORY 逃生口」「`*.zh.md` 1.10 豁免」「ci-verify 把 SKIPPED 记 PASS」三条判为 ADVISORY 而非 BLOCKING，其中前两条经 Lead 核对是既定设计（脚本头部有明文口径），第三条是模板资产语义、改它会产生新 drift。没有出现需要驳回的误判。
+- **门禁自身的门**：`dev-review-lint.py` 的 v2 溯源字段（schema_version/reviewer.session_id/fresh_context/executed_by/attestation）第一次直接打回 4 份收据——「审查收据」也有假收据风险，这条机械门有效。
 
 ## 3. 分工契约与隔离有效性（Contract Isolation）
 
-- **写域正交生效**：gate-server 的 `lib.rs`（W2）与 `main.rs`/`connect_proxy.rs`（W1）被切开后，
-  两个 Executor 全程零冲突；期间出现一次真实边界争议（`src/tests.rs` 归属），Executor 主动
-  上报而不是自行扩大写域，Lead 一票裁决后归属清晰。**这正是 advisory 写域应有的行为**。
-- **测试分权真实有效**：Test Agent 全程只写 `tests/acceptance/`，从未被允许改实现；
-  它报出的唯一红项（desktop C6）反过来驱动了实现方修复，而不是它自己去改代码。
-- **Lead 写入边界**：Lead 只写了 ADR、契约、`docs/ops/*`、README 单 hunk 与部署动作，
-  没有向业务代码写一行逻辑。业务代码 100% 由 Executor 产出。
-- **生产部署作为门禁**：真机验收不是"本地跑通就算"，而是把 8443 打通后用 **Mihomo v1.19.2**
-  真实加载生产下发的 YAML —— 这一步抓到了所有本地测试抓不到的东西（ufw 静默丢包、
-  nginx conf.d 上下文非法、stream 动态模块缺失）。
+- **测试分权**：Executor 全程未触碰 `tests/governance/**`（冻结 diff 为空），Test Agent 未在冻结后改一字；红相 commit 早于首个实现 commit，`red-before-impl` 成立。
+- **git 写权单一**：Executor 只报「需 `git rm --cached` 的文件清单」，索引写入全部由 Lead 执行，5 次定向暂存均先 `git status --porcelain` + `git diff --cached --stat` 留收据，没有出现混入非本任务文件的事故。
+- **契约越界（已声明）**：`implemented/feature/2026-10-03-admin-token-…` 不在 Executor 的写域（`implemented/process/**`），由 Lead 亲自改一行 Decision 文本——属 Lead 写权例外里的「非业务代码小修」，但纪律上应提前登记到任务写域，本次是事后补记。
+- **信息下发**：Executor 的 prompt 逐条点了 W1/W2/W3 与验收命令，未出现「契约写了但执行者没拿到」的旧病；Test Agent 拿到的是黑盒契约（G0–G9），没有拿到实现细节，隔离有效。
+- **遗留（合法 backlog）**：pre-push 中继层、supersession/toast 三连、ROADMAP 索引 M1–M6→M7、`archived/` 哈希封印、crates README 空壳、`scripts/*-gate.sh` 未登记承诺表、observe 声明、公共历史里已失效 token 的 `filter-repo` 清理——均写入 `.dev-team/governance-state.json.known_gaps`，未假装修完。
 
 ## 4. 元协议迭代建议（Self-Evolving Protocol）
 
-1. **契约分派必须逐任务点名，不能只写共享契约文件**。建议在任务书模板里加一条硬要求：
-   `契约条目覆盖清单`——每个 Executor 的 prompt 必须显式列出"本条任务负责 C1/C3/C6 中的哪几条"，
-   Lead 在栅栏前机械比对契约条目并集 == 全部冻结条目。本次 C6 漏派就是缺这道机械比对。
-2. **"扫码/导入成功"类假信号应立为通用审计项**：凡是下发配置的端点，其"可被消费"必须与
-   "可被使用"分开断言。本次订阅端点不校验 token 导致 200 假成功，是典型的可用性假信号。
-   建议在 B/C 级任务识别清单里加一条：*分发面必须校验凭据，且失败要显式可见*。
-3. **部署类任务的验收必须包含"环境前提"断言的独立用例**：本次 ufw 默认 DROP 只放行 22/80/443，
-   新端口静默超时且 nginx 零日志——本地测试无法覆盖。建议在 DEPLOY 模板里固定"新端口三件套"：
-   `ss`（本机监听）+ `ufw status`（安全组）+ 从外部打一发（真实可达）。
-4. **隔离验证应固化**：本次用 `git apply` 到临时 worktree 验证"暂存区独立可编译"，
-   解决了脏工作区（多会话并行）下"提交内容是否自洽"无法证明的问题。建议把它写成脚本
-   （`dev-verify-staged.sh`），成为收口标准动作。
+1. **方案审查必须在实施前**：本次 Phase-1 方案逆向审查被排到实施之后（时间压力），结果它审的是「已实施 + 未修项」，虽然仍抓到 3 条真缺陷，但代价是返工。建议 SKILL 明确：Phase-1 收据缺失时禁止开波，且由 lint 机械拒绝（`review-plan*.json` 的 `reviewed_commit` 必须是实现首个 commit 的祖先）。
+2. **审查者需要时限契约**：给 L3 Subagent 的 prompt 必须带「≤N 分钟、超时用已有证据出 JSON、BLOCKING 必须已实测」的硬约束；本次 15–25 分钟的长尾完全可以用这条压掉。
+3. **「门禁对象 = 提交对象」应上升为通用判据**：`secret-scan` 扫工作树而非索引，是「门禁输入面与真实输入面不一致」的典型。建议在 references 里沉淀一条通则：*任何 pre-commit 门必须对 `git diff --cached` 的字节生效，而不是编辑器里的工作树*。
+4. **FAIL 后的复审要有单一路径**：本轮由 1 个复审 Subagent 覆盖全部 BLOCKING，并把原 3 路判据逐条回放（含未修复的 ADVISORY 是否被吹成 PASS），比重新派 3 路更省且更聚焦；建议写进 SKILL 的 barrier 回退闭环。
+5. **测试套件的外部 oracle 要 pin**：`tests/governance` 依赖 PATH 上的 `ponygo`，未版本化；建议后续把 oracle 收进 `tests/governance/tools/`（或 CI 安装钉版本），否则套件只在单机可信。

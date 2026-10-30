@@ -1,0 +1,45 @@
+{
+ "verdict": "PASS",
+ "audited_scopes": [
+  "凭据脱敏完整性",
+  "secret-scan 检测模式与边界",
+  "CI workflow 权限",
+  "verify-note 1.10",
+  "ADR/文档-现实一致",
+  "scope creep"
+ ],
+ "findings": [
+  {
+   "file": ".agents/tests/stability-2026-09-29/PLAN.md",
+   "line": 11,
+   "rule": "LEAK",
+   "counterexample_cmd": "git grep -lE 'pony_admin_[0-9a-fA-F]{16,}' e0acfe3 -- .agents/tests | wc -l -> 5；HEAD -> 0：旧提交仍在公共历史，用户确认 token 已失效；仓内以 2026-10-30-alt-governance note/审查报告登记",
+   "severity": "ADVISORY"
+  },
+  {
+   "file": ".meta/gates/secret-scan.sh",
+   "line": 132,
+   "rule": "SECURITY",
+   "counterexample_cmd": "二进制与历史提交不扫（header 边界 1/2 已声明）；*.zh.md 1.10 豁免为模板既定双语口径",
+   "severity": "ADVISORY"
+  },
+  {
+   "file": ".meta/gates/secret-scan.sh",
+   "line": 108,
+   "rule": "SECURITY",
+   "counterexample_cmd": "扫描面=索引∪HEAD，工作区未暂存内容不扫（按设计：commit 输入是索引）；e0ccdbc 已实测暂存含凭据 rc=1",
+   "severity": "ADVISORY"
+  }
+ ],
+ "schema_version": 2,
+ "reviewer": {
+  "kind": "subagent",
+  "session_id": "e88aff7b-f270-4487-bc73-1e3acf8b3de4",
+  "fresh_context": true
+ },
+ "executed_by": "e88aff7b-f270-4487-bc73-1e3acf8b3de4",
+ "reviewed_commit": "e0ccdbc",
+ "attestation": {
+  "self_signed": false
+ }
+}

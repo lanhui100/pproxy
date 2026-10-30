@@ -1,0 +1,33 @@
+{
+ "verdict": "PASS",
+ "audited_scopes": [
+  "六问基准映射"
+ ],
+ "findings": [
+  {
+   "file": ".githooks/pre-commit",
+   "line": 25,
+   "rule": "TIMEOUT",
+   "counterexample_cmd": "grep -c timeout .githooks/pre-commit -> 0；cargo check --tests 无超时上限（既有行为，非本波引入），登记 backlog",
+   "severity": "ADVISORY"
+  },
+  {
+   "file": ".dev-team/governance-state.json",
+   "line": 1,
+   "rule": "NFR_VIOLATION",
+   "counterexample_cmd": "acceptance 需生产令牌/网络，本波无业务源码改动（git diff e0acfe3..HEAD -- 'crates/**/src/**' 为空），等价自检 tests/governance ACCEPT_EXIT=0",
+   "severity": "ADVISORY"
+  }
+ ],
+ "schema_version": 2,
+ "reviewer": {
+  "kind": "subagent",
+  "session_id": "3b529e36-a97a-4188-b844-39ba4f8ed2d6",
+  "fresh_context": true
+ },
+ "executed_by": "3b529e36-a97a-4188-b844-39ba4f8ed2d6",
+ "reviewed_commit": "e0ccdbc",
+ "attestation": {
+  "self_signed": false
+ }
+}
