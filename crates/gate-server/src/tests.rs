@@ -78,8 +78,69 @@ mod tests {
         assert!(!clash_yaml.contains("type: ws"), "Clash Meta 严禁非法 type: ws 出站代理");
         assert!(clash_yaml.contains("tls: true"));
         assert!(clash_yaml.contains("server: rn.ponygo.fun"));
-        assert!(clash_yaml.contains(&format!("Authorization: \"Bearer {}\"", token)));
+        // C3：出站节点走公网 8443 标准 CONNECT + HTTP Basic；严禁 Bearer（CONNECT 不接受）
+        assert!(clash_yaml.contains("port: 8443"), "C3：公网 CONNECT 数据面在 8443");
+        assert!(!clash_yaml.contains("port: 443"), "C3：443 后面没有 CONNECT 能力");
+        assert!(
+            clash_yaml.contains(&format!("username: \"{}\"", token)),
+            "C3：凭据走 HTTP Basic username"
+        );
+        assert!(
+            clash_yaml.contains(&format!("password: \"{}\"", token)),
+            "C3：凭据走 HTTP Basic password"
+        );
+        assert!(
+            !clash_yaml.contains("Authorization: \"Bearer"),
+            "C3：严禁输出 Bearer 死配置"
+        );
         assert!(clash_yaml.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
+        // C6：兜底默认走代理；探活域与内网 CIDR 必须排在第一条 PROXY 规则之前
+        assert!(
+            clash_yaml.trim_end().ends_with("- MATCH,PROXY"),
+            "C6：兜底规则必须为 MATCH,PROXY"
+        );
+        assert!(!clash_yaml.contains("MATCH,DIRECT"), "C6：严禁回落 MATCH,DIRECT");
+        let first_proxy_idx = clash_yaml.find(",PROXY").expect("应有 PROXY 规则");
+        for direct in [
+            "- DOMAIN,connectivitycheck.gstatic.com,DIRECT",
+            "- DOMAIN,connectivitycheck.android.com,DIRECT",
+            "- DOMAIN,clients3.google.com,DIRECT",
+            "- DOMAIN,msftconnecttest.com,DIRECT",
+            "- DOMAIN,captive.apple.com,DIRECT",
+            "- DOMAIN,cp.cloudflare.com,DIRECT",
+            "- IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+            "- IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+            "- IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+            "- IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+        ] {
+            let idx = clash_yaml.find(direct).unwrap_or_else(|| panic!("缺少直连规则 {direct}"));
+            assert!(idx < first_proxy_idx, "C6：{direct} 必须排在第一条 PROXY 规则之前");
+        }
+
+        // C5：订阅端点鉴权——缺失 / 无效令牌必须 401，不再是无鉴权的假成功信号
+        let req_no_token = Request::builder()
+            .uri("/clash")
+            .body(Body::empty())
+            .unwrap();
+        let resp_no_token = app.clone().oneshot(req_no_token).await.unwrap();
+        assert_eq!(resp_no_token.status(), StatusCode::UNAUTHORIZED, "C5：缺失令牌必须 401");
+        let body_no_token = axum::body::to_bytes(resp_no_token.into_body(), 1024 * 1024).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body_no_token).contains("missing token"),
+            "C5：缺失令牌 body 需明示 missing token"
+        );
+
+        let req_bad_token = Request::builder()
+            .uri("/api/clash?token=probe")
+            .body(Body::empty())
+            .unwrap();
+        let resp_bad_token = app.clone().oneshot(req_bad_token).await.unwrap();
+        assert_eq!(resp_bad_token.status(), StatusCode::UNAUTHORIZED, "C5：无效令牌必须 401");
+        let body_bad_token = axum::body::to_bytes(resp_bad_token.into_body(), 1024 * 1024).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body_bad_token).contains("invalid token"),
+            "C5：无效令牌 body 需明示 invalid token"
+        );
 
         // 2. 模拟超额情况
         used_bytes.insert("usr_alice".into(), std::sync::atomic::AtomicU64::new(100 * 1024 * 1024));

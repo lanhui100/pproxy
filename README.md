@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 自托管开发者出海代理与智能 API 网关：
-- **第一优先级（正向出海代理）**：基于 HTTP/HTTPS CONNECT 隧道与 WebSocket 待命连接池，提供 CLI 一键环境代理管理（`pproxy on / off / status / env`）、Windows 桌面端白名单代理与移动端/全平台 HTTP 节点接入，毫秒级出海。
+- **第一优先级（正向出海代理）**：基于 HTTPS CONNECT 隧道（目标端口 443）与 WebSocket 待命连接池，提供 CLI 一键环境代理管理（`pproxy on / off / status / env`）、Windows 桌面端白名单代理与移动端/全平台 HTTP 节点接入，毫秒级出海。
 - **第二优先级（API 反向代理网关）**：LLM 优先的多上游智能分发（`/{token}/{route}/*`），按需代理，多节点出口（CF Worker / Vercel AWS IP），自带用量统计与 Token 鉴权。
 - **高可用与商业化（集群容灾与多租户）**：本地 Local HA Forwarder 守护本地业务永不断网；零配置对等集群网格（Zero-Touch Mesh）；Ed25519 非对称自包含多租户配额令牌（离线签发、客户端直显额度）。
 
@@ -14,19 +14,20 @@
 ```
 [开发终端 / 浏览器 / 手机客户端]
    │
-   ├─ 1. 正向代理流量 (CONNECT / HTTP Proxy)
-   │     └─ pony-engine (:8899 / :18900) ──[TunnelPool 待命 WS 隧道]──> gate.example.com (CF gate-worker)
-   │           └─ Basic Auth / Token 鉴权 + Allowlist 过滤 ──> 目标海外站点 (TCP 443)
+   ├─ 1. 正向代理流量（CONNECT 隧道，目标端口固定 443）
+   │     └─ pproxy-server (:8899) ──[TunnelPool 待命 WS 隧道]──> gate.example.com (CF gate-worker)
+   │           └─ 非回环来源强制 Basic Auth / X-Pony-Token（回环免认证）──> 目标海外站点 (TCP 443)
    │
    └─ 2. 反向 API 网关流量 (/{token}/{route}/*)
-         └─ pony-server (dev 服务器, 127.0.0.1:8899)
+         └─ pproxy-server (:8899，与正向代理共用同一监听)
                ├─ anthropic/google/github/x/facebook → CF Worker  (edge.example.com)
                └─ openai/opencode                   → Vercel 函数 (vedge.example.com, AWS 出口)
 ```
 
 - **双模架构**：正向 CONNECT 隧道（支持通用出海与全平台代理节点）+ 反向 HTTP 网关（`/{token}/{route}/*path` 零配置客户端 SDK）。
 - **待命连接池（TunnelPool）**：预建 WebSocket 会话，将正向出海冷建连延迟压低至 1 RTT。
-- **安全与控制**：强制 Basic Auth / Token 鉴权 + Gatekeeper 防爆破限流，路由/Token/用量存 SQLite（`~/.pony/state.db`）。
+- **安全与控制**：非回环来源的 CONNECT 强制 Basic Auth / `X-Pony-Token` 鉴权 + Gatekeeper 防爆破限流；反向网关走路径令牌。路由/Token/用量存 SQLite（`~/.pony/state.db`）。
+- **协议边界**：正向代理仅支持 CONNECT（HTTPS，目标端口 443）。明文 HTTP 正向代理（absolute-form）不提供，收到此类请求返回 `501 forward_proxy_unsupported`；allowlist 仅作日志标记，不构成拦截边界。
 
 ## 快速开始
 
@@ -58,9 +59,11 @@ pproxy off
   pproxy clash         # 自动生成配置并在终端打印二维码，手机 Clash 扫码即用
   pproxy client clash  # 客户端子命令，支持 --url-only 仅输出订阅链接
   ```
-  > 已配置 gate 隧道（`PPROXY_TUNNEL_GATE_URL`）时自动生成 **ws+tls 隧道模式订阅**
-  > （server/HOST/SNI 对准 gate 域名，B015）；未配置回落局域网 http 模式。gate 域名
-  > 轮换后重新执行 `pproxy clash` 即得新订阅，无需手改配置。
+  > 已配置 gate 隧道（`PPROXY_TUNNEL_GATE_URL`）时自动生成**隧道直连订阅**
+  > （`type: http` + `port: 8443` + `tls: true`，server/HOST/SNI 对准 gate 域名，
+  > 凭据是 `username`/`password` 形式的令牌）；未配置回落局域网 http 模式。gate 域名
+  > 轮换后重新执行 `pproxy clash` 即得新订阅，无需手改配置。公网侧必须有真实的
+  > CONNECT 数据面（nginx stream 8443 → gate），部署见 `docs/ops/DEPLOY.md` §0.1。
 * **手机系统 Wi-Fi 代理**：Wi-Fi 设置中配置 HTTP 代理 `http://<电脑局域网IP>:8899`，输入账号密码（Basic Auth 或 Token）。
 * **手机 VPN 客户端（Clash Meta / Shadowrocket / Surge 等）**：添加 HTTP 代理节点指向 `pproxy`，通过手机端 TUN 虚拟网卡实现**全局 VPN**或**基于规则的智能分流**。
 

@@ -19,9 +19,10 @@ pub fn generate_clash_yaml(server_ip: &str, port: u16, token: Option<&str>) -> S
 }
 
 /// B015：隧道模式（gate 域名直连）。gate_host 形如 "gate.example.com"（不带协议/路径）。
-/// 生成的 proxy 走 ws+tls：server=gate 域名、sni=同域名、ws-opts path=/ws、
-/// 鉴权经 ws-opts headers Authorization: Bearer <token>（对齐 gate worker /ws 协议）。
-/// token 缺失时返回 Err（fail-fast：空 Bearer 必然 401，不如直接报错提示）。
+/// C3：生成的 proxy 为 `type: http` + 公网 **8443** 标准 CONNECT 数据面（tls + sni=gate 域名），
+/// 鉴权走 HTTP Basic（username/password 同为该令牌）——CONNECT 数据面不接受
+/// `Authorization: Bearer`，输出 Bearer 即为死配置。
+/// token 缺失时返回 Err（fail-fast：空凭据必然 407/401，不如直接报错提示）。
 pub fn generate_clash_yaml_tunnel(gate_host: &str, token: Option<&str>) -> Result<String, String> {
     let tok = token
         .filter(|t| !t.is_empty())
@@ -31,7 +32,7 @@ pub fn generate_clash_yaml_tunnel(gate_host: &str, token: Option<&str>) -> Resul
             "非法 gate 域名（仅允许字母数字点连字符或 [IPv6]）：{gate_host}"
         ));
     }
-    Ok(generate_clash_yaml_mode(gate_host, 443, Some(tok), Some(gate_host)))
+    Ok(generate_clash_yaml_mode(gate_host, 8443, Some(tok), Some(gate_host)))
 }
 
 /// host 白名单校验（对抗审核 P1：防 YAML 注入/结构破坏）。
@@ -52,7 +53,8 @@ fn is_valid_hostname(host: &str) -> bool {
     h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
 }
 
-/// 统一实现：tunnel_host 为 Some 时输出 ws+tls 隧道 proxy；否则 http 局域网 proxy。
+/// 统一实现：tunnel_host 为 Some 时输出隧道 CONNECT proxy（C3：8443 + Basic 凭据）；
+/// 否则 http 局域网 proxy。
 fn generate_clash_yaml_mode(
     server: &str,
     port: u16,
@@ -69,9 +71,10 @@ fn generate_clash_yaml_mode(
     // Clash 严格校验拒绝加载）。
     let (proxy_block, group_members) = match tunnel_host {
         Some(host) => {
-            let tok = token.unwrap_or("");
+            // C3：公网 CONNECT 数据面在 8443，凭据以 Basic 形式随 CONNECT 首部下发，
+            // 严禁 headers.Authorization（Bearer 不被 CONNECT 路径接受）。
             let proxy = format!(
-                "  - name: \"Pony-Tunnel\"\n    type: http\n    server: {host}\n    port: 443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    headers:\n      Authorization: \"Bearer {tok}\"\n"
+                "  - name: \"Pony-Tunnel\"\n    type: http\n    server: {host}\n    port: {port}\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n{auth_section}"
             );
             (proxy, "      - \"Pony-Tunnel\"\n      - DIRECT".to_string())
         }
@@ -166,8 +169,8 @@ rules:
   # 国内直连与 GEOIP 兜底
   - DOMAIN-SUFFIX,cn,DIRECT
   - GEOIP,CN,DIRECT
-  # 兜底规则：未匹配项默认直连，国内网络裸奔顺畅
-  - MATCH,DIRECT
+  # 兜底规则：未匹配项默认走代理（C6：原兜底直连使绝大多数流量绕过代理，体感「代理没生效」）
+  - MATCH,PROXY
 "#
     )
 }
@@ -297,7 +300,7 @@ pub fn run(
     let token_str = token.as_deref().unwrap_or("<未配置-请运行 pproxy token create 生成>");
 
     // 1. 生成 YAML 内容（gate 隧道模式或局域网模式）
-    //    隧道模式 token 缺失 → fail-fast（空 Bearer 必然 401，不如直接报错）
+    //    隧道模式 token 缺失 → fail-fast（空凭据必然 407/401，不如直接报错）
     let yaml = match gate_endpoint.as_ref() {
         Some((host, tport)) => {
             if *tport != 443 {
@@ -409,6 +412,9 @@ mod tests {
         assert!(yaml.contains("password: \"tok_123\""));
         assert!(yaml.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
         assert!(yaml.contains("GEOIP,CN,DIRECT"));
+        // C6：三处生成器同口径——兜底走代理，探活域仍在其之前
+        assert!(yaml.trim_end().ends_with("- MATCH,PROXY"), "C6：兜底必须 MATCH,PROXY");
+        assert!(!yaml.contains("MATCH,DIRECT"), "C6：严禁回落到 MATCH,DIRECT");
     }
 
     #[test]
@@ -421,26 +427,39 @@ mod tests {
 
     #[test]
     fn test_generate_clash_yaml_tunnel_aligns_gate_host() {
-        // B015：隧道模式 server/SNI/HOST 自动对准 gate 域名，Bearer 鉴权走 headers
+        // C3：隧道模式 server/SNI 自动对准 gate 域名，出站走公网 8443 标准 CONNECT + HTTP Basic
         let yaml = generate_clash_yaml_tunnel("gate.ponygo.fun", Some("tok_123")).unwrap();
         assert!(yaml.contains("type: http"), "隧道模式采用标准 http tls 代理");
         assert!(!yaml.contains("type: ws"), "严禁非法 type: ws 出站代理");
         assert!(yaml.contains("tls: true"));
         assert!(yaml.contains("server: gate.ponygo.fun"));
-        assert!(yaml.contains("port: 443"));
+        assert!(yaml.contains("port: 8443"), "C3：公网 CONNECT 数据面在 8443");
+        assert!(!yaml.contains("port: 443"), "443 后面没有 CONNECT 能力，严禁回落到 443");
         assert!(yaml.contains("sni: gate.ponygo.fun"), "SNI 对准 gate 域名");
-        assert!(yaml.contains("Authorization: \"Bearer tok_123\""), "token 走 Bearer");
-        assert!(!yaml.contains("username:"), "隧道模式不用 http 基本认证");
+        // C3：凭据走 Basic（username/password 同为该令牌）
+        assert!(yaml.contains("username: \"tok_123\""), "token 走 HTTP Basic username");
+        assert!(yaml.contains("password: \"tok_123\""), "token 走 HTTP Basic password");
+        assert!(
+            !yaml.contains("Authorization: \"Bearer"),
+            "C3：CONNECT 路径不接受 Bearer，输出即死配置"
+        );
+        assert!(!yaml.contains("headers:"), "严禁再输出 headers 块");
         // 对抗审核 P1：group 成员必须与 proxies 定义一致（隧道模式只有 Pony-Tunnel）
         assert!(!yaml.contains("\"Pony-Proxy\""), "隧道模式不得引用未定义的 Pony-Proxy");
         assert!(yaml.contains("\"Pony-Tunnel\""));
         // YAML 结构完整：proxies 后有 proxy-groups，缩进合法
         assert!(yaml.contains("proxies:\n  - name: \"Pony-Tunnel\"\n    type: http"));
+        // C6：默认走代理；探活域仍在其之前保持 DIRECT
+        assert!(yaml.trim_end().ends_with("- MATCH,PROXY"), "C6：兜底必须 MATCH,PROXY");
+        assert!(yaml.contains("  - GEOIP,CN,DIRECT\n"));
+        let probe_idx = yaml.find("- DOMAIN,connectivitycheck.gstatic.com,DIRECT").unwrap();
+        let proxy_idx = yaml.find(",PROXY").unwrap();
+        assert!(probe_idx < proxy_idx, "C6：探活域规则必须排在第一条 PROXY 规则之前");
     }
 
     #[test]
     fn test_generate_clash_yaml_tunnel_token_missing_fails_fast() {
-        // 对抗审核 P1：token 缺失 → Err（空 Bearer 必然 401，fail-fast 优于生成死配置）
+        // 对抗审核 P1：token 缺失 → Err（空凭据必然被拒，fail-fast 优于生成死配置）
         assert!(generate_clash_yaml_tunnel("gate.ponygo.fun", None).is_err());
         assert!(generate_clash_yaml_tunnel("gate.ponygo.fun", Some("")).is_err());
     }

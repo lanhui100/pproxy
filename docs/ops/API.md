@@ -44,6 +44,24 @@ https://access.example.com/{route}/{path} + X-Pony-Token  # header 模式
 - 平台限制（CF 免费层，Tunnel 不豁免）：非流式请求边缘等待 ~100s → 524；请求体上限 ~100MB；长任务必须 streaming
 - 运维细节见 DEPLOY.md「CF Tunnel 公网入口」
 
+## 移动端订阅与 CONNECT 数据面（公网 Gate）
+
+```
+GET https://<gate域名>/clash?token=<token>        # 与 /api/clash 同一 handler
+GET https://<gate域名>/api/clash?token=<token>    # 返回 Clash Meta / Mihomo YAML
+CONNECT <host>:443 HTTP/1.1                       # 经 nginx stream :8443 → gate CONNECT 监听
+```
+
+- 订阅端点**必须带有效令牌**：缺失 → `401 Unauthorized: missing token`，无效 → `401
+  Unauthorized: invalid token`。令牌可见性等同密码。
+- 下发的 YAML 出站节点为 `type: http` + `port: 8443` + `tls: true` + `username`/`password`
+  （同一令牌，落为 `Proxy-Authorization: Basic`）；**不使用** `Authorization: Bearer`——
+  CONNECT 面不接受该头。
+- CONNECT 数据面：凭据缺失/错误 → `407`（带 `Proxy-Authenticate`）；目标非 443 或非法
+  host → `403`；目标建连失败/超时 → `502`；超出租户配额 → `403` +
+  `X-Pony-Reason: quota_exceeded`。
+- 部署前置（stream 模块 / 顶层 include / `ufw allow 8443`）见 DEPLOY.md §0.1。
+
 ## 管理面（:8900，仅 127.0.0.1，Bearer admin_token）
 
 ```

@@ -117,6 +117,45 @@ SOCKS5 中继，验证直连必败 host 自动切兜底仍可出海）。
 只能靠客户端多出口 failover 吸收；要真正做到服务端零下线，先配集群 peer 再滚动升级
 （`pproxy cluster token-create` / `join`，见 ROLLING-UPGRADE.md）。
 
+### 0.1 公网 CONNECT 数据面（移动端 Clash Meta 扫码出网的前置条件）
+
+订阅下发的 YAML 声明的是**标准 HTTP 正向代理**（`type: http` + `tls: true`），
+因此公网侧必须真的有一个能应答 `CONNECT host:443` 的端点——否则「扫码导入成功」之后
+每一个请求都会被前置反代拒掉。链路：
+
+```
+Clash Meta → nginx stream :8443 (TLS 终结) → 127.0.0.1:3102 (gate-server CONNECT 监听)
+```
+
+部署三步（缺任一步都会静默失败，实测踩坑）：
+
+1. **装 stream 动态模块**：Ubuntu 的 nginx 是 `--with-stream=dynamic`，未装包时
+   `stream{}` 直接报 `unknown directive "stream"`。
+   `sudo apt-get install -y libnginx-mod-stream`
+2. **放顶层，不要放 `conf.d`**：官方包的 `include /etc/nginx/conf.d/*.conf;` 位于
+   `http {}` **内部**，`stream{}` 放进去是非法上下文。落
+   `/etc/nginx/stream-connect/stream-connect.conf`，并在 `nginx.conf` 顶层加
+   `include /etc/nginx/stream-connect/*.conf;`（完整配置见
+   `deploy/nginx/stream-connect.conf`）。
+3. **开端口 + 打开监听开关**：`sudo ufw allow 8443/tcp`（ufw 默认 policy DROP，漏配则
+   外部 CONNECT **静默超时、nginx 日志无任何记录**）；gate-server 侧 drop-in
+   `Environment=GATE_CONNECT_LISTEN=127.0.0.1:3102`（见
+   `systemd/pony-gate-rust.service.d-connect.conf`），然后 `systemctl restart pony-gate-rust`
+   （新增监听需 restart，reload 不生效）。
+
+生效自检（三条都必须过）：
+
+```bash
+ss -tlnp | grep -E '3102|8443'          # 期望 127.0.0.1:3102 与 0.0.0.0:8443
+curl -x https://<gate域名>:8443 -sS -o /dev/null -w '%{http_code}\n' https://www.gstatic.com/generate_204
+# → curl: (56) CONNECT tunnel failed, response 407（无凭据被拒 = 链路通、鉴权在位）
+curl -x https://<gate域名>:8443 -U "$TOKEN:$TOKEN" -sS -o /dev/null -w '%{http_code}\n' \
+     https://www.gstatic.com/generate_204   # → 204
+```
+
+边界：既有 443 的 `server` 块**不改**（nginx 的 http 核心不转发 CONNECT 方法，443 上
+无法承载该语义）；`GATE_CONNECT_LISTEN` 不设置时监听根本不启动（fail-closed）。
+
 ### 更新 server（本机）
 ```bash
 cd /home/USER/pproxy

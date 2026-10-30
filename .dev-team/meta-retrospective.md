@@ -1,55 +1,58 @@
-# Meta-Retrospective — pproxy 运维漂移修复波次（2026-10-08）
-
-任务：清理已下线 Vercel 出口残留路由（openai/xai → vps）+ 校正 CLI 管理面寻址漂移。分级 B，单波次，2 Executor 并行 + Lead 验收/ADR。
+# 元框架复盘：clash-meta-scan-no-proxy（C 级）
 
 ## 1. 通信拓扑与信噪比（Topology & Noise）
 
-- 拓扑：Lead → admin-addr-fixer（任务 A，配置漂移）+ route-migrator（任务 B，路由迁移）并行，均带完整自包含 prompt；Lead 事后独立机器验收，无中间轮询噪音。
-- 信噪比：两份回执均为结构化证据（改动前后值、退出码、curl 输出），无套话。两段式时序（红相证据由 Lead 巡检冻结 → 绿相各自提交证据）有效。
+- **名册**：Lead + 3 Executor（gate-connect / clash-config / desktop-lan）+ 1 Test Agent（qa）= 5，
+  审查一律走 Subagent（2 路 L3），未挤占常驻槽位。符合 Roster ≤ 8 与拓扑公理。
+- **探索者外派**：2 份 E1 侦察在立项阶段并行下发（公网 gate 部署面 / 桌面引擎监听面），
+  各回 25 与 10 条带 `path:line` 的事实条目；Lead 只做定点复核（CONNECT 实测、8899 进程归属），
+  未把侦察原始输出吞进主上下文。**这是本会话信噪比最高的动作**——两条根因各自 5 分钟内定论，
+  且后续三个 Executor 的 prompt 直接复用这些事实，没有一个人重复调研。
+- **零废话协议**：三个 Executor 的回报全部为「文件表 + 验收命令原始输出 + 遗留风险」三段式，
+  无客套、无过程复述。Test Agent 主动做了**自查纠错**（发现 `run_helper` 管道吞掉非零退出码
+  导致 G7-desktop 假绿），并把它固化成常驻门禁 `HARNESS-SELFTEST`——这是本次最有价值的单点产出。
+- **重复命令率**：低。唯一的重复是 `cargo test --workspace` 跑了 3 次（基线 / 全量 / 隔离验证），
+  每次目的不同（基线对照、回归、暂存态隔离验证），属门禁必需而非浪费。
 
-## 2. 门禁穿透与误杀率（Gate Penetration）
+## 2. 门禁穿透与误杀率（Gate Penetration / False Negatives & Positives）
 
-- 红相：巡检阶段已冻结两份机器证据（`pproxy status` exit=3；route test `upstream not configured`），绿相各自重跑同一命令取证，真变化而非自我宣称。
-- 探针误杀（非本波次代码引入）：`pproxy doctor` 的 CONNECT 探针与 `/api/routes/{name}/test` 对 worker 系路由存在假阴性（edge 自身 200/404 判"未到达源站"；oauth2.googleapis.com 400），实测真实 curl 401/404/200 均到源站。**已识别为探针判据缺陷并如实上报，未因"doctor 非全绿"阻塞交付**——这是"以机器事实为准而非以工具 exit code 为准"的正确处置。
-- 熔断：0 次触发。route-migrator 后台任务在收尾阶段中断（PATCH 已生效），Lead 以 GET /api/routes 全表复核兜底，未重试烧 Token。
+- **真实拦截**：验收套件 R2 变异测试（把 `port 8443` 改回 443 / 把 Basic 改回 Bearer /
+  把 `MATCH,PROXY` 改回 `MATCH,DIRECT`）三处**全部被咬住**——这证明断言不是"跑得过就行"的
+  空转绿灯，而是真的钉在契约上。另加 `META-AT1-NEGCTRL` 负控制（哑服务必须被判红），
+  堵住"helper 自己坏了导致假绿"的通道。
+- **一次真实假绿被抓住**：Test Agent 首版 helper 管道吞退出码 → 我复核时该用例显示 PASS 但
+  内部输出含 `FAIL:` 字样。**教训**：`[PASS]` 字样的存在本身不是证据，必须验"断言失败能否
+  真的让脚本非零退出"。此后该模式被固化为常驻自检用例。
+- **门禁穿透（本会话真实缺口）**：C6（兜底 `MATCH,DIRECT → MATCH,PROXY`）在派单时漏派给
+  desktop-lan，只写进了共享契约文件。desktop 侧的 C6 是在 Test Agent 首轮报红后由 Lead 补发 CR
+  才修好的。**根因是"契约文件写了 ≠ 每个 Executor 都拿到了"**——我依赖 Executor 自己读契约，
+  但三个 Executor 的 prompt 里我只逐条点名了自己认为相关的那几条。改进项见第 4 节。
+- **误杀率**：0。L3 审查未产生需要驳回的误判（两路 findings 见 `.dev-team/review-l3*.json`）。
 
 ## 3. 分工契约与隔离有效性（Contract Isolation）
 
-- 写域隔离有效：A 只动 `~/.pony/config.toml` server 行；B 只经管理面 API 改路由表；C（ADR/docs）由 Lead 独占；crates/ 源码零改动。
-- 独立 Test Agent 未单独派生：B 级规范要求专职 Test Agent，本波次以「双 Executor 互不见面 + Lead 独立验收」近似替代。**反思**：验收测试非代码型（运维断言），Test Agent 与 Executor 的分权收益有限；但若按规范由第三方先断言红相、再验绿相，可进一步去除自证嫌疑。
+- **写域正交生效**：gate-server 的 `lib.rs`（W2）与 `main.rs`/`connect_proxy.rs`（W1）被切开后，
+  两个 Executor 全程零冲突；期间出现一次真实边界争议（`src/tests.rs` 归属），Executor 主动
+  上报而不是自行扩大写域，Lead 一票裁决后归属清晰。**这正是 advisory 写域应有的行为**。
+- **测试分权真实有效**：Test Agent 全程只写 `tests/acceptance/`，从未被允许改实现；
+  它报出的唯一红项（desktop C6）反过来驱动了实现方修复，而不是它自己去改代码。
+- **Lead 写入边界**：Lead 只写了 ADR、契约、`docs/ops/*`、README 单 hunk 与部署动作，
+  没有向业务代码写一行逻辑。业务代码 100% 由 Executor 产出。
+- **生产部署作为门禁**：真机验收不是"本地跑通就算"，而是把 8443 打通后用 **Mihomo v1.19.2**
+  真实加载生产下发的 YAML —— 这一步抓到了所有本地测试抓不到的东西（ufw 静默丢包、
+  nginx conf.d 上下文非法、stream 动态模块缺失）。
 
 ## 4. 元协议迭代建议（Self-Evolving Protocol）
 
-1. dev-team 对"运维/配置类 B 级任务"宜提供轻量路径：允许 Lead 兼任验收（记录为 A 级变体），避免为纯 ops 断言派生专职 Test Agent 的空转成本。
-2. 探针缺陷应纳入 doctor 的已知假阴性清单（或修 `edge 自身错误` 判据），否则每次 doctor 全绿门禁都会把链路健康误报为故障。
-3. 任务板 claim 的 owner 归属：Executor 回执后由 Lead 代 claim 时，owner 落为 lead 而非原 Executor——工具语义与流程预期不一致，建议在 skill 中明确"Lead 代 claim 时 owner 归属"规则。
-
----
-
-# 波次 2 元复盘 — 遗留修复（doctor 探针 / status 单位名 / VERCEL_HOSTS / worker 标记头）
-
-任务：三处代码修复 + 一处 worker 端修复（deploy-deferred）。分级 B。团队：legacy-qa（Test）+ cli-fixer/core-fixer/worker-fixer（3 Executor，波次 1 并行 2 个 + 波次 2 串行 1 个）。
-
-## 1. 通信拓扑与信噪比
-
-- 红相冻结先行（T1 完成信号）→ A/B 实现 → C 波次 2 → T2 绿相：依赖链清晰，任务板 blocked_by 完整。
-- **流程偏差（如实记录）**：T1 红相测试落盘时间晚于 Executor 实现开始（并行派发导致）——源码级红相无法复现（集成测试直接 PASS）。补救：以**旧安装二进制**复现二进制级红相（A=400/B=inactive）作为有效红相证据。教训：技能"红相冻结窗口内禁止实现"的强制时序，在多 Executor 并行时需 Lead 显式 gate（先收 T1 信号再放行实现），本波次未严格 gate。
-
-## 2. 门禁穿透与误杀率
-
-- **L3 双路审查抓到真实缺陷**：视角 A 发现 upgrade.rs 补查漏 `pproxy.service` 单位名（service.rs 与 upgrade.rs 状态判定不一致）→ 修复后全量回归 exit 0。这是"≥2 路互补审查"机制的价值实证——单路视角 B（协议/安全）PASS 但未覆盖状态一致性。
-- 视角 B 对 CONNECT 探针的注入面/零机密核查 PASS（file:line 依据充分）。
-- **探针假阴性根因比初判更深**：400 不只是缺 Host 头，还叠加"探针目标打到远程 CF worker"（cfg.data_plane 语义错位）。评审过程纠偏了 Lead 的初判（worker 重部署后 CF 仍不回 CONNECT 200 → 归 deploy-deferred 是错误归类），代码层修正目标选择。
-
-## 3. 分工契约与隔离有效性
-
-- 写域隔离严格：cli-fixer（3+1 文件）、core-fixer（route.rs + 衍生 gateway.rs）、worker-fixer（worker.js + DEPLOY.md）、legacy-qa（tests/scripts/.dev-team）零交集；L3 finding 的修复落在各自原写域内闭环。
-- 衍生适配合规：gateway.rs 夹具仅增补构造参数，经 L3 纯度审计 PASS（AST 级确认无逻辑夹带）。
-- Test Agent 本波次价值充分：红相/绿相机器记录双落盘，PPROXY_BIN 适配防旧二进制误报，未改断言放水。
-
-## 4. 元协议迭代建议
-
-1. **并行波次的红相时序 gate**：技能应明确"红相冻结完成信号未收到前，Executor 不得开始实现"为 Lead 硬 gate（可复用任务板 T1 的 completed 状态作机械触发），避免本波次"源码级红相不可复现"的偏差。
-2. **探针目标语义**：doctor 第 5 段 CONNECT 自检目标应为"本机网关"而非 cfg.data_plane（远程 tunnel gate）——建议在技能/文档中把"本地自检探针"与"远程数据面抽样"的目标选择规则固化为模式，防止后续回归。
-3. **deploy-deferred 降级路径**：本波次 worker 修复因无 CF 凭据无法上线，采用了静态自证 + 部署 SOP + 部署后验证命令（--with-deploy）的降级形态，效果良好；建议把该模式（代码+凭证依赖分离、部署后机器验证命令作为验收回补）纳入技能"红相降级协议"的正式选项。
-4. **L3 互补矩阵按文件特征挂载**：doctor.rs（网络/协议）挂视角 B、service.rs/upgrade.rs（状态）挂视角 A 的分配合理且抓到真实缺陷；建议把"按 hunk 特性选择视角"写成机械建议（含并发/状态关键字的文件优先视角 A）。
+1. **契约分派必须逐任务点名，不能只写共享契约文件**。建议在任务书模板里加一条硬要求：
+   `契约条目覆盖清单`——每个 Executor 的 prompt 必须显式列出"本条任务负责 C1/C3/C6 中的哪几条"，
+   Lead 在栅栏前机械比对契约条目并集 == 全部冻结条目。本次 C6 漏派就是缺这道机械比对。
+2. **"扫码/导入成功"类假信号应立为通用审计项**：凡是下发配置的端点，其"可被消费"必须与
+   "可被使用"分开断言。本次订阅端点不校验 token 导致 200 假成功，是典型的可用性假信号。
+   建议在 B/C 级任务识别清单里加一条：*分发面必须校验凭据，且失败要显式可见*。
+3. **部署类任务的验收必须包含"环境前提"断言的独立用例**：本次 ufw 默认 DROP 只放行 22/80/443，
+   新端口静默超时且 nginx 零日志——本地测试无法覆盖。建议在 DEPLOY 模板里固定"新端口三件套"：
+   `ss`（本机监听）+ `ufw status`（安全组）+ 从外部打一发（真实可达）。
+4. **隔离验证应固化**：本次用 `git apply` 到临时 worktree 验证"暂存区独立可编译"，
+   解决了脏工作区（多会话并行）下"提交内容是否自洽"无法证明的问题。建议把它写成脚本
+   （`dev-verify-staged.sh`），成为收口标准动作。

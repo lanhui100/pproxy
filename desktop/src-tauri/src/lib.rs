@@ -11,6 +11,8 @@ static TRAY_MODE_GB_ITEM: OnceLock<tauri::menu::CheckMenuItem<tauri::Wry>> = Onc
 #[tauri::command]
 fn proxy_prepare_update_exit(app: tauri::AppHandle) -> Result<(), String> {
   log::info!("proxy_prepare_update_exit: 准备更新退出，复原系统代理并清理单实例锁");
+  // 0. 停掉 LAN CONNECT 监听（C4），避免更新过渡期残留监听任务
+  abort_lan_listener_now();
   // 1. 复原系统代理，防止安装过渡期系统断网
   if let Err(e) = proxy_disable_inner(app) {
     log::warn!("proxy_prepare_update_exit: proxy_disable failed: {e}");
@@ -166,6 +168,15 @@ pub fn run() {
           }
         }
       });
+      // LAN 接入开关持久化还原（C4）：配置为真则恢复 0.0.0.0:<PPROXY_LAN_PORT> 监听
+      tauri::async_runtime::spawn(async move {
+        if lan_enabled_from_config() {
+          match start_lan_listener().await {
+            Ok(info) => log::info!("LAN listener restored: {info}"),
+            Err(e) => log::warn!("LAN listener restore failed: {e}"),
+          }
+        }
+      });
       // 流量统计周期落盘（60s）：进程崩溃最多损失一个周期的计数
       tauri::async_runtime::spawn(async move {
         loop {
@@ -202,6 +213,7 @@ pub fn run() {
       proxy_rescue, proxy_import_sync, proxy_mode_switch, proxy_get_current_config,
       proxy_traffic_stats, proxy_test_egress, proxy_test_site_via, proxy_test_site_local,
       proxy_clash_config_get, proxy_clash_export,
+      proxy_lan_toggle,
       proxy_cluster_nodes_get, proxy_user_profile,
       open_external_url, proxy_prepare_update_exit, proxy_open_log_dir,
     ])
@@ -209,8 +221,8 @@ pub fn run() {
     .expect("error while building tauri application");
   app.run(|app_handle, event| {
     match event {
-      tauri::RunEvent::ExitRequested { .. } => { if let Err(e)=proxy_disable_inner(app_handle.clone()){log::warn!("ExitRequested disable failed: {e}");} let _=std::fs::remove_file(data_dir().join("instance.lock")); }
-      tauri::RunEvent::Exit => { let _ = proxy_disable_inner(app_handle.clone()); let _=std::fs::remove_file(data_dir().join("instance.lock")); }
+      tauri::RunEvent::ExitRequested { .. } => { abort_lan_listener_now(); if let Err(e)=proxy_disable_inner(app_handle.clone()){log::warn!("ExitRequested disable failed: {e}");} let _=std::fs::remove_file(data_dir().join("instance.lock")); }
+      tauri::RunEvent::Exit => { abort_lan_listener_now(); let _ = proxy_disable_inner(app_handle.clone()); let _=std::fs::remove_file(data_dir().join("instance.lock")); }
       _ => {}
     }
   });
@@ -1449,6 +1461,132 @@ async fn proxy_disable(app: tauri::AppHandle) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?
 }
+
+// ---- LAN 接入（C4）：独立于回环引擎的 0.0.0.0:<PPROXY_LAN_PORT> CONNECT 监听 ----
+// 开关来源：app_config JSON 键 `allow_lan_clients`（默认 false）。回环 127.0.0.1:18900
+// 的行为完全不变（系统代理/PAC 依赖其免鉴权）；本监听只服务「允许局域网设备接入」。
+// 生命周期：开关命令启停；进程退出（引擎唯一终止路径）时同步 abort，不留后台任务。
+
+struct LanRuntime {
+    listener: proxy::engine::LanListener,
+}
+
+static LAN_RUNTIME: std::sync::Mutex<Option<LanRuntime>> = std::sync::Mutex::new(None);
+
+fn lan_is_listening() -> bool {
+    LAN_RUNTIME.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+}
+
+fn lan_enabled_from_config() -> bool {
+    app_config_get()
+        .get("allow_lan_clients")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// 当前隧道令牌：watch 快照优先（热更新、零 keyring IPC），缺失时回读凭据库。
+fn current_lan_token() -> Option<String> {
+    let from_watch = TUNNEL_TX.get().and_then(|tx| {
+        let g = tx.borrow();
+        g.1.clone()
+    });
+    from_watch
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| {
+            cred_get_impl(CREDENTIAL_USER_TUNNEL)
+                .ok()
+                .flatten()
+                .filter(|t| !t.trim().is_empty())
+        })
+}
+
+/// LAN 模式订阅 URL：令牌存在时带 `?token=`（订阅端点按 C5 口径校验），否则裸 URL。
+fn lan_subscription_url(lan_ip: &str, port: u16, token: Option<&str>) -> String {
+    match token.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => format!("http://{lan_ip}:{port}/clash.yaml?token={t}"),
+        None => format!("http://{lan_ip}:{port}/clash.yaml"),
+    }
+}
+
+async fn stop_lan_listener() {
+    let prev = LAN_RUNTIME.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some(rt) = prev {
+        rt.listener.stop().await;
+    }
+}
+
+fn abort_lan_listener_now() {
+    let prev = LAN_RUNTIME.lock().unwrap_or_else(|p| p.into_inner()).take();
+    if let Some(rt) = prev {
+        rt.listener.abort();
+    }
+}
+
+/// 启动 LAN 监听（幂等：先停旧实例）；绑定失败把原因回给 UI。
+async fn start_lan_listener() -> Result<serde_json::Value, String> {
+    stop_lan_listener().await;
+    let port = proxy::engine::lan_port_from_env();
+    let listen_addr = format!("0.0.0.0:{port}");
+    let token_provider: std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync> =
+        std::sync::Arc::new(current_lan_token);
+    let subscription_yaml: std::sync::Arc<dyn Fn() -> String + Send + Sync> =
+        std::sync::Arc::new(|| {
+            // 每次拉取按当前 LAN IP / 端口 / 令牌重建，避免手机拿到过期凭据
+            let ip = get_desktop_lan_ip();
+            let p = proxy::engine::lan_port_from_env();
+            let tok = current_lan_token();
+            build_clash_meta_yaml(&ip, p, tok.as_deref(), None).unwrap_or_default()
+        });
+    let cfg = proxy::engine::LanConfig {
+        listen_addr: listen_addr.clone(),
+        token_provider,
+        subscription_yaml,
+        engine: proxy::engine::EngineConfig {
+            // 该字段不参与 LAN 监听；分派复用回环引擎同一套 watch 通道 / 统计
+            listen_addr: "127.0.0.1:18900".into(),
+            whitelist: ensure_watch().subscribe(),
+            mode: ensure_mode_watch().subscribe(),
+            tunnel: ensure_tunnel_watch().subscribe(),
+            upstream: ensure_upstream_watch().subscribe(),
+            pool: proxy::engine_tunnel::TunnelPool::with_size(ensure_tunnel_watch().subscribe(), 0),
+        },
+        stats: get_or_init_engine_stats(),
+    };
+    let listener = proxy::engine::LanListener::start(cfg)
+        .await
+        .map_err(|e| format!("局域网监听启动失败（{listen_addr}）：{e}"))?;
+    let actual_port = listener.port;
+    *LAN_RUNTIME.lock().unwrap_or_else(|p| p.into_inner()) = Some(LanRuntime { listener });
+    Ok(serde_json::json!({
+        "enabled": true,
+        "port": actual_port,
+        "has_token": current_lan_token().is_some(),
+    }))
+}
+
+/// 开关「允许局域网设备接入」：落盘 `allow_lan_clients` 并启停 LAN 监听。
+/// 启动失败时回滚配置为 false（不留下「开关说开、实际没监听」的分裂状态）。
+#[tauri::command]
+async fn proxy_lan_toggle(enabled: bool) -> Result<serde_json::Value, String> {
+    if enabled {
+        app_config_set(serde_json::json!({ "allow_lan_clients": true }))?;
+        match start_lan_listener().await {
+            Ok(info) => Ok(info),
+            Err(e) => {
+                let _ = app_config_set(serde_json::json!({ "allow_lan_clients": false }));
+                Err(e)
+            }
+        }
+    } else {
+        stop_lan_listener().await;
+        app_config_set(serde_json::json!({ "allow_lan_clients": false }))?;
+        Ok(serde_json::json!({
+            "enabled": false,
+            "port": proxy::engine::lan_port_from_env(),
+        }))
+    }
+}
+
 #[tauri::command]
 fn proxy_status() -> serde_json::Value {
     let mode = if let Some(tx) = PROXY_MODE_TX.get() { *tx.borrow() } else { load_proxy_mode_from_file() };
@@ -2224,12 +2362,24 @@ fn get_desktop_lan_ip() -> String {
 
 /// 生成标准 Clash Meta / Mihomo 配置文件 YAML
 /// 支持公网隧道模式（tunnel_host: Some）与局域网 HTTP 模式（tunnel_host: None）
-fn build_clash_meta_yaml(server_ip: &str, port: u16, token: Option<&str>, tunnel_host: Option<&str>) -> String {
+///
+/// C3：隧道节点固定走公网 Gate 的 8443 CONNECT 入口（`tls: true`），凭据用
+/// `username`/`password`——CONNECT 数据面只认 Basic / X-Pony-Token，**不接受 Bearer**，
+/// 输出 `headers.Authorization: Bearer` 即死配置。隧道模式 token 缺失/空白直接 Err（fail-fast）。
+fn build_clash_meta_yaml(
+    server_ip: &str,
+    port: u16,
+    token: Option<&str>,
+    tunnel_host: Option<&str>,
+) -> Result<String, String> {
     let (proxy_block, group_members) = match tunnel_host {
         Some(host) => {
             let tok = token.unwrap_or("").trim();
+            if tok.is_empty() {
+                return Err("隧道模式缺少令牌：拒绝生成空凭据配置".into());
+            }
             let proxy = format!(
-                "  - name: \"Pony-Tunnel\"\n    type: http\n    server: {host}\n    port: 443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    headers:\n      Authorization: \"Bearer {tok}\"\n"
+                "  - name: \"Pony-Tunnel\"\n    type: http\n    server: {host}\n    port: 8443\n    tls: true\n    sni: {host}\n    skip-cert-verify: false\n    username: \"{tok}\"\n    password: \"{tok}\"\n"
             );
             (proxy, "      - \"Pony-Tunnel\"\n      - DIRECT".to_string())
         }
@@ -2245,7 +2395,7 @@ fn build_clash_meta_yaml(server_ip: &str, port: u16, token: Option<&str>, tunnel
         }
     };
 
-    format!(
+    Ok(format!(
         r#"# ================================================================
 #  Pony Proxy — Clash Meta / Mihomo 移动端与客户端智能代理配置
 # ================================================================
@@ -2324,13 +2474,12 @@ rules:
   - DOMAIN-SUFFIX,stackoverflow.com,PROXY
   - DOMAIN-SUFFIX,wikipedia.org,PROXY
   - DOMAIN-SUFFIX,wikimedia.org,PROXY
-  # 国内直连与 GEOIP 兜底
+  # 国内直连与 GEOIP 兜底（C6：兜底改为走代理，国内流量由 GEOIP,CN 直连兜住）
   - DOMAIN-SUFFIX,cn,DIRECT
   - GEOIP,CN,DIRECT
-  # 兜底规则：未匹配项默认直连
-  - MATCH,DIRECT
+  - MATCH,PROXY
 "#
-    )
+    ))
 }
 
 /// 渲染 SVG 格式二维码
@@ -2351,7 +2500,8 @@ fn proxy_clash_config_get(custom_lan_ip: Option<String>, custom_port: Option<u16
     let lan_ip = custom_lan_ip
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(get_desktop_lan_ip);
-    let port = custom_port.unwrap_or(8899);
+    // 与新增 LAN 监听同口径（env PPROXY_LAN_PORT，缺省 8899），避免 YAML 指向不存在的端口
+    let port = custom_port.unwrap_or_else(proxy::engine::lan_port_from_env);
 
     // 优先取隧道 token 作为客户端鉴权
     let token = cred_get_impl(CREDENTIAL_USER_TUNNEL).ok().flatten()
@@ -2373,16 +2523,16 @@ fn proxy_clash_config_get(custom_lan_ip: Option<String>, custom_port: Option<u16
 
     let (yaml, subscription_url, is_tunnel) = match gate_host.as_deref() {
         Some(ghost) if token.is_some() => {
-            // 公网隧道模式：订阅直接走公网 Gate，节点直连公网 Gate 隧道
+            // 公网隧道模式：订阅走公网 Gate（C5 鉴权），节点指向 Gate 的 8443 CONNECT 入口（C3）
             let tok_str = token.as_deref().unwrap_or("");
-            let y = build_clash_meta_yaml(&lan_ip, port, token.as_deref(), Some(ghost));
+            let y = build_clash_meta_yaml(&lan_ip, port, token.as_deref(), Some(ghost))?;
             let sub = format!("https://{ghost}/api/clash?token={tok_str}");
             (y, sub, true)
         }
         _ => {
-            // 局域网模式（无公网隧道配置时的保底）
-            let y = build_clash_meta_yaml(&lan_ip, port, token.as_deref(), None);
-            let sub = format!("http://{lan_ip}:{port}/clash.yaml");
+            // 局域网模式：订阅由本机 LAN 监听（0.0.0.0:port）提供 /clash.yaml
+            let y = build_clash_meta_yaml(&lan_ip, port, token.as_deref(), None)?;
+            let sub = lan_subscription_url(&lan_ip, port, token.as_deref());
             (y, sub, false)
         }
     };
@@ -2401,6 +2551,8 @@ fn proxy_clash_config_get(custom_lan_ip: Option<String>, custom_port: Option<u16
         "token": token,
         "is_tunnel": is_tunnel,
         "tunnel_host": gate_host,
+        "lan_enabled": lan_enabled_from_config(),
+        "lan_listening": lan_is_listening(),
         "subscription_url": subscription_url,
         "clash_scheme_url": clash_scheme_url,
         "yaml": yaml,
@@ -2918,21 +3070,67 @@ mod tests {
 
     #[test]
     fn test_clash_meta_yaml_and_qr_svg_generation() {
-        let yaml_lan = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"), None);
+        let yaml_lan = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"), None)
+            .expect("LAN 模式应正常生成");
         assert!(yaml_lan.contains("server: 192.168.1.50"));
         assert!(yaml_lan.contains("port: 8899"));
         assert!(yaml_lan.contains("username: \"token_abc\""));
         assert!(yaml_lan.contains("password: \"token_abc\""));
+        assert!(!yaml_lan.contains("tls: true"), "C4：LAN 节点不带 tls");
         assert!(yaml_lan.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
 
-        let yaml_tunnel = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"), Some("rn.ponygo.fun"));
+        // C4：token 缺失时不写 username/password（UI 负责警示「将被拒绝」）
+        let yaml_lan_no_token = build_clash_meta_yaml("192.168.1.50", 8899, None, None).unwrap();
+        assert!(!yaml_lan_no_token.contains("username:"));
+        assert!(!yaml_lan_no_token.contains("password:"));
+
+        // C3：隧道节点对齐公网 Gate 8443 CONNECT 入口，凭据走 username/password
+        let yaml_tunnel = build_clash_meta_yaml("192.168.1.50", 8899, Some("token_abc"), Some("gate.example.com"))
+            .expect("隧道模式应正常生成");
         assert!(yaml_tunnel.contains("name: \"Pony-Tunnel\""));
         assert!(yaml_tunnel.contains("type: http"));
         assert!(!yaml_tunnel.contains("type: ws"), "Clash Meta 严禁非法 type: ws 出站代理");
         assert!(yaml_tunnel.contains("tls: true"));
-        assert!(yaml_tunnel.contains("server: rn.ponygo.fun"));
-        assert!(yaml_tunnel.contains("Authorization: \"Bearer token_abc\""));
+        assert!(yaml_tunnel.contains("sni: gate.example.com"));
+        assert!(yaml_tunnel.contains("skip-cert-verify: false"));
+        assert!(yaml_tunnel.contains("server: gate.example.com"));
+        assert!(yaml_tunnel.contains("port: 8443"), "C3：必须指向 Gate 的 8443 CONNECT 入口");
+        assert!(!yaml_tunnel.contains("port: 443"), "C3：443 无 CONNECT 能力，禁止再输出");
+        assert!(yaml_tunnel.contains("username: \"token_abc\""));
+        assert!(yaml_tunnel.contains("password: \"token_abc\""));
+        assert!(!yaml_tunnel.contains("Authorization: \"Bearer"), "C3：CONNECT 不接受 Bearer，输出即死配置");
         assert!(yaml_tunnel.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
+
+        // C3 fail-fast：空令牌不得产出空凭据隧道节点
+        assert!(build_clash_meta_yaml("192.168.1.50", 8899, Some("  "), Some("gate.example.com")).is_err());
+
+        // C6：兜底必须走代理（MATCH,PROXY），GEOIP,CN,DIRECT 紧接其前
+        for yaml in [&yaml_lan, &yaml_tunnel] {
+            assert!(yaml.trim_end().ends_with("- MATCH,PROXY"), "C6：末条规则必须为 MATCH,PROXY");
+            assert!(
+                yaml.contains("- GEOIP,CN,DIRECT\n  - MATCH,PROXY"),
+                "C6：GEOIP,CN,DIRECT 必须紧接 MATCH,PROXY 之前"
+            );
+            assert!(!yaml.contains("MATCH,DIRECT"), "C6：禁止再输出 MATCH,DIRECT");
+            // 探活域与内网 CIDR 必须排在第一条 PROXY 规则之前（保持 DIRECT）
+            let first_proxy = yaml.find(",PROXY\n").expect("应至少有一条 PROXY 规则");
+            let first_matcher = yaml.find("- MATCH,PROXY").expect("应有 MATCH,PROXY");
+            assert!(first_proxy < first_matcher, "C6：PROXY 规则必须在兜底之前");
+            for probe in [
+                "DOMAIN,connectivitycheck.gstatic.com,DIRECT",
+                "DOMAIN,clients3.google.com,DIRECT",
+                "DOMAIN,msftconnecttest.com,DIRECT",
+                "DOMAIN,captive.apple.com,DIRECT",
+                "DOMAIN,cp.cloudflare.com,DIRECT",
+            ] {
+                let pos = yaml.find(probe).unwrap_or_else(|| panic!("C6：缺少探活直连规则 {probe}"));
+                assert!(pos < first_proxy, "C6：探活规则 {probe} 必须排在 PROXY 规则之前");
+            }
+            for cidr in ["IP-CIDR,127.0.0.0/8", "IP-CIDR,192.168.0.0/16", "IP-CIDR,10.0.0.0/8"] {
+                let pos = yaml.find(cidr).unwrap_or_else(|| panic!("C6：缺少内网 CIDR 规则 {cidr}"));
+                assert!(pos < first_proxy, "C6：内网 CIDR {cidr} 必须排在 PROXY 规则之前");
+            }
+        }
 
         let qr = render_qr_svg("https://rn.ponygo.fun/api/clash?token=token_abc");
         assert!(qr.is_ok());

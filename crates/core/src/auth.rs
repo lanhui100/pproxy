@@ -238,6 +238,96 @@ impl TokenVerifier {
     }
 }
 
+// ─── CONNECT 数据面鉴权 ─────────────────────────────────────────────
+//
+// 服务端（`pproxy-server`）与桌面引擎（`pproxy-engine`）共用同一份语义：
+// 回环来源免认证；非回环必须携带有效凭据。逻辑只在这里维护一份，
+// 避免两侧漂移产生未鉴权出口。
+
+/// 从 `Proxy-Authorization` 头值（如 `Basic dXNlcjpwYXNz`）解析 (username, password)。
+pub fn parse_basic_auth(header_val: &str) -> Option<(String, String)> {
+    let header_val = header_val.trim();
+    let payload = if header_val.to_ascii_lowercase().starts_with("basic ") {
+        header_val[6..].trim()
+    } else {
+        return None;
+    };
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()?;
+    let creds = String::from_utf8(decoded).ok()?;
+    let (username, password) = creds.split_once(':')?;
+    Some((username.to_string(), password.to_string()))
+}
+
+/// 校验 CONNECT 请求头携带的凭据。
+///
+/// 优先级：集群转发票证 → Basic Auth（用户表或令牌）→ `X-Pony-Token`。
+/// 任一命中即通过；否则返回 `false`，调用方必须回 `407 Proxy Authentication Required`。
+pub fn verify_connect_credentials(
+    head: &str,
+    users: Option<&crate::user::UserService>,
+    tokens: &crate::token::TokenService,
+    cluster_auth_key: Option<&str>,
+) -> bool {
+    let mut basic_auth = None;
+    let mut token_header = None;
+    let mut cluster_ticket = None;
+
+    for line in head.lines() {
+        let line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("proxy-authorization:") {
+            if let Some((_, val)) = line.split_once(':') {
+                basic_auth = parse_basic_auth(val);
+            }
+        } else if lower.starts_with("x-pony-token:") {
+            if let Some((_, val)) = line.split_once(':') {
+                token_header = Some(val.trim().to_string());
+            }
+        } else if lower.starts_with(crate::cluster_ticket::CLUSTER_TICKET_HEADER) {
+            if let Some((_, val)) = line.split_once(':') {
+                cluster_ticket = Some(val.trim().to_string());
+            }
+        }
+    }
+
+    // 0. 集群转发票证校验（HA Forwarder failover 转发专用）
+    if let (Some(key), Some(ticket)) = (cluster_auth_key, cluster_ticket.as_deref()) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if crate::cluster_ticket::verify_ticket(key, ticket, now).is_ok() {
+            return true;
+        }
+    }
+
+    // 1. 优先校验 Basic Auth (username, password)
+    if let Some((username, password)) = basic_auth {
+        if let Some(user_service) = users {
+            if user_service.verify_user(&username, &password).is_some() {
+                return true;
+            }
+        }
+        // 用户名/密码任一匹配令牌也放行（令牌可作 Basic 凭据使用）
+        if tokens.verify(&username).is_ok() || tokens.verify(&password).is_ok() {
+            return true;
+        }
+        return false;
+    }
+
+    // 2. 其次校验 X-Pony-Token
+    if let Some(tok) = token_header {
+        if tokens.verify(&tok).is_ok() {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

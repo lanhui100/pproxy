@@ -532,6 +532,8 @@ interface ClashConfigData {
   token: string | null
   is_tunnel?: boolean
   tunnel_host?: string | null
+  lan_enabled?: boolean
+  lan_listening?: boolean
   subscription_url: string
   clash_scheme_url?: string
   yaml: string
@@ -544,6 +546,55 @@ const showClashDialog = ref(false)
 const clashUrlCopied = ref(false)
 const clashSchemeCopied = ref(false)
 
+// ---- 局域网接入开关（C4）：非回环来源需令牌，回环免鉴权 ----
+const lanEnabled = ref(false)
+const lanListening = ref(false)
+const lanSaving = ref(false)
+const lanPort = ref(8899)
+
+async function refreshLanAccess(): Promise<void> {
+  if (!isTauri()) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const cfg = (await invoke('proxy_clash_config_get', {})) as ClashConfigData
+    lanEnabled.value = cfg.lan_enabled === true
+    lanListening.value = cfg.lan_listening === true
+    if (typeof cfg.port === 'number') lanPort.value = cfg.port
+  } catch {
+    // 读取失败时不谎报开启
+  }
+}
+
+async function handleLanToggle(val: boolean): Promise<void> {
+  const previous = lanEnabled.value
+  lanEnabled.value = val
+  lanSaving.value = true
+  if (!isTauri()) {
+    lanListening.value = val
+    lanSaving.value = false
+    toast.info('开发模式', val ? '已模拟开启局域网接入' : '已模拟关闭局域网接入')
+    return
+  }
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const res = (await invoke('proxy_lan_toggle', { enabled: val })) as { enabled?: boolean; port?: number }
+    lanListening.value = res.enabled === true
+    if (typeof res.port === 'number') lanPort.value = res.port
+    if (val) {
+      if (tunnelHasToken.value) toast.success('已开启局域网接入', `手机可经本机 ${lanPort.value} 端口接入`)
+      else toast.error('已开启但无法出网', '未配置令牌，局域网接入将被拒绝')
+    } else {
+      toast.success('已关闭局域网接入')
+    }
+  } catch (e: any) {
+    lanEnabled.value = previous
+    lanListening.value = false
+    toast.error('切换失败', typeof e === 'string' ? e : e?.message || String(e))
+  } finally {
+    lanSaving.value = false
+  }
+}
+
 async function fetchClashConfig(): Promise<void> {
   loadingClash.value = true
   if (!isTauri()) {
@@ -552,7 +603,10 @@ async function fetchClashConfig(): Promise<void> {
       port: 8899,
       has_token: true,
       token: 'pony_dev_mock',
-      subscription_url: 'http://192.168.1.100:8899/clash.yaml',
+      is_tunnel: false,
+      lan_enabled: false,
+      lan_listening: false,
+      subscription_url: 'http://192.168.1.100:8899/clash.yaml?token=pony_dev_mock',
       yaml: '# Dev mock Clash configuration\nmixed-port: 7890\nproxies:\n  - name: Pony-Proxy\n    type: http\n    server: 192.168.1.100\n    port: 8899',
       qr_svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#f0f0f0"/><text x="100" y="105" text-anchor="middle" font-size="12" fill="#666">二维码开发模拟</text></svg>',
     }
@@ -619,6 +673,7 @@ onMounted(async () => {
   void refreshTunnel()
   void refreshWhitelist()
   void refreshAutoProxy()
+  void refreshLanAccess()
 
   if (isTauri()) {
     try {
@@ -1074,6 +1129,32 @@ onMounted(async () => {
             </Button>
           </div>
         </div>
+
+        <!-- 局域网接入（C4）：默认关闭；开启后 0.0.0.0:8899 提供带令牌鉴权的 CONNECT 代理 -->
+        <div class="border-t border-border/30 pt-3 flex items-center justify-between gap-4">
+          <label for="lan-access-switch" class="space-y-0.5 cursor-pointer">
+            <div class="text-xs font-medium text-foreground">允许局域网设备接入</div>
+            <div class="text-[11px] text-muted-foreground">
+              开启后本机在 0.0.0.0:{{ lanPort }} 提供 HTTP CONNECT 代理，手机需与电脑连接同一局域网 Wi-Fi
+            </div>
+            <div v-if="!lanEnabled" class="text-[11px] text-amber-600 dark:text-amber-400">
+              当前未开启：手机无法接入本机代理，局域网模式下扫码导入后无法出网
+            </div>
+            <div v-else-if="!tunnelHasToken" class="text-[11px] text-rose-500">
+              未配置令牌，局域网接入将被拒绝（请先在方案 A 填写授权码）
+            </div>
+            <div v-else-if="!lanListening" class="text-[11px] text-rose-500">
+              监听未就绪，请关闭后重新开启
+            </div>
+          </label>
+          <Switch
+            id="lan-access-switch"
+            aria-label="允许局域网设备接入"
+            :model-value="lanEnabled"
+            @update:model-value="handleLanToggle"
+            :disabled="lanSaving"
+          />
+        </div>
       </div>
     </section>
 
@@ -1246,7 +1327,7 @@ onMounted(async () => {
                 v-if="clashConfig.is_tunnel"
                 class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-emerald-100 text-emerald-800"
               >
-                公网隧道漫游模式
+                公网隧道模式
               </span>
               <span
                 v-else
@@ -1255,8 +1336,23 @@ onMounted(async () => {
                 局域网直连模式
               </span>
               <span class="text-[11px] text-zinc-500">
-                {{ clashConfig.is_tunnel ? '支持手机公网蜂窝及任意 Wi-Fi 扫码即用' : '手机需与电脑连接同一局域网 Wi-Fi' }}
+                {{ clashConfig.is_tunnel
+                  ? '出网经公网 Gate 的 8443 CONNECT 入口，需授权令牌有效；手机可在任意网络使用'
+                  : '手机需与电脑连接同一局域网 Wi-Fi，且需开启「允许局域网设备接入」' }}
               </span>
+            </div>
+            <!-- 局域网模式未满足条件时如实警示，不再宣称扫码即用 -->
+            <div
+              v-if="!clashConfig.is_tunnel && !clashConfig.has_token"
+              class="mt-2 text-[11px] text-rose-500 text-center"
+            >
+              未配置令牌，局域网接入将被拒绝
+            </div>
+            <div
+              v-else-if="!clashConfig.is_tunnel && !clashConfig.lan_enabled"
+              class="mt-2 text-[11px] text-amber-600 dark:text-amber-400 text-center"
+            >
+              局域网接入未开启，手机将无法连接本机代理
             </div>
           </div>
 

@@ -1,40 +1,114 @@
 {
+  "session": "clash-meta-scan-no-proxy",
+  "grade": "C",
+  "grade_reason": "命中机械分级触发器：外部网络/IO、协议新增、生产部署、跨 3 个 crate + 桌面端",
+  "baseline_commit": "d0a661b",
+  "root_cause_status": "CONFIRMED (triple-sourced: code + prod probe + config generators)",
+  "root_cause": {
+    "primary": "订阅 YAML 声明 type: http + 443 + tls: true 的标准 HTTP CONNECT 正向代理端点，但 rn.ponygo.fun:443 是 nginx→gate-server(127.0.0.1:3101)；gate-server 零 CONNECT 实现、nginx 不转发 CONNECT，实测 CONNECT → HTTP/1.1 400 Bad Request。",
+    "secondary_1": "LAN 兜底模式指向 <lan_ip>:8899，而桌面端引擎硬编码 127.0.0.1:18900（loopback only），用户机器 8899 无监听 → Connection Refused。",
+    "secondary_2": "tunnel 模式 YAML 用 headers.Authorization: Bearer，而 CONNECT 数据面只接受 Proxy-Authorization: Basic / X-Pony-Token，鉴权语义错配。",
+    "secondary_3": "rules 尾部 MATCH,DIRECT，仅硬编码域名走 PROXY，其余全直连，放大「代理没生效」体感。",
+    "secondary_4": "订阅端点不校验 token（?token=probe 亦 200），使「扫码添加成功」成为与可用性无关的假信号。"
+  },
+  "evidence_receipts": [
+    "printf 'CONNECT www.google.com:443 ...' | openssl s_client -quiet -connect rn.ponygo.fun:443 → HTTP/1.1 400 Bad Request / Server: nginx",
+    "curl 'https://rn.ponygo.fun/api/clash?token=probe' → 200, size=2059",
+    "ssh racknerd ss -tlnp → 443 nginx, 127.0.0.1:3101 pproxy-gate-server；无 8443/3102",
+    "ssh racknerd nginx -T → rn.ponygo.fun:443 default_server; location (ws|api/ws)/(clash|api/clash|..) → http://127.0.0.1:3101",
+    "grep -rc CONNECT crates/gate-server/src/*.rs → 0/0/0 (exit 1)",
+    "desktop/src-tauri/src/proxy/engine.rs:64 listen_addr '127.0.0.1:18900'；lib.rs:2354 port 默认 8899"
+  ],
   "waves": [
     {
       "wave": 1,
-      "task": "vercel 死上游清理 + CLI 管理面寻址对齐",
-      "grade": "B",
-      "baseline_commit": "f4f7da9",
-      "members": {"admin-addr-fixer": "executor A", "route-migrator": "executor B"},
-      "tasks": {
-        "A": {"status": "completed", "green": "pproxy status exit=0"},
-        "B": {"status": "completed", "green": "routes eff=vps, curl 401"},
-        "C": {"status": "completed", "green": "verify-note.sh exit=0"}
-      },
-      "acceptance_cmd": "bash scripts/pproxy-accept.sh（4 host 401 + status exit 0 + 无 vercel 残留；实测 PASS exit=0）"
+      "name": "公网 CONNECT 数据面 + nginx stream 入口 + 生产部署",
+      "members": [
+        "gate-connect"
+      ],
+      "write_scopes": [
+        "crates/gate-server/src/main.rs",
+        "crates/gate-server/src/connect_proxy.rs",
+        "deploy/nginx/",
+        "systemd/"
+      ],
+      "status": "completed"
     },
     {
       "wave": 2,
-      "task": "遗留修复：doctor 探针假阴性 / status 单位名漂移 / VERCEL_HOSTS 死回退 / worker 标记头",
-      "grade": "B",
-      "baseline_commit": "601a7ff",
-      "members": {"legacy-qa": "test agent", "cli-fixer": "executor A", "core-fixer": "executor B", "worker-fixer": "executor C"},
-      "tasks": {
-        "T1": {"status": "completed", "red": "A=400 / B=inactive（旧二进制实测，red-phase-legacy.md）"},
-        "A": {"status": "completed", "green": "doctor CONNECT [pass] → 200；status systemd (pproxy [system]): active；cargo test -p pproxy-cli 119 passed"},
-        "B": {"status": "completed", "green": "cargo test -p pproxy-core 106 passed；gateway.rs 衍生夹具 8 passed"},
-        "C": {"status": "completed", "green": "node --check exit 0；[RED DEGRADED: DEPLOY-DEFERRED]（无 CF 凭据，未重部署）"},
-        "T2": {"status": "completed", "green": "accept-legacy-items.sh A/B PASS、route_default_upstream 2 passed、cargo build --release exit 0"}
-      },
-      "acceptance_cmd": "PPROXY_BIN=./target/release/pproxy bash scripts/accept-legacy-items.sh（A doctor→200、B status active；C 部署后 --with-deploy）；实测 ACCEPT_EXIT=0",
-      "residual_risks": [
-        "CF worker 线上效果 deploy-deferred：标记头 + PROXY_SECRET 对齐需持凭据重部署（wrangler versions），部署后跑 scripts/accept-legacy-items.sh --with-deploy 验证",
-        "PATH 上 ~/.local/bin/pproxy 旧二进制需 Lead 收口安装新构建后，accept 脚本默认 pproxy 才指向新版本"
-      ]
+      "name": "Clash 配置三处生成器同口径 + 订阅鉴权 + 分流默认",
+      "members": [
+        "clash-config"
+      ],
+      "write_scopes": [
+        "crates/gate-server/src/lib.rs",
+        "crates/cli/src/cmd/clash.rs"
+      ],
+      "status": "completed"
+    },
+    {
+      "wave": 3,
+      "name": "桌面端 LAN 监听与鉴权 + 配置生成对齐 + UI 诚实化",
+      "members": [
+        "desktop-lan"
+      ],
+      "write_scopes": [
+        "desktop/src-tauri/src/proxy/",
+        "desktop/src-tauri/src/lib.rs",
+        "desktop/src/views/SettingsView.vue"
+      ],
+      "status": "completed"
+    },
+    {
+      "wave": 4,
+      "name": "独立验收（L2-T 功能 + L2-AT 对抗）",
+      "members": [
+        "qa"
+      ],
+      "write_scopes": [
+        "tests/acceptance/"
+      ],
+      "status": "completed"
+    },
+    {
+      "wave": 5,
+      "name": "生产部署与真机端到端",
+      "members": [
+        "lead"
+      ],
+      "status": "completed",
+      "write_scopes": [
+        "deploy/nginx/",
+        "systemd/"
+      ],
+      "note": "见 deploy 段；回滚路径已登记"
     }
   ],
-  "l3_reviews": [
-    {"perspective": "B 安全/协议", "verdict": "PASS", "findings": 0},
-    {"perspective": "A 状态/逻辑", "verdict": "FAIL→已修", "finding": "upgrade.rs 补查漏 pproxy.service 单位名（已对齐双名双作用域）"}
-  ]
+  "roster": [
+    "lead",
+    "gate-connect",
+    "clash-config",
+    "desktop-lan",
+    "qa"
+  ],
+  "roster_count": 5,
+  "l3_reviews": [],
+  "nfr": ".dev-team/nfr-baseline.json",
+  "deploy": {
+    "target": "rn.ponygo.fun (RackNerd VPS, 192.210.231.8)",
+    "gate_binary": "/opt/pproxy/bin/pproxy-gate-server (release, backup: .bak-20261030-013333)",
+    "systemd_dropin": "/etc/systemd/system/pony-gate-rust.service.d/connect.conf (Environment=GATE_CONNECT_LISTEN=127.0.0.1:3102)",
+    "nginx": "apt install libnginx-mod-stream; /etc/nginx/stream-connect/stream-connect.conf + nginx.conf 顶层 include; nginx -t exit 0; reload",
+    "ufw": "ufw allow 8443/tcp (默认 policy DROP 只放行 22/80/443，漏配则外部静默超时)",
+    "rollback": "restore .bak binary + rm drop-in + rm /etc/nginx/stream-connect + 回退 nginx.conf include 行 + ufw delete allow 8443/tcp"
+  },
+  "green_receipts": {
+    "cargo_check_workspace": "exit 0 (基线 d0a661b 与提交态各一次)",
+    "cargo_test_workspace": "exit 0（提交态隔离 worktree: 119+106+2+16+3+7+46+3+1+1+17 passed）",
+    "cargo_test_desktop": "exit 0, 80 passed",
+    "acceptance_suite": "bash tests/acceptance/run.sh -> PASS=27 FAIL=0 SKIP=1 ACCEPT_EXIT=0；设 PPROXY_E2E_TOKEN 后 PASS=28 FAIL=0 SKIP=0 ACCEPT_EXIT=0",
+    "prod_e2e_curl": "curl -x https://rn.ponygo.fun:8443 -U <token>:<token> -> google 204 / youtube 200 / ipinfo.io/ip=192.210.231.8",
+    "real_client": "Mihomo Meta v1.19.2 加载生产下发 YAML：listening 127.0.0.1:7890，经其访问 google 204 / youtube 200 / ipinfo 出口 192.210.231.8，日志 match Match using PROXY[Pony-Tunnel]",
+    "staged_isolation": "git apply 暂存 diff 到 /tmp/verify-head(HEAD) 后 cargo check --workspace --all-targets exit 0 且 cargo test --workspace exit 0"
+  }
 }

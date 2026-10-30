@@ -272,20 +272,81 @@ async fn handle_root() -> impl IntoResponse {
     )
 }
 
+/// C5：订阅令牌校验——直接复用 `ServerConfig` 既有能力，不另立令牌体系。
+///
+/// 1. 单口令兼容：`sha256(token) == tunnel_token_hash`（同 `/ws` 回退模式口径）；
+/// 2. 多租户令牌：`usr_live_` 前缀经 `verifier` 验签，并通过撤销表（jti / sub）。
+///
+/// 返回 `Err("missing token")` / `Err("invalid token")`，由调用方映射为 401。
+fn validate_subscription_token(cfg: &ServerConfig, presented: &str) -> Result<(), &'static str> {
+    let presented = presented.trim();
+    if presented.is_empty() {
+        return Err("missing token");
+    }
+
+    // 1. 单口令兼容模式（sha256 比对，与 /ws 一致）
+    let expected = cfg.tunnel_token_hash.trim().to_ascii_lowercase();
+    if !expected.is_empty() && sha256_hex(presented) == expected {
+        return Ok(());
+    }
+
+    // 2. 多租户用户令牌：验签 + 撤销表
+    if presented.starts_with("usr_live_") {
+        let Some(ref verifier) = cfg.verifier else {
+            tracing::warn!("subscription: user token presented but verifier is not configured");
+            return Err("invalid token");
+        };
+        return match verifier.verify_token(presented) {
+            Ok(claims) => {
+                if cfg.revoked_tokens.contains(&claims.jti)
+                    || cfg.revoked_tokens.contains(&claims.sub)
+                {
+                    tracing::warn!(uid = %claims.sub, jti = %claims.jti, "subscription: token revoked");
+                    Err("invalid token")
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) => {
+                tracing::warn!("subscription: user token verification failed: {e}");
+                Err("invalid token")
+            }
+        };
+    }
+
+    Err("invalid token")
+}
+
 /// 供移动端（Clash Meta / Mihomo / 小火箭）订阅的公网端点
-/// 支持通过 GET /clash?token=... 或 GET /api/clash?token=... 直接拉取对齐公网隧道的 YAML 配置
+/// 支持通过 GET /clash?token=... 或 GET /api/clash?token=... 直接拉取对齐公网隧道的 YAML 配置。
+/// C5：`/clash` 与 `/api/clash` 共用本 handler，令牌校验对两者同时生效——
+/// 拉取成功不再是无鉴权的假信号（缺失 → 401 `missing token`，无效 → 401 `invalid token`）。
 async fn handle_clash_subscription(
-    State(_cfg): State<Arc<ServerConfig>>,
+    State(cfg): State<Arc<ServerConfig>>,
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let token = params.get("token").cloned().or_else(|| {
-        headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|s| s.to_string())
-    });
+    let token = params
+        .get("token")
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(|s| s.trim().to_string())
+        });
+
+    let presented = token.as_deref().unwrap_or("");
+    if let Err(reason) = validate_subscription_token(&cfg, presented) {
+        tracing::warn!(reason, "subscription request rejected");
+        return (
+            StatusCode::UNAUTHORIZED,
+            [("content-type", "text/plain; charset=utf-8")],
+            format!("Unauthorized: {reason}"),
+        )
+            .into_response();
+    }
 
     let host = headers
         .get(header::HOST)
@@ -295,7 +356,19 @@ async fn handle_clash_subscription(
         .next()
         .unwrap_or("rn.ponygo.fun");
 
-    let yaml = generate_clash_meta_yaml(host, token.as_deref());
+    let yaml = match generate_clash_meta_yaml(host, Some(presented)) {
+        Ok(y) => y,
+        Err(e) => {
+            // 校验已通过却仍无法合成凭据，只可能是配置自相矛盾：按鉴权失败处理（fail-closed）
+            tracing::error!("subscription: yaml generation failed after auth: {e}");
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("content-type", "text/plain; charset=utf-8")],
+                format!("Unauthorized: invalid token ({e})"),
+            )
+                .into_response();
+        }
+    };
 
     // 补充标准 Clash 订阅响应头，杜绝移动端/Mihomo 在拉取订阅时 EOF
     (
@@ -308,12 +381,25 @@ async fn handle_clash_subscription(
         ],
         yaml,
     )
+        .into_response()
 }
 
 /// 动态合成标准 Clash Meta / Mihomo 配置文件 YAML（对准公网 Gate 隧道）
-fn generate_clash_meta_yaml(gate_host: &str, token: Option<&str>) -> String {
-    let token_val = token.unwrap_or("");
-    format!(
+///
+/// C3：隧道出站节点走公网 8443 标准 CONNECT 数据面，凭据为 HTTP Basic
+/// （`username`/`password` 同为该令牌）——CONNECT 数据面不接受 `Authorization: Bearer`，
+/// 因此严禁再输出 `headers.Authorization`。token 缺失/空白 → `Err`（fail-fast，
+/// 绝不产出空凭据的死配置）。
+///
+/// C6：规则尾部 `GEOIP,CN,DIRECT` 紧接 `MATCH,PROXY`（默认走代理）；
+/// 探活域与内网 CIDR 全部排在第一条 PROXY 规则之前，保持 DIRECT。
+fn generate_clash_meta_yaml(gate_host: &str, token: Option<&str>) -> Result<String, String> {
+    let token_val = token
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "隧道模式缺少访问令牌：拒绝生成空凭据配置".to_string())?;
+
+    Ok(format!(
         r#"# ================================================================
 #  Pony Proxy — Clash Meta / Mihomo 全网漫游出海配置
 # ================================================================
@@ -327,12 +413,12 @@ proxies:
   - name: "Pony-Tunnel"
     type: http
     server: {gate_host}
-    port: 443
+    port: 8443
     tls: true
     sni: {gate_host}
     skip-cert-verify: false
-    headers:
-      Authorization: "Bearer {token_val}"
+    username: "{token_val}"
+    password: "{token_val}"
 
 proxy-groups:
   - name: "PROXY"
@@ -385,9 +471,10 @@ rules:
   # 国内直连
   - DOMAIN-SUFFIX,cn,DIRECT
   - GEOIP,CN,DIRECT
-  - MATCH,DIRECT
+  # 兜底规则：默认走代理，避免「代理没启动」的体感
+  - MATCH,PROXY
 "#
-    )
+    ))
 }
 
 async fn handle_debug(State(cfg): State<Arc<ServerConfig>>) -> impl IntoResponse {

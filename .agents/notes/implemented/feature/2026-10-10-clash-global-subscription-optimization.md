@@ -17,7 +17,12 @@ Status: implemented
 1. **服务端（Gate-Server）提供公网订阅端点**：
    - 在 `crates/gate-server/src/lib.rs` 中开放 `GET /clash` 与 `GET /api/clash`；
    - 支持通过 Query 参数 `?token=<token>` 获取针对该用户的完整 Clash YAML 配置；
-   - 导出的配置中，代理节点自动对齐公网 Gate 隧道（`type: ws`, `server: <gate_host>`, `port: 443`, `Authorization: Bearer <token>`），不再回指局域网内网 IP。
+     令牌缺失/无效返回 `401`（口径见 `bug-fix/2026-10-30-fix-clash-meta-scan-no-proxy.md`）；
+   - 导出的配置中，代理节点自动对齐公网 Gate 隧道（`type: http`, `server: <gate_host>`,
+     `port: 8443`, `tls: true`, `username`/`password: <token>`），不再回指局域网内网 IP；
+   - 该端口背后必须是**真实的 HTTP CONNECT 数据面**（`crates/gate-server/src/connect_proxy.rs`
+     + nginx `stream` 8443），决策与证伪过程见
+     `bug-fix/2026-10-30-fix-clash-meta-scan-no-proxy.md`。
 2. **桌面端配置生成与端点自对齐**：
    - 桌面端检测当前是否配置了公网端点（默认 `wss://rn.ponygo.fun/ws`，或用户自定义的 gate_url）；
    - 若存在公网端点且存在有效 token，二维码优先生成公网订阅地址：`https://<gate_host>/api/clash?token=<token>`；

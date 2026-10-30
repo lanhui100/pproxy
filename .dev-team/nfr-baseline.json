@@ -1,0 +1,23 @@
+{
+  "external_call_timeout_ms": 3000,
+  "retry": {
+    "max_attempts": 3,
+    "backoff_ms": [200, 800, 2000]
+  },
+  "concurrency_lock": "CONNECT 监听每连接一任务 + tokio 信号量上限；per-user 并发由既有 max_conns 熔断兜住；LAN 监听开关幂等",
+  "logging": {
+    "format": "json",
+    "trace_id": "tracing span/字段 trace_id（CONNECT 会话以 peer+target 关联）",
+    "trace_id_required": true
+  },
+  "resource_release": [
+    "CONNECT 中继结束即 drop 双向 socket 与任务",
+    "每连接绝对生命周期上限 86400s 防任务泄漏",
+    "nginx stream proxy_timeout 86400s 对齐",
+    "桌面 LAN 监听 stop/abort 随引擎退出"
+  ],
+  "config": {
+    "env_template": ".pproxy.env",
+    "self_check": "tests/acceptance/run.sh（G1..G8 + L2-AT，ACCEPT_EXIT=0）"
+  }
+}

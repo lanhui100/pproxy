@@ -229,12 +229,9 @@ fn split_host_port(authority: &str, default_port: u16) -> Option<(String, u16)> 
 
 const CLIENT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-async fn handle_conn(
-    mut stream: TcpStream,
-    cfg: &EngineConfig,
-    stats: &EngineStats,
-) -> std::io::Result<()> {
-    // 读取请求头（至 \r\n\r\n，上限 16KB，含 15 秒超时防 Slowloris 悬挂）
+/// 读取请求头（至 `\r\n\r\n`，上限 16 KiB，含 15 秒超时防 Slowloris 悬挂）。
+/// 对端在头完成前关闭 → `Ok(None)`（无数据可处理）。
+async fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<String>> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 2048];
     let deadline = tokio::time::Instant::now() + CLIENT_READ_TIMEOUT;
@@ -243,27 +240,38 @@ async fn handle_conn(
             .await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client head read timed out"))??;
         if n == 0 {
-            return Ok(()); // 对端关闭
+            return Ok(None); // 对端关闭
         }
         buf.extend_from_slice(&tmp[..n]);
         if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 16 * 1024 {
             break;
         }
     }
-    let head = String::from_utf8_lossy(&buf);
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+}
 
-    // 引擎自身的控制面：PAC 脚本（放行 /pac 或 /pac?t=...）
-    let is_pac_req = if let Some(first) = head.lines().next() {
-        let path = first.strip_prefix("GET ").and_then(|r| r.split_whitespace().next()).unwrap_or("");
-        path == "/pac"
-            || path.starts_with("/pac?")
-            || path.starts_with("http://127.0.0.1:18900/pac")
-            || path.starts_with("http://localhost:18900/pac")
-    } else {
-        false
+/// 引擎自身的控制面：PAC 脚本（放行 /pac 或 /pac?t=...）。
+fn is_pac_request(head: &str) -> bool {
+    let Some(first) = head.lines().next() else {
+        return false;
+    };
+    let path = first.strip_prefix("GET ").and_then(|r| r.split_whitespace().next()).unwrap_or("");
+    path == "/pac"
+        || path.starts_with("/pac?")
+        || path.starts_with("http://127.0.0.1:18900/pac")
+        || path.starts_with("http://localhost:18900/pac")
+}
+
+async fn handle_conn(
+    mut stream: TcpStream,
+    cfg: &EngineConfig,
+    stats: &EngineStats,
+) -> std::io::Result<()> {
+    let Some(head) = read_head(&mut stream).await? else {
+        return Ok(());
     };
 
-    if is_pac_req {
+    if is_pac_request(&head) {
         let wl_snapshot = {
             let guard = cfg.whitelist.borrow();
             guard.clone()
@@ -278,6 +286,16 @@ async fn handle_conn(
         return stream.write_all(resp.as_bytes()).await;
     }
 
+    dispatch(stream, cfg, stats, head).await
+}
+
+/// 解析已完成读头的请求并分派（回环引擎与 LAN 监听共用同一套 decide/建连逻辑）。
+async fn dispatch(
+    mut stream: TcpStream,
+    cfg: &EngineConfig,
+    stats: &EngineStats,
+    head: String,
+) -> std::io::Result<()> {
     let Some(parsed) = parse_head(&head) else {
         return stream
             .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
@@ -436,6 +454,275 @@ pub(crate) async fn relay_bidir_with_stats(
     Ok(())
 }
 
+// ============================================================================
+// LAN CONNECT 监听（C4）
+//
+// 契约边界（勿混同）：
+// - 回环 127.0.0.1:18900 的行为**完全不变**（免鉴权，系统代理/PAC 依赖它）；
+// - 本模块只负责新增的 `0.0.0.0:<port>` 监听：非回环来源强制 Basic 鉴权，
+//   失败 407；回环来源免鉴权。建连后出海复用 [`dispatch`]（decide + tunnel/upstream），
+//   不另写第二套隧道客户端。
+// - LAN 模式扫码订阅 URL 指向本监听 `/clash.yaml`，因此这里同时提供该订阅端点
+//   （否则手机扫码导入必然 404，局域网模式仍然死的）。
+// ============================================================================
+
+/// LAN CONNECT 监听缺省端口；可用 env `PPROXY_LAN_PORT` 覆盖（C4）。
+pub const LAN_DEFAULT_PORT: u16 = 8899;
+
+/// LAN 监听端口：env `PPROXY_LAN_PORT` 优先，缺省 [`LAN_DEFAULT_PORT`]；非法/0 回落缺省。
+pub fn lan_port_from_env() -> u16 {
+    std::env::var("PPROXY_LAN_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .filter(|p| *p != 0)
+        .unwrap_or(LAN_DEFAULT_PORT)
+}
+
+/// 优雅停止的等待上限；超时兜底 abort，保证不泄漏监听任务。
+const LAN_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+type TokenProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+type YamlProvider = Arc<dyn Fn() -> String + Send + Sync>;
+
+/// LAN 监听运行配置（由 lib.rs 注入；令牌/YAML 每次请求实时读取，跟手热更新）。
+pub struct LanConfig {
+    /// 监听地址，如 `0.0.0.0:8899`
+    pub listen_addr: String,
+    /// 当前隧道令牌（缺失 → 非回环一律 407，fail-closed）
+    pub token_provider: TokenProvider,
+    /// 当前 LAN 模式 Clash YAML（订阅端点响应体）
+    pub subscription_yaml: YamlProvider,
+    /// 复用回环引擎的分派依赖（watch 通道 / 待命池 / 统计）
+    pub engine: EngineConfig,
+    pub stats: SharedStats,
+}
+
+/// LAN 监听句柄：生命周期由持有方（lib.rs 开关命令 / 退出钩子）控制。
+pub struct LanListener {
+    pub port: u16,
+    stop: watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl LanListener {
+    /// 绑定端口并启动 accept 循环；**绑定失败立即返回错误**（端口占用可回显给 UI）。
+    pub async fn start(cfg: LanConfig) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(&cfg.listen_addr).await?;
+        let port = listener.local_addr()?.port();
+        let (stop, stop_rx) = watch::channel(false);
+        let handle = tokio::spawn(lan_accept_loop(listener, Arc::new(cfg), stop_rx));
+        Ok(Self { port, stop, handle })
+    }
+
+    /// 优雅停止：通知 accept 循环退出并等待任务结束；超时兜底 abort。
+    pub async fn stop(self) {
+        let _ = self.stop.send(true);
+        let mut handle = self.handle;
+        if tokio::time::timeout(LAN_STOP_GRACE, &mut handle).await.is_err() {
+            handle.abort();
+        }
+    }
+
+    /// 同步兜底（进程退出路径，不可 await）：直接 abort。
+    pub fn abort(self) {
+        self.handle.abort();
+    }
+}
+
+async fn lan_accept_loop(listener: TcpListener, cfg: Arc<LanConfig>, mut stop: watch::Receiver<bool>) {
+    loop {
+        tokio::select! {
+            changed = stop.changed() => {
+                // 发送端丢弃（Err）或置 true 都退出
+                if changed.is_err() || *stop.borrow() {
+                    break;
+                }
+            }
+            accepted = listener.accept() => match accepted {
+                Ok((stream, peer)) => {
+                    let cfg = Arc::clone(&cfg);
+                    let peer_is_loopback = peer.ip().is_loopback();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_lan_conn(stream, peer_is_loopback, &cfg).await {
+                            log::warn!("lan proxy conn failed from {peer}: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    log::warn!("lan accept failed: {e}");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// LAN 连接处理：订阅端点 → 非回环鉴权 → 剥掉代理凭据后走既有分派。
+async fn handle_lan_conn(
+    mut stream: TcpStream,
+    peer_is_loopback: bool,
+    cfg: &LanConfig,
+) -> std::io::Result<()> {
+    let Some(head) = read_head(&mut stream).await? else {
+        return Ok(());
+    };
+
+    // 1) 订阅端点：LAN 模式的 clash://install-config URL 指向本监听，扫码后 Clash 在此拉 YAML。
+    if let Some(query_token) = subscription_request(&head) {
+        let expected = (cfg.token_provider)().filter(|t| !t.trim().is_empty());
+        if let Some(tok) = expected {
+            match query_token {
+                Some(q) if q == tok => {}
+                Some(_) => return write_plain(&mut stream, "401 Unauthorized", "invalid token").await,
+                None => return write_plain(&mut stream, "401 Unauthorized", "missing token").await,
+            }
+        }
+        let yaml = (cfg.subscription_yaml)();
+        return write_yaml(&mut stream, &yaml).await;
+    }
+
+    // 2) 鉴权：非回环来源强制 Basic（username 或 password 任一等于隧道令牌）；回环免鉴权。
+    if !peer_is_loopback {
+        let token = (cfg.token_provider)().filter(|t| !t.trim().is_empty());
+        let authorized = token
+            .as_deref()
+            .map(|t| lan_auth_ok(&head, t))
+            .unwrap_or(false);
+        if !authorized {
+            return write_407(&mut stream).await;
+        }
+    }
+
+    // 3) 客户端给本监听的 Proxy-Authorization 不外泄给上游/目标。
+    let cleaned = strip_proxy_authorization(&head);
+    dispatch(stream, &cfg.engine, &cfg.stats, cleaned).await
+}
+
+/// 解析 `Proxy-Authorization: Basic base64(user:pass)`（头名大小写不敏感）。
+fn basic_proxy_auth(head: &str) -> Option<(String, String)> {
+    use base64::Engine as _;
+    for line in head.lines() {
+        let (name, value) = match line.split_once(':') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        if !name.trim().eq_ignore_ascii_case("proxy-authorization") {
+            continue;
+        }
+        let raw = value.trim();
+        let b64 = raw
+            .get(..6)
+            .filter(|p| p.eq_ignore_ascii_case("basic "))
+            .and_then(|_| raw.get(6..))
+            .map(str::trim)?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64))
+            .ok()?;
+        let text = String::from_utf8(decoded).ok()?;
+        let (user, pass) = match text.split_once(':') {
+            Some((u, p)) => (u.to_string(), p.to_string()),
+            None => (text, String::new()),
+        };
+        return Some((user, pass));
+    }
+    None
+}
+
+/// C4 鉴权判定：`username` 或 `password` 任一等于隧道令牌即通过；空令牌一律拒绝。
+fn lan_auth_ok(head: &str, token: &str) -> bool {
+    let token = token.trim();
+    if token.is_empty() {
+        return false;
+    }
+    match basic_proxy_auth(head) {
+        Some((user, pass)) => user == token || pass == token,
+        None => false,
+    }
+}
+
+/// 去掉请求头里的 `Proxy-Authorization`（保留首行、其余头原样与结尾空行/body）。
+fn strip_proxy_authorization(head: &str) -> String {
+    let (header_part, body) = match head.split_once("\r\n\r\n") {
+        Some((h, b)) => (h, Some(b)),
+        None => (head, None),
+    };
+    let mut lines = header_part.split("\r\n");
+    let mut out = String::with_capacity(head.len());
+    if let Some(first) = lines.next() {
+        out.push_str(first);
+    }
+    for line in lines {
+        let is_proxy_auth = line
+            .split_once(':')
+            .map(|(name, _)| name.trim().eq_ignore_ascii_case("proxy-authorization"))
+            .unwrap_or(false);
+        if is_proxy_auth {
+            continue;
+        }
+        out.push_str("\r\n");
+        out.push_str(line);
+    }
+    out.push_str("\r\n\r\n");
+    if let Some(b) = body {
+        out.push_str(b);
+    }
+    out
+}
+
+/// 识别订阅请求 `GET /clash.yaml[?token=...]`（兼容 absolute-form）。
+/// 返回值：`None` = 不是订阅请求；`Some(None)` = 订阅请求但未带 token。
+fn subscription_request(head: &str) -> Option<Option<String>> {
+    let first = head.lines().next()?;
+    let mut parts = first.split_whitespace();
+    let method = parts.next()?;
+    let target = parts.next()?;
+    if !method.eq_ignore_ascii_case("GET") {
+        return None;
+    }
+    let path = match target.strip_prefix("http://") {
+        Some(rest) => format!("/{}", rest.split_once('/').map(|(_, p)| p).unwrap_or("")),
+        None => target.to_string(),
+    };
+    let (path, query) = path.split_once('?').unwrap_or((path.as_str(), ""));
+    if path != "/clash.yaml" {
+        return None;
+    }
+    let token = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("token="))
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    Some(token)
+}
+
+async fn write_plain(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
+    let resp = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(resp.as_bytes()).await
+}
+
+/// 407：带标准 `Proxy-Authenticate` 质询，客户端可据此重试带凭据。
+async fn write_407(stream: &mut TcpStream) -> std::io::Result<()> {
+    stream
+        .write_all(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"pproxy\"\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .await
+}
+
+async fn write_yaml(stream: &mut TcpStream, yaml: &str) -> std::io::Result<()> {
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/yaml; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        yaml.len(),
+        yaml
+    );
+    stream.write_all(resp.as_bytes()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +835,65 @@ mod tests {
             "GET /?a=1 HTTP/1.1"
         );
     }
+
+    // ---- LAN CONNECT 鉴权（C4） ----
+
+    fn basic_header(user: &str, pass: &str) -> String {
+        use base64::Engine as _;
+        let cred = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+        format!("Proxy-Authorization: Basic {cred}")
+    }
+
+    #[test]
+    fn lan_auth_accepts_either_username_or_password() {
+        let tok = "tunnel-secret";
+        let head = format!("CONNECT x:443 HTTP/1.1\r\n{}\r\n\r\n", basic_header(tok, "ignored"));
+        assert!(lan_auth_ok(&head, tok), "username 等于令牌应通过");
+        let head = format!("CONNECT x:443 HTTP/1.1\r\n{}\r\n\r\n", basic_header("ignored", tok));
+        assert!(lan_auth_ok(&head, tok), "password 等于令牌应通过");
+    }
+
+    #[test]
+    fn lan_auth_rejects_missing_wrong_and_empty_token() {
+        let tok = "tunnel-secret";
+        let bare = "CONNECT x:443 HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert!(!lan_auth_ok(bare, tok), "无凭据必须拒绝");
+        let wrong = format!("CONNECT x:443 HTTP/1.1\r\n{}\r\n\r\n", basic_header("a", "b"));
+        assert!(!lan_auth_ok(&wrong, tok), "错误凭据必须拒绝");
+        let good = format!("CONNECT x:443 HTTP/1.1\r\n{}\r\n\r\n", basic_header(tok, tok));
+        assert!(!lan_auth_ok(&good, "  "), "空令牌必须 fail-closed");
+    }
+
+    #[test]
+    fn lan_auth_header_name_is_case_insensitive() {
+        use base64::Engine as _;
+        let cred = base64::engine::general_purpose::STANDARD.encode("tok:tok");
+        let head = format!("CONNECT x:443 HTTP/1.1\r\nproxy-authorization: Basic {cred}\r\n\r\n");
+        assert!(lan_auth_ok(&head, "tok"));
+    }
+
+    #[test]
+    fn strip_proxy_authorization_keeps_first_line_body_and_blank_line() {
+        let head = format!(
+            "CONNECT x:443 HTTP/1.1\r\nHost: x\r\n{}\r\n\r\nBODY",
+            basic_header("tok", "tok")
+        );
+        let cleaned = strip_proxy_authorization(&head);
+        assert_eq!(cleaned, "CONNECT x:443 HTTP/1.1\r\nHost: x\r\n\r\nBODY");
+        assert!(!cleaned.to_lowercase().contains("proxy-authorization"));
+    }
+
+    #[test]
+    fn subscription_request_parses_path_and_token() {
+        assert_eq!(subscription_request("GET /clash.yaml?token=abc HTTP/1.1\r\n\r\n"), Some(Some("abc".into())));
+        assert_eq!(subscription_request("GET /clash.yaml HTTP/1.1\r\n\r\n"), Some(None));
+        assert_eq!(
+            subscription_request("GET http://192.168.1.5:8899/clash.yaml?token=t HTTP/1.1\r\n\r\n"),
+            Some(Some("t".into()))
+        );
+        assert_eq!(subscription_request("CONNECT x:443 HTTP/1.1\r\n\r\n"), None);
+        assert_eq!(subscription_request("GET /pac HTTP/1.1\r\n\r\n"), None);
+    }
 }
 
 #[cfg(test)]
@@ -647,4 +993,158 @@ mod integration {
             "错误计数应+1"
         );
     }
+
+    // ---- LAN CONNECT 监听（C4） ----
+
+    fn basic_auth_header(user: &str, pass: &str) -> String {
+        use base64::Engine as _;
+        let cred = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+        format!("Proxy-Authorization: Basic {cred}")
+    }
+
+    fn lan_cfg(token: Option<&str>, yaml: &'static str) -> LanConfig {
+        let tok = token.map(str::to_string);
+        LanConfig {
+            listen_addr: "127.0.0.1:0".into(),
+            token_provider: Arc::new(move || tok.clone()),
+            subscription_yaml: Arc::new(move || yaml.to_string()),
+            engine: EngineConfig::default(),
+            stats: Arc::new(EngineStats::default()),
+        }
+    }
+
+    async fn echo_listener() -> std::net::SocketAddr {
+        let echo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((s, _)) = echo.accept().await {
+                    tokio::spawn(async move {
+                        let (mut r, mut w) = s.into_split();
+                        tokio::io::copy(&mut r, &mut w).await.ok();
+                    });
+                }
+            }
+        });
+        addr
+    }
+
+    async fn read_response(c: &mut TcpStream) -> String {
+        let mut buf = [0u8; 1024];
+        let n = c.read(&mut buf).await.unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+
+    #[tokio::test]
+    async fn lan_non_loopback_without_auth_gets_407() {
+        let cfg = lan_cfg(Some("tok"), "mixed-port: 7890\n");
+        let (mut client, srv) = socket_pair().await;
+        tokio::spawn(async move {
+            handle_lan_conn(srv, false, &cfg).await.ok();
+        });
+        client
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .await
+            .unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 407 Proxy Authentication Required"), "非回环无凭据必须 407，实际: {resp}");
+        assert!(resp.contains("Proxy-Authenticate: Basic realm=\"pproxy\""), "必须带 Basic 质询，实际: {resp}");
+    }
+
+    #[tokio::test]
+    async fn lan_non_loopback_wrong_token_gets_407() {
+        let cfg = lan_cfg(Some("tok"), "mixed-port: 7890\n");
+        let (mut client, srv) = socket_pair().await;
+        tokio::spawn(async move {
+            handle_lan_conn(srv, false, &cfg).await.ok();
+        });
+        let head = format!(
+            "CONNECT example.com:443 HTTP/1.1\r\n{}\r\n\r\n",
+            basic_auth_header("nope", "nope")
+        );
+        client.write_all(head.as_bytes()).await.unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 407"), "错误凭据必须 407，实际: {resp}");
+    }
+
+    #[tokio::test]
+    async fn lan_valid_token_relays_through_existing_dispatch() {
+        let echo_addr = echo_listener().await;
+        let cfg = lan_cfg(Some("tok"), "mixed-port: 7890\n");
+        let (mut client, srv) = socket_pair().await;
+        tokio::spawn(async move {
+            handle_lan_conn(srv, false, &cfg).await.ok();
+        });
+        let head = format!(
+            "CONNECT {echo_addr} HTTP/1.1\r\n{}\r\n\r\n",
+            basic_auth_header("tok", "tok")
+        );
+        client.write_all(head.as_bytes()).await.unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.contains("200 Connection Established"), "有效令牌应建连成功，实际: {resp}");
+        client.write_all(b"PING").await.unwrap();
+        let mut buf = [0u8; 64];
+        let n = client.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"PING", "双向中继应原样回显");
+    }
+
+    #[tokio::test]
+    async fn lan_loopback_peer_skips_auth() {
+        let echo_addr = echo_listener().await;
+        let cfg = lan_cfg(Some("tok"), "mixed-port: 7890\n");
+        let (mut client, srv) = socket_pair().await;
+        tokio::spawn(async move {
+            handle_lan_conn(srv, true, &cfg).await.ok();
+        });
+        client
+            .write_all(format!("CONNECT {echo_addr} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.contains("200 Connection Established"), "回环来源免鉴权，实际: {resp}");
+    }
+
+    #[tokio::test]
+    async fn lan_subscription_requires_matching_token() {
+        let cfg = lan_cfg(Some("tok"), "mixed-port: 7890\n");
+        let (mut client, srv) = socket_pair().await;
+        tokio::spawn(async move {
+            handle_lan_conn(srv, false, &cfg).await.ok();
+        });
+        client
+            .write_all(b"GET /clash.yaml HTTP/1.1\r\nHost: lan\r\n\r\n")
+            .await
+            .unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 401"), "订阅缺 token 应 401，实际: {resp}");
+        assert!(resp.contains("missing token"), "401 应明示 missing token，实际: {resp}");
+    }
+
+    #[tokio::test]
+    async fn lan_subscription_with_token_serves_yaml() {
+        let cfg = lan_cfg(Some("tok"), "mixed-port: 7890\n");
+        let (mut client, srv) = socket_pair().await;
+        tokio::spawn(async move {
+            handle_lan_conn(srv, false, &cfg).await.ok();
+        });
+        client
+            .write_all(b"GET /clash.yaml?token=tok HTTP/1.1\r\nHost: lan\r\n\r\n")
+            .await
+            .unwrap();
+        let resp = read_response(&mut client).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "有效 token 应 200，实际: {resp}");
+        assert!(resp.contains("mixed-port: 7890"), "应返回 YAML 正文，实际: {resp}");
+    }
+
+    #[tokio::test]
+    async fn lan_listener_binds_and_stops_without_leak() {
+        let cfg = lan_cfg(Some("tok"), "mixed-port: 7890\n");
+        let listener = LanListener::start(LanConfig { listen_addr: "127.0.0.1:0".into(), ..cfg })
+            .await
+            .expect("LAN 监听应能绑定");
+        let addr = listener.port;
+        assert!(addr > 0);
+        listener.stop().await;
+    }
 }
+

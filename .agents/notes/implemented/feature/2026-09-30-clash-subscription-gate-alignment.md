@@ -18,9 +18,12 @@ Status: implemented
 1. **配置派生**：新增 `gate_host_from_config`——从 `PPROXY_TUNNEL_GATE_URL`（支持
    `wss://host[:port]/ws`、`wss://host[:port]`、`host:port`、多端点逗号分隔取第一个）
    提取纯 host；无配置返回 None，行为回落局域网 http 模式（现状不变）。
-2. **隧道 YAML**：`generate_clash_yaml_tunnel` 生成 ws+tls 代理——`server=<gate 域名>`
-   `sni=<同域名>`（HOST/SNI 自动对准）、`ws-opts.path=/ws`（对齐 gate worker 路径）、
-   鉴权经 `ws-opts.headers.Authorization: Bearer <token>`（对齐 gate /ws Bearer 协议）。
+2. **隧道 YAML**：`generate_clash_yaml_tunnel` 生成隧道直连代理——`server=<gate 域名>`
+   `sni=<同域名>`（HOST/SNI 自动对准）、`port=8443`、`type: http` + `tls: true`，
+   鉴权经 `username`/`password`（同令牌，落为 `Proxy-Authorization: Basic`，对齐 gate
+   CONNECT 数据面）。**早期版本曾声明 `type: ws` + `Bearer`，那是一个从未存在的端点
+   （公网 443 后无 CONNECT、且 CONNECT 面不接受 Bearer），证伪与修复见
+   `bug-fix/2026-10-30-fix-clash-meta-scan-no-proxy.md`。**
 3. **订阅 URL**：隧道模式输出 `wss://<gate域名>/ws`（二维码/URL 导入均可用）；
    使用提示按模式区分（隧道 vs 局域网）。
 4. **行为保持**：未配置 `tunnel_gate_url` 时 YAML/URL/提示与 B015 前完全一致；
