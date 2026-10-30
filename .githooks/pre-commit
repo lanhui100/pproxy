@@ -7,7 +7,7 @@ fi
 # .githooks/pre-commit - 本地秒级快速门禁
 set -euo pipefail
 
-# 0. 凭据扫描（秒级；扫描面 = 已跟踪文件，`git grep` 一次全树约 0.3s）
+# 0. 凭据扫描（秒级；扫描面 = 索引 ∪ HEAD 树，`git grep` 一次约 0.3s）
 # 位置：哨兵块（A1 ADR 门）之后、ADR 门之前——凭据泄漏比格式违例更贵，先拦。
 # 本仓自写的三段（ADR/ cargo check / doc-freshness）不得因 ponygo init 的哨兵块前置而丢失。
 if [ -f .meta/gates/secret-scan.sh ]; then
