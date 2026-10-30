@@ -6,7 +6,8 @@
 #   - 自包含：从自身路径解析被测脚本，不依赖调用者 cwd；
 #   - 只读仓库：样本一律建在 `mktemp -d` 临时目录，退出时清理；
 #   - 秒级：自包裹 `timeout 60`；
-#   - 防递归：`PONYGO_IN_SPEC=1` → SKIPPED 且 exit 0（不计入 PASS）；
+#   - 防重复执行：自包裹以 PONYGO_SPEC_SELFRUN=1 重入一次（幂等，无递归）；即使被
+#     `ponygo audit --run-specs`（会设 PONYGO_IN_SPEC=1）调用也照常执行，不 SKIPPED。
 #   - exit 0 = 自检通过（该拒的拒、该放的放）。
 #
 # 本 spec 证明封印门的**拒绝/放行语义**，不证明"封印时内容是对的"（那是 review 的时点判断）。
@@ -18,10 +19,6 @@ SPEC=archive-seal.spec
 ARCHIVED_REL='.agents/notes/archived'
 MANIFEST_NAME='SHA256SUMS'
 
-if [ "${PONYGO_IN_SPEC:-0}" = "1" ] && [ "${PONYGO_SPEC_SELFRUN:-0}" != "1" ]; then
-  printf '[%s] SKIPPED（PONYGO_IN_SPEC=1，不计入 PASS）\n' "$SPEC"
-  exit 0
-fi
 if [ "${PONYGO_SPEC_SELFRUN:-0}" != "1" ] && command -v timeout >/dev/null 2>&1; then
   export PONYGO_SPEC_SELFRUN=1
   exec timeout 60 bash "$0" "$@"

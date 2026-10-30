@@ -6,7 +6,9 @@
 #   - 自包含：从自身路径解析仓库根，不依赖调用者 cwd；
 #   - 只读仓库：样本一律建在 `mktemp -d` 临时目录（含临时 git 仓），退出时清理；
 #   - 秒级：自包裹 `timeout 60`（有 timeout 时）；
-#   - 防递归：环境里已有 `PONYGO_IN_SPEC=1` → 打印 SKIPPED 并 exit 0（不计入 PASS）；
+#   - 防重复执行：自包裹时以 PONYGO_SPEC_SELFRUN=1 重入一次（幂等，无递归）；
+#     即使被 `ponygo audit --run-specs`（会设 PONYGO_IN_SPEC=1）调用也照常执行，
+#     不做 SKIPPED——否则 2.3 的「执行判据」对本门退化为代理判据（2026-10-30 复审发现）。
 #   - exit 0 = 自检通过（"门确实会拒绝非法样本，且会放行合法样本"）。
 #
 # 本 spec 证明的是 secret-scan.sh 的**拒绝/放行语义**，不是"凭据不会漏"——
@@ -28,12 +30,6 @@
 set -u
 
 SPEC=secret-scan.spec
-
-# --- 防递归：被 audit --run-specs / CI 以 PONYGO_IN_SPEC=1 调用 → SKIPPED ---
-if [ "${PONYGO_IN_SPEC:-0}" = "1" ] && [ "${PONYGO_SPEC_SELFRUN:-0}" != "1" ]; then
-  printf '[%s] SKIPPED（PONYGO_IN_SPEC=1，不计入 PASS）\n' "$SPEC"
-  exit 0
-fi
 
 # --- 秒级上限：自包裹 timeout 60，避免挂死拖死体检 ---
 if [ "${PONYGO_SPEC_SELFRUN:-0}" != "1" ] && command -v timeout >/dev/null 2>&1; then

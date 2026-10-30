@@ -74,6 +74,20 @@
     " .meta/gates/",
     " .githooks/"
    ]
+  },
+  {
+   "wave": 3,
+   "name": "backlog-tier0",
+   "commits": [],
+   "members": [
+    "lead"
+   ],
+   "scope": [
+    "spec 去自跳过",
+    "oracle pin + CI 套件",
+    "dev-team 文档家",
+    "账本刷新"
+   ]
   }
  ],
  "gates": {
@@ -113,17 +127,22 @@
    "l3a": "FAIL→BLOCKING 已修（pre-push fail-open）",
    "l3b": "PASS",
    "rereview": "PASS"
+  },
+  "wave3_receipts": {
+   "audit_run_specs": "3 ok + 1 skipped(adr-verify 模板)",
+   "oracle_pin": "ponygo@7055ced"
   }
  },
  "known_gaps": [
-  "安装版 ponygo CLI 落后框架仓一版 → upgrade --check 报 6 drift（框架仓 CLI 跑为零漂移）；裁决：不动 host CLI，登记 known drift",
-  "CI 门禁为 A5 单步（ci-verify），--no-verify 仍可绕过本地层；已在 alt-governance note §二 显式声明",
-  ".meta/gates/README.md 未登记 secret-scan 的承诺→命令行（升模板消 drift 的取舍，登记为已知 drift）",
-  "未修（合法 backlog）：supersession/toast 链、rejected/ 目录、ROADMAP 过期、archived 哈希封印、crates README 空壳、release-gate 登记、pre-push 中继层、observe 声明",
   "公共历史（e0acfe3 之前）仍含 5 个已失效 token：需 filter-repo/BFG 专项清理（用户确认凭据已失效）",
-  "secret-scan 对象库损坏时 git grep rc=1 与无命中同码（已在脚本头部边界 4 声明，用 git fsck 专项）",
+  "GitHub 默认分支无保护、无 required status check：CI 红灯不阻断合并（需仓库管理员设置）",
+  "release-gate.sh --feed 分支未接任何 workflow（access 域手动 sync 有时序滞后），接线须先解决时序",
+  "observe 四维 ob0→ob1 显式 deferred（决策 note 2026-10-30-observe-dimension-deferred，含重估触发条件）",
+  "crates/{cli,core,engine,server,transport}/README.md 仍是 9–15 行空壳（四段扩容未做）",
+  "安装版 ponygo CLI 落后框架仓一版（内嵌 verify-note 1.1–1.9）；用框架仓 CLI 跑 upgrade --check 为零漂移",
+  "secret-scan 对象库损坏时 git grep rc=1 与无命中同码（边界 4 已声明；用 git fsck 专项）",
   "pre-commit 哨兵块先于 secret-scan（任一 FAIL 仍阻断提交，属顺序语义）",
-  "tests/governance 依赖 PATH 上的 ponygo 未 pin（单机可复现，CI 未接）"
+  "上游模板缺陷（不改本地以降 drift）：ci-verify 把 SKIPPED 记 PASS；adr-verify 对非 ASCII 暂存路径的 C-quote 转义漏判（全树 A4 仍覆盖）"
  ],
  "observability_gate": "not-applicable：本波仅治理/CI/文档资产，无对外接口、网络 IO、后台任务、LLM 调用、UI 交互变更",
  "reviews": {
@@ -134,7 +153,7 @@
   ],
   "l3p": ".dev-team/review-l3p.json"
  },
- "head_commit": "be14b98",
+ "head_commit": "pending",
  "closed_at": "2026-10-30",
  "review_verdicts": {
   "plan": "PASS",

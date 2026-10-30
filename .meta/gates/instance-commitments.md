@@ -16,6 +16,7 @@
 | 3 | 合规出口 host 清单在 Rust 数据面与 CF gate worker 两侧一致（ADR-008） | `bash scripts/check-egress-parity.sh` | `.github/workflows/ponygo-governance.yml` 一步（零网络依赖：纯文本比对两侧常量）；本地可随时手跑 |
 | 4 | 桌面更新 feed 通道可达且版本匹配（防 CLI 发布抢占 GitHub latest） | `bash scripts/check-update-feed.sh --github-only <version>` | `.github/workflows/desktop-release.yml`、`.github/workflows/cli-release.yml`；本地 `--github-only` 可复现 CI 结论 |
 | 5 | 归档决策一旦封印，内容不得静默改写 | `bash .meta/gates/archive-seal.sh --check` | ①`.github/workflows/ponygo-governance.yml` 一步（**直接**调用）；②`.githooks/pre-push` 经 `tests/governance/run.sh` 的 G14 用例**间接**调用——pre-push 本身不直调本脚本，且当套件缺失、pre-push 走降级路径（`secret-scan`+`verify-note`）时**不含**封印校验。写端：`bash .meta/gates/archive-seal.sh --write`（只在归档动作同一提交执行） |
+| 6 | 治理验收套件在**固定 oracle** 下全绿（G0–G17：ADR 1.10 / 凭据门 / 封印 / 取代链 / 文档家 / 承诺表） | `bash tests/governance/run.sh` | ①`.github/workflows/ponygo-governance.yml`：先按框架仓 commit `7055ced122bec5112bc7a9ac5879784e2eecf989` 安装 `ponygo`（**不跟 main**，防上游漂移），再跑套件；②`.githooks/pre-push` 主判据（约 4s）。AI/人工本机复跑同样有效 |
 
 **共同纪律**：这些命令都是「非零退出 = 拒绝」语义，且**判定本体只有一份**——pre-commit /
 pre-push / CI 都只**调**脚本，不复制判据（P9：同一判据两份实现必然漂移）。

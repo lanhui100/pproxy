@@ -12,6 +12,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # 治理套件的 G7 用 `git log -S` 对照 ADR 与代码现实，浅克隆会让它假红。
+          fetch-depth: 0
       # 实例追加步（A5 是实例可编辑文件，不进宇宙表，故不产生 drift）：
       # 「凭据不进版本库」需要远端兜底——本地 pre-commit 可被 `git commit --no-verify` 跳过。
       # 判定本体仍在 .meta/gates/secret-scan.sh，此处只调一行，不复制判据（P9）。
@@ -24,3 +27,13 @@ jobs:
       # 本地实跑：OK 3 项 / exit 0。
       - run: bash scripts/check-egress-parity.sh
       - run: bash .meta/gates/ci-verify.sh
+      # 实例追加步④：治理验收套件（G0–G17）。oracle 钉死：ponygo 从框架仓指定 commit
+      # 安装（不用 main，避免上游漂移让本仓门禁"昨天绿今天红"）。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: lanhui100/ponygo
+          ref: 7055ced122bec5112bc7a9ac5879784e2eecf989
+          path: .ponygo
+          fetch-depth: 1
+      - run: install -m 0755 .ponygo/ponygo /usr/local/bin/ponygo && ponygo --help >/dev/null
+      - run: bash tests/governance/run.sh
