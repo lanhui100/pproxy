@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# ============================================================
+# .githooks/pre-push —— 中继层（10 秒级）：push 之前的最后一道本地闸
+#
+# 为什么需要它（`.meta/gates/README.md` 的三层时间经济）：
+#   本地层 pre-commit 是**秒级窄门**，可被 `git commit --no-verify` 一次跳过；
+#   远端层 CI 是**分钟级全门**，但发现时内容已经共享出去了。
+#   push 是"内容离开本机"的那一刻——这是唯一还能便宜拦住坏内容的时点。
+#
+# 判据选择（P7：每层只抓该层性价比最高的缺陷）：
+#   主判据 = `tests/governance/run.sh`（治理黑盒验收，实测 3.5s，预算内）；
+#   它覆盖凭据、决策记录格式、门禁接线、文档落地、仓库卫生——比"再跑一遍 pre-commit"信息量高得多。
+#   预算内跑得动就上整套；超预算或套件缺失时降级为轻量组合
+#   （`secret-scan.sh` + `verify-note.sh`，实测 0.9s），保证"有闸"永远优先于"闸最全"。
+#
+# 绕过方式（诚实声明，不假装拦得住）：`git push --no-verify` 可跳过；远端 CI 仍是最终兜底。
+#   本钩子的目标是让"忘跑/懒得跑"变成一次显式动作，而不是让恶意提交无处可去。
+#
+# 环境变量：
+#   GOV_PREPUSH_MODE=auto|suite|light   默认 auto（有套件就跑套件）
+#   GOV_PREPUSH_TIMEOUT=<秒>            套件时间预算，默认 120（实测 3.5s，留冷机/CI 余量）
+# ============================================================
+set -uo pipefail
+
+# git 通过 stdin 传 push 规格（local ref / local sha / remote ref / remote sha）。
+# 本门判的是"全树不变量"，与要推哪些 ref 无关，故显式消费后忽略。
+cat >/dev/null 2>&1 || true
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+cd "$ROOT" || exit 0
+
+# 未初始化治理树（无 .agents/notes）的检出不做治理判定——本门不越权造制度
+[ -d .agents/notes ] || exit 0
+
+MODE="${GOV_PREPUSH_MODE:-auto}"
+BUDGET="${GOV_PREPUSH_TIMEOUT:-120}"
+
+blocked() {
+  printf '\n===== [pre-push BLOCKED] %s =====\n' "$1" >&2
+  printf '  修复后重试 push；确需紧急推送可 `git push --no-verify`（远端 CI 仍在，但本地闸失效）。\n' >&2
+  exit 1
+}
+
+# 轻量组合：秒级（凭据 + ADR 格式），套件不可用/超预算时的降级路径
+light_checks() {
+  local rc=0
+  if [ -f .meta/gates/secret-scan.sh ]; then
+    bash .meta/gates/secret-scan.sh || rc=1
+  fi
+  if [ -f .agents/skills/write-adr/verify-note.sh ]; then
+    bash .agents/skills/write-adr/verify-note.sh || rc=1
+  fi
+  return "$rc"
+}
+
+suite_available=0
+[ -f tests/governance/run.sh ] && [ "$MODE" != "light" ] && suite_available=1
+
+if [ "$suite_available" = "1" ]; then
+  OUT=""
+  if command -v timeout >/dev/null 2>&1; then
+    OUT=$(timeout -k 5 "$BUDGET" bash tests/governance/run.sh 2>&1)
+    RC=$?
+  else
+    OUT=$(bash tests/governance/run.sh 2>&1)
+    RC=$?
+  fi
+
+  if [ "$RC" -eq 0 ]; then
+    printf '[pre-push] 通过：tests/governance/run.sh（全树治理验收）\n'
+    exit 0
+  fi
+
+  if [ "$RC" -eq 124 ]; then
+    # 超预算：不静默放行，降级到秒级组合并把原因说清楚
+    printf '[pre-push] WARN：治理套件超出 %ss 预算（timeout 终止）→ 降级为 secret-scan + verify-note\n' "$BUDGET" >&2
+    if light_checks; then
+      printf '[pre-push] 通过（降级路径）：secret-scan + verify-note\n'
+      exit 0
+    fi
+    blocked "降级路径 secret-scan + verify-note 未通过"
+  fi
+
+  # 套件真红：把末段输出带给开发者（有界，不倾倒全量）
+  printf '%s\n' "$OUT" | tail -n 20 >&2
+  blocked "tests/governance/run.sh 未通过（rc=$RC）"
+fi
+
+# 无套件（或强制 light 模式）：仍要有一道闸
+if light_checks; then
+  printf '[pre-push] 通过：secret-scan + verify-note（未跑治理套件）\n'
+  exit 0
+fi
+blocked "secret-scan 或 verify-note 未通过"

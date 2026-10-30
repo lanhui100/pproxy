@@ -1,6 +1,7 @@
 # Agent Note: 桌面端 Toast 样式重构（深灰质感背景与最小三行高度排版）
 
 Status: implemented
+Superseded by: `.agents/notes/implemented/architecture/2026-10-07-desktop-toast-borderless-frosted.md`（2026-10-07 无边框毛玻璃）——本条（深灰质感与最小三行高度）的视觉口径已被取代，保留为演进史；当前态见新条。
 
 ## Decision
 

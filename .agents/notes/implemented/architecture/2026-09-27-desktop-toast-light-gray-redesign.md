@@ -1,6 +1,7 @@
 # Agent Note: 桌面端 Toast 背景调整为浅灰色质感
 
 Status: implemented
+Superseded by: `.agents/notes/implemented/architecture/2026-10-07-desktop-toast-borderless-frosted.md`（2026-10-07 无边框毛玻璃）——本条（浅灰质感）的视觉口径已被取代，保留为演进史；当前态见新条。
 
 ## Problem
 

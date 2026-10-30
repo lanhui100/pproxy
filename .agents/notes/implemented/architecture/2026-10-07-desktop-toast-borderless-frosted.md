@@ -1,6 +1,7 @@
 # Agent Note: 桌面端 Toast 去除边框并增强毛玻璃透明效果
 
 Status: implemented
+Supersedes: `.agents/notes/implemented/architecture/2026-09-27-desktop-toast-light-gray-redesign.md`（2026-09-27 浅灰质感）、`.agents/notes/implemented/architecture/2026-09-26-desktop-toast-style-redesign.md`（2026-09-26 深灰质感）——本条是 Toast 视觉的当前态，前两代仅作演进史保留。
 
 ## Problem
 

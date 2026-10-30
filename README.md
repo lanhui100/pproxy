@@ -229,7 +229,7 @@ curl -fsSL https://raw.githubusercontent.com/lanhui100/pproxy/master/scripts/ins
 |------|------|
 | [docs/product/PRD.md](docs/product/PRD.md) | 产品需求与定位（正向代理优先 + API 反向网关） |
 | [docs/product/TECH_DESIGN.md](docs/product/TECH_DESIGN.md) | 目标态技术方案 |
-| [docs/product/ROADMAP.md](docs/product/ROADMAP.md) | 里程碑 M1-M6 |
+| [docs/product/ROADMAP.md](docs/product/ROADMAP.md) | 里程碑 M1-M7（当前态一览见文档首表；M7 = 打磨与模板库） |
 | [docs/architecture/CURRENT.md](docs/architecture/CURRENT.md) | 当前运行系统架构（双模拓扑与隧道） |
 | [docs/architecture/decisions/](docs/architecture/decisions/) | 历史架构决策记录（001~008 归档参考；当前活动决策收敛至 [.agents/notes/](.agents/notes/)） |
 | [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md) | 部署、更新、回滚 |

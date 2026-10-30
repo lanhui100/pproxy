@@ -71,6 +71,11 @@ Status: implemented
 分工原则不变：**格式判据只有 `verify-note.sh` 一处实现**（A1/A4/`check-adr.sh` 都经它），
 A1 只补它做不到的三件事，本仓自写门不得复刻 1.1–1.10（复刻必然漂移）。
 
+实例侧的「承诺 → 非零退出命令」映射统一登记在 **`.meta/gates/instance-commitments.md`**
+（凭据扫描、桌面发版门、合规出口清单一致性、更新 feed 可达性、归档封印）。为什么另立一表而不是
+写进 `.meta/gates/README.md`：后者是框架模板文件，`ponygo upgrade --check` 逐字节比对，
+实例承诺写进去就会永久 drift——模板归模板，实例归实例，两者都不失守。
+
 **四、登记与收口。**
 
 - 本 note 落盘后 `ponygo status` 的「适配决策未登记」WARN 静默；`.meta/adaptation/alt-governance.md`

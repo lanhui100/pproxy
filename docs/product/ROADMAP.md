@@ -2,6 +2,21 @@
 
 > 原则：每个里程碑结束时可验证、可演示；后端先行，客户端跟进。
 
+## 当前态（先看这里；下方各节保留里程碑原始范围与验收口径）
+
+| 里程碑 | 状态 | 证据（可核对的路径） |
+|---|---|---|
+| M1 后端强化 | 已完成 | `crates/server/`、`scripts/m1_test.sh`、`docs/product/specs/m1/` |
+| M2 CLI | 已完成 | `crates/cli/`、`scripts/m2_test.sh` |
+| M3 监控与告警 | 已完成 | `crates/server/src/`（alerts/quota 端点）、`scripts/m3_test.sh` |
+| M4 公网入口（CF Tunnel） | 已完成（服务端口径） | `scripts/m4_test.sh`、`docs/ops/DEPLOY.md` |
+| M5 Windows 桌面端 | 已完成（**实现偏离原计划**：Vue 3 + shadcn-vue，页面收敛为 Dashboard/Settings 两页，非 React 五页） | `desktop/`、`.github/workflows/desktop-gate.yml`、`desktop/README.md` |
+| M6 系统级白名单代理 | 进行中（收尾=Windows 实机验收） | `crates/gate-server/src/connect_proxy.rs`、`docs/product/specs/m6/` |
+| M7 打磨与模板库 | 进行中（UX 切片已交付，模板库/文档收尾未完成） | `docs/product/specs/m7-frontend-ux/DELIVERY.md` |
+
+**读法**：状态只有三档（已完成 / 进行中 / 未开始），每行必须给可核对的证据路径；
+"完成到哪一步"写在证据列或下方对应章节，不写在状态列（状态列不承载叙事，避免二次腐烂）。
+
 ## M1 后端强化（数据面鉴权 + 管理面 + 存储）— ✅ 已完成（2026-08-21）
 - [x] token 模型（哈希存储、路径鉴权 `/{token}/{route}/...`、header 兼容）
 - [x] 管理面 REST API：tokens/routes/usage/health CRUD
@@ -38,7 +53,7 @@
 - [ ] 手机 4G 实测 —— **用户裁决（2026-08-22）：非阻塞项，顺延至 M5 Windows 端验收后一并安排**
 **验收**：服务端口径已闭环；真机口径待上述顺延项执行后补录
 
-## M5 Windows 桌面端（Tauri 2）— 预计 3-4 天
+## M5 Windows 桌面端（Tauri 2）— ✅ 已完成（实现与原计划的偏差见「当前态」表：Vue 3 + shadcn-vue、两页）
 - [ ] 脚手架：Tauri 2 + React + shadcn/ui，管理 API client
 - [ ] Dashboard / Routes / Tokens / Usage / Settings 五页
 - [ ] 用量图表（recharts）+ 限额进度条

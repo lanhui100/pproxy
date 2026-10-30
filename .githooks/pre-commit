@@ -22,7 +22,20 @@ fi
 # 2. 检查暂存区 Rust 语法与快速格式 (仅对暂存文件)
 staged_rs=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
 if [ -n "$staged_rs" ]; then
-  cargo check --tests --quiet --workspace
+  # 超时保护（G15）：冷缓存 / cargo 锁争用下 `cargo check --workspace` 可能阻塞数分钟甚至挂死，
+  # 把开发者卡在提交环节——而被卡住的人下一步就是用 `git commit --no-verify`，
+  # 于是门禁形同不存在。300s 是"冷 workspace 首检"的经验上限，超时按阻断处理（不静默放行）。
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 5 300 cargo check --tests --quiet --workspace || {
+      echo "GATE BLOCKED: cargo check 失败或超时（上限 300s）→ 本地复跑 'cargo check --tests --workspace' 通过后再提交" >&2
+      exit 1
+    }
+  else
+    cargo check --tests --quiet --workspace || {
+      echo "GATE BLOCKED: cargo check 失败（本机无 timeout，未加超时保护）→ 本地复跑通过后再提交" >&2
+      exit 1
+    }
+  fi
 fi
 
 # 3. [doc-freshness WARN] 启发式提醒 (非硬阻断)

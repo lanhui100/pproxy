@@ -17,4 +17,10 @@ jobs:
       # 判定本体仍在 .meta/gates/secret-scan.sh，此处只调一行，不复制判据（P9）。
       # 扫描面 = 索引 + HEAD（CI 上两者同源），无网络依赖、秒级。
       - run: bash .meta/gates/secret-scan.sh
+      # 实例追加步②：归档封印（archived/ 一旦封印不得静默改写；判定本体 = archive-seal.sh）
+      - run: bash .meta/gates/archive-seal.sh --check
+      # 实例追加步③：合规出口清单双侧一致（ADR-008）。零网络依赖——纯文本比对
+      # crates/transport/src/route.rs 与 deploy/cf-gate-worker/gate-policy.mjs 两侧常量，
+      # 本地实跑：OK 3 项 / exit 0。
+      - run: bash scripts/check-egress-parity.sh
       - run: bash .meta/gates/ci-verify.sh
