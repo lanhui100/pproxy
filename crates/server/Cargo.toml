@@ -36,6 +36,7 @@ rand.workspace = true
 # T4a L2-T/L2-AT 红相验收测试（test-agent 冻结）：集成测试（crates/server/tests/）
 # 为独立 crate，需自行声明运行依赖（lib 的 [dependencies] 不传递到 tests/）。
 [dev-dependencies]
+base64.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 serde_json.workspace = true

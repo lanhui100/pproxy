@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub use pproxy_transport::{WsSink as WsTx, WsStream as WsRx};
 
-use crate::auth::parse_basic_auth;
+use pproxy_core::auth::verify_connect_credentials;
 
 /// gate 隧道端点（WS↔TCP 桥）：部署于 gate.example.com/ws。
 const GATE_WS_URL: &str = "wss://gate.example.com/ws";
@@ -218,71 +218,6 @@ impl TunnelPool {
         let fp = pproxy_transport::token_fp8_of(&self.cfg.token);
         self.inner.checkout(ordered, Some(&fp)).map(|(tx, rx, _)| (tx, rx))
     }
-}
-
-/// 提取 CONNECT 请求头中的认证信息并校验。
-/// 支持：Basic Auth 用户 / Token / 集群转发票证 (X-Pony-Cluster-Ticket)。
-pub fn verify_connect_credentials(
-    head: &str,
-    users: Option<&UserService>,
-    tokens: &TokenService,
-    cluster_auth_key: Option<&str>,
-) -> bool {
-    let mut basic_auth = None;
-    let mut token_header = None;
-    let mut cluster_ticket = None;
-
-    for line in head.lines() {
-        let line = line.trim();
-        let lower = line.to_ascii_lowercase();
-        if lower.starts_with("proxy-authorization:") {
-            if let Some((_, val)) = line.split_once(':') {
-                basic_auth = parse_basic_auth(val);
-            }
-        } else if lower.starts_with("x-pony-token:") {
-            if let Some((_, val)) = line.split_once(':') {
-                token_header = Some(val.trim().to_string());
-            }
-        } else if lower.starts_with(pproxy_core::cluster_ticket::CLUSTER_TICKET_HEADER) {
-            if let Some((_, val)) = line.split_once(':') {
-                cluster_ticket = Some(val.trim().to_string());
-            }
-        }
-    }
-
-    // 0. 集群转发票证校验（HA Forwarder failover 转发专用）
-    if let (Some(key), Some(ticket)) = (cluster_auth_key, cluster_ticket.as_deref()) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if pproxy_core::cluster_ticket::verify_ticket(key, ticket, now).is_ok() {
-            return true;
-        }
-    }
-
-    // 1. 优先校验 Basic Auth (username, password)
-    if let Some((username, password)) = basic_auth {
-        if let Some(user_service) = users {
-            if user_service.verify_user(&username, &password).is_some() {
-                return true;
-            }
-        }
-        // 如果用户名匹配 token，也允许作为 token 校验
-        if tokens.verify(&username).is_ok() || tokens.verify(&password).is_ok() {
-            return true;
-        }
-        return false;
-    }
-
-    // 2. 其次校验 X-Pony-Token
-    if let Some(tok) = token_header {
-        if tokens.verify(&tok).is_ok() {
-            return true;
-        }
-    }
-
-    false
 }
 
 /// 处理裸 CONNECT 隧道请求（带鉴权阻断与池化加速）。

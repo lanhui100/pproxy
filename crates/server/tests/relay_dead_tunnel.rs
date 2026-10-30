@@ -81,6 +81,8 @@ fn gw_state(tag: &str) -> GatewayState {
         ),
         usage: Arc::new(pproxy_core::UsageTracker::new(store)),
         tunnel: None,
+        users: None,
+        gatekeeper: Arc::new(pproxy_core::gatekeeper::AuthGatekeeper::default()),
     }
 }
 

@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Self-hosted developer proxy for overseas access + intelligent API gateway:
-- **Priority 1 (forward proxy)**: HTTP/HTTPS CONNECT tunneling over a WebSocket standby connection pool — one-command environment proxy (`pproxy on / off / status / env`), Windows desktop whitelist proxy, and mobile/all-platform HTTP node access with millisecond-level latency.
+- **Priority 1 (forward proxy)**: HTTPS CONNECT tunneling (destination port 443) over a WebSocket standby connection pool — one-command environment proxy (`pproxy on / off / status / env`), Windows desktop whitelist proxy, and mobile/all-platform HTTP node access with millisecond-level latency.
 - **Priority 2 (reverse API gateway)**: LLM-first multi-upstream intelligent routing (`/{token}/{route}/*`), on-demand proxying, multi-node egress (CF Worker / Vercel AWS IPs), with usage accounting and token auth.
 - **High availability & commercialization (cluster failover & multi-tenancy)**: Local HA Forwarder shielding local workloads with zero outage; zero-touch cluster mesh; Ed25519 asymmetric self-contained multi-tenant quota tokens (offline issuance & instant client quota display).
 
@@ -14,19 +14,20 @@ Self-hosted developer proxy for overseas access + intelligent API gateway:
 ```
 [Dev terminal / browser / mobile client]
    │
-   ├─ 1. Forward proxy traffic (CONNECT / HTTP Proxy)
-   │     └─ pony-engine (:8899 / :18900) ──[TunnelPool standby WS tunnels]──> gate.example.com (CF gate-worker)
-   │           └─ Basic Auth / Token auth + Allowlist filtering ──> target overseas sites (TCP 443)
+   ├─ 1. Forward proxy traffic (CONNECT tunnel, destination port fixed at 443)
+   │     └─ pproxy-server (:8899) ──[TunnelPool standby WS tunnels]──> gate.example.com (CF gate-worker)
+   │           └─ non-loopback sources require Basic Auth / X-Pony-Token (loopback exempt) ──> target overseas sites (TCP 443)
    │
    └─ 2. Reverse API gateway traffic (/{token}/{route}/*)
-         └─ pony-server (dev server, 127.0.0.1:8899)
+         └─ pproxy-server (:8899, same listener as the forward proxy)
                ├─ anthropic/google/github/x/facebook → CF Worker  (edge.example.com)
                └─ openai/opencode                   → Vercel Functions (vedge.example.com, AWS egress)
 ```
 
 - **Dual-mode architecture**: forward CONNECT tunnel (generic overseas access + all-platform proxy nodes) + reverse HTTP gateway (`/{token}/{route}/*path` zero-config client SDK).
 - **Standby connection pool (TunnelPool)**: pre-built WebSocket sessions cut forward cold-connect latency to ~1 RTT.
-- **Security & control**: mandatory Basic Auth / Token auth + Gatekeeper anti-brute-force rate limiting; routes/tokens/usage stored in SQLite (`~/.pony/state.db`).
+- **Security & control**: non-loopback CONNECT requires Basic Auth / `X-Pony-Token` with Gatekeeper anti-brute-force rate limiting; the reverse gateway uses path tokens. Routes/tokens/usage are stored in SQLite (`~/.pony/state.db`).
+- **Protocol boundary**: the forward proxy supports CONNECT only (HTTPS, destination port 443). Plaintext HTTP forwarding (absolute-form) is not provided and returns `501 forward_proxy_unsupported`; the allowlist is a logging tag, not an enforcement boundary.
 
 ## Quick start
 

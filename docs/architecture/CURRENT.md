@@ -79,6 +79,7 @@
 ### 6. 本机回环免认证与安全硬化 (Anti-XFF 穿透)
 1. **纯净回环放行判定**：当且仅当客户端物理连接来源为回环网络（IPv4 `127.0.0.1` 或 IPv6 `::1`），且请求头中**完全不存在**任何代理转发标记（严格匹配 `X-Forwarded-For`、`X-Real-IP`、`Forwarded`）时，系统视为本机受信进程发起，直接免认证放行。
 2. **反代伪造强拦截**：一旦请求包含任一转发标记头，即使物理连接来自回环网络，系统判定可能存在未经授权的反向代理透传或穿透企图，立即吊销免认证特权，强制回退至标准 Basic Auth / Token 认证逻辑，未通过则返回 `407 Proxy Authentication Required` 或 `401 Unauthorized`。
+3. **单一实现**：判定与凭据校验由 `pproxy_core::auth::verify_connect_credentials` 提供，`pproxy-engine` 与 `pproxy-server` 共用；两侧不得各自复制一份。
 
 ## 关键组件
 
@@ -91,7 +92,7 @@
 | pproxy-transport | crates/transport/ | 底层传输抽象（WS 隧道建立、待命池维护、Ping-Pong、双向 relay） |
 | pproxy-engine | crates/engine/ | 嵌入式网关核心引擎（CONNECT 处理、Basic/Token 鉴权、Gatekeeper 门禁、回环免认证硬化、Axum 数据面） |
 | pproxy-core | crates/core/ | SQLite 存储层（tokens/users/routes/usage）、EdgeClient 协议、集群模型 |
-| pproxy-server | crates/server/ | 独立守护进程（网关分发 + 管理面 REST API） |
+| pproxy-server | crates/server/ | 独立守护进程（CONNECT 隧道鉴权 + 网关分发 + 管理面 REST API） |
 | pproxy-cli | crates/cli/ | CLI 客户端（`pproxy on/off/status/env`、cluster 对等互联、token/user 治理） |
 | pony-desktop | desktop/ | Tauri 2 桌面端（系统托盘、代理开关、白名单配置、本地引擎） |
 | gate Worker | deploy/cf-gate-worker/ | 出海正向隧道端点（Token 哈希验签 + ACL + WS↔TCP 密文透传） |

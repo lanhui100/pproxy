@@ -62,7 +62,7 @@ Got an error: token exchange failed: Post "https://oauth2.googleapis.com/token":
 - **不做 direct 直连回退模式**（v0.1 的 `PPROXY_CONNECT_MODE` 已删除，见 §8.1 采纳 #3：过度设计 + 非回环绑定下构成无鉴权开放中继含云 metadata SSRF 面，且 dev 无价值场景）。
 - 不做 per-token 隧道用量计量（CONNECT 无 token 概念，见 §3.5）。
 - 不放行非 443 端口（server 端预检 403 + worker 端 `ALLOWED_PORTS` 保持 443，双重闸）。
-- 不拦截 absolute-form（`GET http://host/path`）——继续走既有 axum 路径中继鉴权路径，行为零变化（§8.1 采纳 #1：拦截会回归 `http_proxy` 注入下的路径中继用法）。
+- absolute-form（`GET http://host/path`）显式拒绝：`auth_middleware` 在路径解析前返回 `501 forward_proxy_unsupported`。不提供明文 HTTP 正向转发，也不把它伪装成凭据错误；origin-form 路径中继用法不受影响。
 
 ## 2. 现状与可复用资产（代码事实）
 

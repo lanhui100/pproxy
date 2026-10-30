@@ -5,13 +5,13 @@
 ## 1. 定位
 
 自托管的**现代开发者出海代理与智能 API 网关**：
-- **第一优先级（正向出海代理）**：为开发者设备（PC / CLI / 移动端）提供低延迟、高可靠的 HTTP/HTTPS 正向出海代理（CONNECT 隧道 + WebSocket 待命连接池），一键环境管理与全平台节点接入。
+- **第一优先级（正向出海代理）**：为开发者设备（PC / CLI / 移动端）提供低延迟、高可靠的 HTTPS 正向出海代理（CONNECT 隧道，目标端口 443；WebSocket 待命连接池），一键环境管理与全平台节点接入。明文 HTTP 正向代理（absolute-form）不支持。
 - **第二优先级（API 反向代理网关）**：海外 API 服务（LLM 优先）的按需反向代理分发，零配置客户端 SDK，双上游智能路由与用量计量。
 
 ## 2. 用户故事
 
 - 作为开发者，我在终端输入 `pproxy on` 即可瞬间让 Git / Cursor / npm / 命令行工具无缝出海，不用时输入 `pproxy off`。
-- 作为开发者，我可以在手机（Wi-Fi 或 Clash Meta / Shadowrocket）上把 `pproxy` 当作 HTTP 代理节点，实现外网访问或规则分流。
+- 作为开发者，我可以在手机（Wi-Fi 或 Clash Meta / Shadowrocket）上把 `pproxy` 当作 HTTP 代理节点（HTTPS 走 CONNECT；明文 HTTP 目标不支持），实现外网访问或规则分流。
 - 作为开发者，我打开 Pony Proxy 桌面端面板，一眼看到出海隧道健康状态、反向路由与用量。
 - 作为开发者，我一键添加新 API 路由（如 Gemini），系统自动选择上游并生效。
 - 作为开发者，我为每台设备生成独立 token / Basic Auth 凭据，设备丢失时一键撤销。
@@ -21,7 +21,7 @@
 ### P0 — 核心功能（已实现）
 | 模块 | 需求 |
 |------|------|
-| 正向出海代理 | HTTP/HTTPS CONNECT 隧道；Basic Auth / Token 鉴权；Gatekeeper 防爆破限流；TunnelPool 待命 WS 隧道（1 RTT 冷建连）；Allowlist 域名白名单与通用出海 |
+| 正向出海代理 | HTTPS CONNECT 隧道（目标端口 443）；非回环来源强制 Basic Auth / X-Pony-Token 鉴权（回环免认证）；Gatekeeper 防爆破限流；TunnelPool 待命 WS 隧道（1 RTT 冷建连）；Allowlist 仅记日志 tag，不构成拦截边界 |
 | 环境代理管理 | CLI `pproxy on / off / status / env (suspend/resume/generate-script)`，跨 Shell (Bash/Zsh/Fish/PowerShell) 自动配置与 K8s 集群地址免代理探测 |
 | 反向 API 网关 | token 鉴权（路径 token `/{token}/{route}/...`为主，`X-Pony-Token`为辅）；多上游路由分发（CF Worker / Vercel）；用量监控与 SQLite 存留 |
 | 桌面端 | Tauri 2 客户端：系统托盘、Proxy 白名单/直连切换、Dashboard、Routes、Tokens、Usage 图表、自更新 |

@@ -1,17 +1,17 @@
-//! L2-T 功能契约测试（T4a 红相先行，test-agent 冻结，实现者只读不可改）。
+//! L2-T 功能契约测试（accept-loop 饱和与恢复；回归守卫）。
 //!
-//! 契约文件：.dev-team/contracts/2026-10-09-pproxy-accept-loop.md（L2-P 冻结，本文件
-//! 全部数值与之一一对应）；基准 .dev-team/nfr-baseline-pproxy-accept-loop.json。
+//! 契约数值来源：2026-10-09 accept-loop 冻结契约（原文未随仓库提交，数值内联于下方
+//! 常量并逐条对应断言）；基准 .dev-team/nfr-baseline-pproxy-accept-loop.json。
 //!
-//! 故障现场（Lead 根因诊断）：gateway.rs `serve_data_plane` 在 accept 循环内同步
+//! 故障现场（Lead 根因诊断）：gateway.rs `serve_data_plane` 曾在 accept 循环内同步
 //! `sem.acquire_owned().await`（上限常量 MAX_CONCURRENT_CONNECTIONS=256）。CONNECT
 //! relay 持 permit 至结束且无超时，死隧道占满 256 permit 后 accept 循环停转 →
 //! 内核 accept 队列溢出（现场 recv-Q 129/128）→ 新连接挂死（ponyllm 10s connect
 //! timeout → 503 upstream_unavailable）。
 //!
-//! 本文件断言"修复后"契约，当前实现必须红：
+//! 本文件断言以下契约（实现已在 `serve_data_plane` 落地）：
 //!   C1) 并发上限可经 env `PPROXY_MAX_CONNECTIONS` 注入（契约 §2，默认 256、env>常量、
-//!       非法/0 回落 256）；当前实现读常量 256、无 env → 红。
+//!       非法/0 回落 256）。
 //!   C2) 超过上限的新连接**立即**收到 `503 Service Unavailable` + `x-pproxy-reason:
 //!       saturation` + connection: close（契约 §1 fast-fail，终局 0 重试），测试硬界
 //!       4000ms = baseline(3000) + margin(1000)（契约冻结，禁止自选阈值）；
@@ -103,6 +103,8 @@ fn install_log_capture() {
     }
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
+        // 日志捕获断言按纯文本解析数值：ANSI 序列里的 `\x1b[0m` 会被误读成数字 0。
+        .with_ansi(false)
         .with_writer(M)
         .try_init();
 }
@@ -165,6 +167,8 @@ fn gw_state(tag: &str) -> GatewayState {
         ),
         usage: Arc::new(pproxy_core::UsageTracker::new(store)),
         tunnel: None,
+        users: None,
+        gatekeeper: Arc::new(pproxy_core::gatekeeper::AuthGatekeeper::default()),
     }
 }
 
@@ -299,8 +303,7 @@ async fn over_limit_fast_fail_and_recovery_contract() {
         cap,
         Some(INJECTED_LIMIT),
         "契约 §2.2 违约: fast-fail 日志须含 sem_capacity == 注入值 {INJECTED_LIMIT} \
-         （reason=saturation / action=close_503，契约 §1 日志条款）。实际捕获: {cap:?} \
-         红相判据：当前实现无饱和 fast-fail 事件日志（env 注入未实现）"
+         （reason=saturation / action=close_503，契约 §1 日志条款）。实际捕获: {cap:?}"
     );
     println!("PASS: fast-fail log carries sem_capacity={INJECTED_LIMIT} (env injection machine-verified)");
 

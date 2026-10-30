@@ -168,12 +168,18 @@ async fn main() -> anyhow::Result<()> {
         info!("edge keepalive enabled (PPROXY_EDGE_KEEPALIVE=1, interval 45s; Vercel 上游已安全排除以避免额度超限)");
     }
 
+    // CONNECT 非回环来源鉴权：用户表复用 store；门禁为进程内内存态。
+    let users = pproxy_core::user::UserService::new(Arc::clone(&store))
+        .map(Arc::new)
+        .ok();
     let gw_state = gateway::GatewayState {
         tokens,
         edges,
         routes,
         usage,
         tunnel: tunnel_cfg,
+        users,
+        gatekeeper: Arc::new(pproxy_core::gatekeeper::AuthGatekeeper::default()),
     };
     tokio::select! {
         r = gateway::serve_data_plane(data_listener, gw_state) => r?,

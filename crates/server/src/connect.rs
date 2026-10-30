@@ -10,11 +10,13 @@
 //! 配置访问按 [`TunnelConfig`] 重写——桌面端该文件在 HEAD 与 `EngineConfig` 字段
 //! 失配（编译破损为上游债，spec §2），"逐字一致"不成立。
 //!
-//! 安全（spec §3.5）：CONNECT 无 per-请求 token，边界 = 数据面 loopback 绑定 +
-//! allowlist 默认拒绝；日志记目标 host（worker 侧本就记录，排障必需），
-//! 绝不记 token/Authorization。
+//! 安全：回环来源（无 `X-Forwarded-For` 等代理痕迹）免认证；非回环来源必须携带
+//! Basic Auth 或 `X-Pony-Token`，失败回 407 并经 AuthGatekeeper 防爆破。
+//! allowlist 仅作日志 tag，不构成拦截边界。日志记目标 host（worker 侧本就记录，
+//! 排障必需），绝不记 token/Authorization。
 
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -378,6 +380,29 @@ impl fmt::Display for EstablishError {
     }
 }
 
+/// CONNECT 鉴权判定（纯函数，便于单测）。
+///
+/// 回环来源且无代理痕迹免认证；其余来源必须通过 [`pproxy_core::auth`] 的凭据校验。
+/// `X-Forwarded-For` / `X-Real-IP` / `Forwarded` 出现即取消回环豁免——防反向代理把
+/// 远端流量伪装成本机。
+fn connect_auth_allowed(
+    client_ip: IpAddr,
+    head: &str,
+    users: Option<&pproxy_core::user::UserService>,
+    tokens: &pproxy_core::TokenService,
+) -> bool {
+    let has_forwarded = head.lines().any(|l| {
+        let low = l.to_ascii_lowercase();
+        low.starts_with("x-forwarded-for:")
+            || low.starts_with("x-real-ip:")
+            || low.starts_with("forwarded:")
+    });
+    if client_ip.is_loopback() && !has_forwarded {
+        return true;
+    }
+    pproxy_core::auth::verify_connect_credentials(head, users, tokens, None)
+}
+
 /// CONNECT 处理入口（gateway.rs::handle_conn peek 分流后调用，spec §3.2）。
 ///
 /// 接收已解析的请求头（含 CONNECT 首行 + Host 头）、管道化多余字节和原始 TCP 流。
@@ -390,6 +415,7 @@ impl fmt::Display for EstablishError {
 /// wave-pproxy-accept-loop 契约 §3：relay 有界生命周期（空闲/绝对 deadline）由
 /// `relay()` 承担，`conn_id` 供超时事件日志（trace_id/conn_id 字段）。
 pub async fn handle_connect_raw(
+    client_ip: IpAddr,
     state: GatewayState,
     head: &str,
     leftover: Vec<u8>,
@@ -397,6 +423,34 @@ pub async fn handle_connect_raw(
     conn_id: &str,
 ) {
     use tokio::io::AsyncWriteExt;
+
+    // 鉴权（与 pproxy-engine 共用 pproxy_core::auth 语义）：
+    // 回环来源且无代理痕迹 → 免认证；非回环来源必须携带有效凭据。
+    if state.gatekeeper.check(&client_ip).is_err() {
+        tracing::warn!(%client_ip, "connect rejected: IP locked by AuthGatekeeper");
+        let _ = stream.write_all(
+            b"HTTP/1.1 429 Too Many Requests\r\n\
+              content-type: application/json\r\n\
+              content-length: 54\r\n\r\n\
+              {\"error\":\"ip_temporarily_locked_due_to_auth_failures\"}",
+        )
+        .await;
+        return;
+    }
+    if !connect_auth_allowed(client_ip, head, state.users.as_deref(), &state.tokens) {
+        state.gatekeeper.record_failure(client_ip);
+        tracing::warn!(%client_ip, "connect denied: missing or invalid authentication credentials");
+        let _ = stream.write_all(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\n\
+              proxy-authenticate: Basic realm=\"Pony Proxy\"\r\n\
+              content-type: application/json\r\n\
+              content-length: 41\r\n\r\n\
+              {\"error\":\"proxy_authentication_required\"}",
+        )
+        .await;
+        return;
+    }
+    state.gatekeeper.record_success(&client_ip);
 
     // 从 CONNECT 首行解析 host:port
     let (host, port) = match parse_connect_head(head) {
@@ -704,6 +758,84 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
+
+    // ---- connect_auth_allowed ----
+
+    fn head_with(extra: &str) -> String {
+        format!("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n{extra}\r\n")
+    }
+
+    #[test]
+    fn loopback_without_credentials_is_allowed() {
+        let state = gw_state(None, "auth-loopback");
+        assert!(connect_auth_allowed(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            &head_with(""),
+            None,
+            &state.tokens,
+        ));
+    }
+
+    #[test]
+    fn loopback_with_forwarded_header_loses_exemption() {
+        let state = gw_state(None, "auth-forwarded");
+        assert!(!connect_auth_allowed(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            &head_with("X-Forwarded-For: 203.0.113.9\r\n"),
+            None,
+            &state.tokens,
+        ));
+    }
+
+    #[test]
+    fn non_loopback_without_credentials_is_rejected() {
+        let state = gw_state(None, "auth-remote-anon");
+        assert!(!connect_auth_allowed(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)),
+            &head_with(""),
+            None,
+            &state.tokens,
+        ));
+    }
+
+    #[test]
+    fn non_loopback_with_valid_token_is_allowed() {
+        let state = gw_state(None, "auth-remote-token");
+        let (_, plaintext) = state.tokens.create_token("connect-auth", None).unwrap();
+        assert!(connect_auth_allowed(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)),
+            &head_with(&format!("X-Pony-Token: {plaintext}\r\n")),
+            None,
+            &state.tokens,
+        ));
+    }
+
+    #[test]
+    fn non_loopback_with_invalid_token_is_rejected() {
+        let state = gw_state(None, "auth-remote-bad");
+        assert!(!connect_auth_allowed(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)),
+            &head_with("X-Pony-Token: pony_deadbeef\r\n"),
+            None,
+            &state.tokens,
+        ));
+    }
+
+    #[test]
+    fn non_loopback_basic_auth_accepts_token_as_password() {
+        let state = gw_state(None, "auth-remote-basic");
+        let (_, plaintext) = state.tokens.create_token("connect-basic", None).unwrap();
+        let encoded = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(format!("user:{plaintext}"))
+        };
+        assert!(connect_auth_allowed(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 10)),
+            &head_with(&format!("Proxy-Authorization: Basic {encoded}\r\n")),
+            None,
+            &state.tokens,
+        ));
+    }
 
     // ---- allowlist_match ----
 
@@ -1025,6 +1157,8 @@ mod tests {
             routes: Arc::new(pproxy_core::RouteTable::new(store.clone(), Arc::new(std::collections::HashMap::new())).unwrap()),
             usage: Arc::new(UsageTracker::new(store)),
             tunnel: tunnel.map(TunnelPool::disabled),
+            users: None,
+            gatekeeper: Arc::new(pproxy_core::gatekeeper::AuthGatekeeper::default()),
         }
     }
 

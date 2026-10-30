@@ -21,6 +21,8 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use pproxy_core::gatekeeper::AuthGatekeeper;
+use pproxy_core::user::UserService;
 use pproxy_core::{EdgeClient, ForwardRequest, TokenService};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -72,6 +74,10 @@ pub struct GatewayState {
     pub usage: Arc<pproxy_core::UsageTracker>,
     /// CONNECT 隧道（pproxy-connect-tunnel spec §3.4 + 待命池）：None 时 CONNECT 全 403。
     pub tunnel: Option<Arc<crate::connect::TunnelPool>>,
+    /// CONNECT 非回环来源的 Basic Auth 用户表（None 时仅接受令牌）。
+    pub users: Option<Arc<UserService>>,
+    /// CONNECT 认证防爆破门禁（回环来源免认证，不记失败）。
+    pub gatekeeper: Arc<AuthGatekeeper>,
 }
 
 /// 组装数据面 Router（main.rs 与测试共用）。
@@ -125,6 +131,10 @@ async fn clash_profile_handler(headers: HeaderMap) -> Response {
     let fallback_yaml = format!(
         r#"# ================================================================
 #  Pony Proxy — Clash Meta 默认代理配置 (动态合成)
+#
+#  non-loopback 客户端必须携带凭据：执行 `pproxy token create <name>`，
+#  把返回的令牌同时填入下方 username / password。本模板不持有明文令牌，
+#  无法代为预填；`pproxy clash` 导出的 ~/.pony/clash.yaml 会自动带上凭据。
 # ================================================================
 mixed-port: 7890
 allow-lan: false
@@ -238,6 +248,14 @@ pub async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // 正向代理请求（absolute-form，RFC 9112 §3.2.2）不是发给本网关的：
+    // 数据面只实现 CONNECT 隧道（见 connect.rs），没有明文 HTTP 转发能力。
+    // 必须在按路径解析之前拒绝——否则 `/v1/models` 的首段 `v1` 会被当成 route 名
+    // 去鉴权，回一个与真实原因无关的 401，把「代理配错」伪装成「凭据错误」。
+    if req.uri().scheme().is_some() || req.uri().authority().is_some() {
+        return forward_proxy_unsupported(&req);
+    }
+
     // 根路径 info 端点与 clash 配置端点不鉴权
     let path = req.uri().path().to_string();
     if path == "/" || path == "/clash" || path == "/clash.yaml" || path.starts_with("/dsk/") {
@@ -315,6 +333,32 @@ fn unauthorized() -> Response {
         StatusCode::UNAUTHORIZED,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         r#"{"error":"unauthorized"}"#,
+    )
+        .into_response()
+}
+
+/// absolute-form 请求的显式拒绝：数据面无明文 HTTP 转发能力。
+///
+/// 501 而非 401：调用方的代理配置把本机当成了通用 HTTP 代理，这是配置错配，
+/// 不是凭据问题。响应体点名正确用法（CONNECT 隧道）与修复方向（把目标写进
+/// no_proxy），让排障者不必再逆向 `{"error":"unauthorized"}` 的含义。
+fn forward_proxy_unsupported(req: &Request) -> Response {
+    let target = req
+        .uri()
+        .authority()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
+    tracing::warn!(
+        target = %target,
+        "absolute-form request rejected: plain-HTTP forward proxying is not supported"
+    );
+    let body = format!(
+        r#"{{"error":"forward_proxy_unsupported","message":"plain-HTTP forward proxying is not implemented; this listener only tunnels CONNECT (443). Add the target host to no_proxy instead of routing it here.","target":"{target}"}}"#
+    );
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
     )
         .into_response()
 }
@@ -496,7 +540,7 @@ pub async fn serve_data_plane(listener: TcpListener, state: GatewayState) -> std
     // 连接级合成 trace id（契约日志条款）：conn_<seq>_<unix_ms>
     let mut conn_seq: u64 = 0;
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
         conn_seq += 1;
         // 入站 socket 禁用 Nagle：小包响应（headers/首 chunk）不再等 40ms+
         // delayed-ACK 凑包，hyper 手动 serve_connection 不会代为设置。
@@ -514,7 +558,7 @@ pub async fn serve_data_plane(listener: TcpListener, state: GatewayState) -> std
                 let state = state.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    handle_conn(stream, router, state, &conn_id).await;
+                    handle_conn(stream, peer, router, state, &conn_id).await;
                 });
             }
             Err(_) => {
@@ -551,6 +595,7 @@ async fn reject_saturation(mut stream: tokio::net::TcpStream) {
 /// F3 既有策略）——半开连接（connect 后不发任何字节）不得无限期占 permit。
 async fn handle_conn(
     mut stream: tokio::net::TcpStream,
+    peer: std::net::SocketAddr,
     router: Router,
     state: GatewayState,
     conn_id: &str,
@@ -597,7 +642,15 @@ async fn handle_conn(
             None => (&buf[..], Vec::new()),
         };
         let head = String::from_utf8_lossy(head_bytes);
-        let _ = crate::connect::handle_connect_raw(state, &head, leftover, stream, conn_id).await;
+        let _ = crate::connect::handle_connect_raw(
+            peer.ip(),
+            state,
+            &head,
+            leftover,
+            stream,
+            conn_id,
+        )
+        .await;
         return;
     }
     // 普通 HTTP：axum Router 经适配器作为 hyper Service 驱动（TokioIo 桥接 tokio stream）。
@@ -664,6 +717,8 @@ let router = data_router(GatewayState {
 	            routes,
 	            usage: Arc::new(UsageTracker::new(store)),
 	            tunnel: None,
+	            users: None,
+	            gatekeeper: Arc::new(AuthGatekeeper::default()),
 	        });
         (router, tokens)
     }
@@ -729,6 +784,51 @@ let router = data_router(GatewayState {
         let resp = router.oneshot(req_get("/", None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(body_string(resp).await.contains("service"));
+    }
+
+    // ---- 回归（2026-10-19）：absolute-form 正向代理请求不得被当作网关路由 ----
+    // 缺陷现场：dsh 的 no_proxy 含 CIDR `10.0.0.0/8`，而 harness 的 bypassesProxy
+    // 不解析 CIDR，于是到 ClusterIP 的请求被发往本代理。首段 `v1` 被当成 route 名
+    // 去 verify，回 401 {"error":"unauthorized"}——真实原因（代理不支持明文转发）
+    // 被伪装成凭据错误，排障者据此查了整条链路才定位。
+    // 期望：absolute-form 一律 501 forward_proxy_unsupported，与 token 无关。
+
+    #[tokio::test]
+    async fn absolute_form_request_rejected_as_unsupported_not_unauthorized() {
+        let (router, tokens) = build_router("abs-form");
+        let (_, plaintext) = tokens.create_token("abs-test", None).unwrap();
+        // 带合法 token 也必须 501：这是能力边界，不是凭据问题。
+        for uri in [
+            "http://10.43.141.157:8080/v1/models",
+            "http://example.com/foo",
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(req_get(uri, Some(&plaintext)))
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_IMPLEMENTED,
+                "absolute-form {uri} 必须以 501 拒绝，而非落入路径鉴权"
+            );
+            let body = body_string(resp).await;
+            assert!(body.contains("forward_proxy_unsupported"), "body: {body}");
+            assert!(body.contains("no_proxy"), "修复指引缺失，body: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn origin_form_still_reaches_route_resolution() {
+        // 对照组：origin-form 不得被新分支误伤，仍走原有鉴权→路由解析路径。
+        let (router, tokens) = build_router("origin-form");
+        let (_, plaintext) = tokens.create_token("origin-test", None).unwrap();
+        let resp = router
+            .oneshot(req_get(&format!("/{plaintext}/nosuchroute-x/v1/x"), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(body_string(resp).await.contains("unknown_route"));
     }
 
     // ---- 长连接支持：响应头不含强制 Connection: close ----
@@ -850,6 +950,8 @@ let router = data_router(GatewayState {
             routes,
             usage: Arc::new(UsageTracker::new(store)),
             tunnel: None,
+            users: None,
+            gatekeeper: Arc::new(AuthGatekeeper::default()),
         });
         let (_, plaintext) = tokens.create_token("urlstrip-tok", None).unwrap();
 
@@ -909,6 +1011,8 @@ let router = data_router(GatewayState {
             routes,
             usage: Arc::new(UsageTracker::new(store)),
             tunnel: None,
+            users: None,
+            gatekeeper: Arc::new(AuthGatekeeper::default()),
         });
         let (_, plaintext) = tokens.create_token("failover-tok", None).unwrap();
 
@@ -973,6 +1077,8 @@ let router = data_router(GatewayState {
             routes,
             usage: Arc::new(UsageTracker::new(store)),
             tunnel: None,
+            users: None,
+            gatekeeper: Arc::new(AuthGatekeeper::default()),
         });
         let (_, plaintext) = tokens.create_token("no-failover-4xx", None).unwrap();
 

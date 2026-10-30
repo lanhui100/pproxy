@@ -52,7 +52,7 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 
 ```
 [Windows] pony-desktop v0.3.0（本地代理引擎嵌入进程）
-   ├─ 引擎监听 127.0.0.1:18900（CONNECT + absolute-form；端口已在 Windows 本机专用约定中登记，F11）
+   ├─ 引擎监听 127.0.0.1:18900（CONNECT，目标端口 443；端口已在 Windows 本机专用约定中登记，F11）
    ├─ PAC 服务 /pac（命中→单条 PROXY 无兜底；未命中→DIRECT；格式钉死见 §5，R4）
    ├─ 系统代理模式：PAC（推荐）/ 手动（实验性，Override=<local>+内网排除，F7）
    ├─ 分流：host 后缀匹配 → 是：wss 隧道；否：本机 dial
@@ -94,7 +94,7 @@ Windows 上实现**白名单式系统代理**：GUI 维护域名白名单，命�
 |----|------|
 | 监听 | `127.0.0.1:18900`（Windows 本机专用端口登记） |
 | CONNECT | 解析 host:port → 分流 → 隧道或直连 + `200 Connection Established` |
-| absolute-form | 读 Host 头分流；尽力而为（现代浏览器 HTTPS 场景几乎不触达） |
+| absolute-form | 不支持（未实现明文 HTTP 正向转发）；收到时返回 `501 forward_proxy_unsupported` |
 | PAC 端点 | `/pac` 动态生成；**返回串格式钉死（R4/F5）：命中 → `return "PROXY 127.0.0.1:18900";`（无 DIRECT 兜底）；未命中 → `return "DIRECT";`** |
 | 系统代理写入（F10） | PAC 模式设 AutoConfigURL；手动实验模式设 ProxyServer + Override=`<local>`+内网段排除；写入后广播 `WM_SETTINGCHANGE("Internet Settings")` + `InternetSetOption(REFRESH)`；快照还原区分"用户原本自设代理"（还原原值而非清零），崩溃修复同时处理 ProxyEnable 与 AutoConfigURL 两套键 |
 | 工程细节（F10） | TCP connect 显式超时；keepalive 半开检测；WS↔TCP 双向拷贝用带容量 channel 做背压（禁 unbounded OOM）；关停顺序=先还原系统代理再停引擎 |

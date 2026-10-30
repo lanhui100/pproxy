@@ -2,7 +2,6 @@
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::Engine;
 
 pub const X_PONY_TOKEN: &str = "x-pony-token";
 pub const PROXY_AUTHORIZATION: &str = "proxy-authorization";
@@ -26,21 +25,9 @@ pub struct AuthContext {
 }
 
 /// 从 Basic Auth Header (如 `Basic dXNlcjpwYXNz`) 解析 (username, password)。
-pub fn parse_basic_auth(header_val: &str) -> Option<(String, String)> {
-    let header_val = header_val.trim();
-    let payload = if header_val.to_ascii_lowercase().starts_with("basic ") {
-        &header_val[6..].trim()
-    } else {
-        return None;
-    };
-
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .ok()?;
-    let creds = String::from_utf8(decoded).ok()?;
-    let (username, password) = creds.split_once(':')?;
-    Some((username.to_string(), password.to_string()))
-}
+///
+/// 实现在 `pproxy_core::auth`（服务端与引擎共用同一份解析语义）。
+pub use pproxy_core::auth::parse_basic_auth;
 
 /// 从 Headers 提取所有认证凭据。
 pub fn extract_credentials(headers: &HeaderMap) -> (Option<(String, String)>, Option<String>) {

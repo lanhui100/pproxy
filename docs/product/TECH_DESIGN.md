@@ -100,7 +100,8 @@ pony config export <service> [--token <name>]   # 输出 env 片段
 
 ```
 [Windows] pony-desktop（引擎嵌进程）
-   ├─ 引擎 127.0.0.1:18900：CONNECT/absolute-form → host 后缀匹配白名单
+   ├─ 引擎 127.0.0.1:18900：CONNECT（目标端口 443）→ host 后缀匹配白名单（仅日志 tag，不拦截）
+   │   （明文 HTTP absolute-form 未实现，收到时返回 501 forward_proxy_unsupported）
    ├─ 命中 → wss://gate.example.com/ws（Bearer tunnel_token）→ TLS 密文透传
    ├─ 未命中 → 本机直连（绝不静默回落）
    ├─ PAC /pac：命中单条 PROXY 127.0.0.1:18900，无 DIRECT 兜底
