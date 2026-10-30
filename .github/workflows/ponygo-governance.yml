@@ -35,5 +35,9 @@ jobs:
           ref: 7055ced122bec5112bc7a9ac5879784e2eecf989
           path: .ponygo
           fetch-depth: 1
-      - run: install -m 0755 .ponygo/ponygo /usr/local/bin/ponygo && ponygo --help >/dev/null
+      - name: Install pinned ponygo oracle
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 .ponygo/ponygo "$HOME/.local/bin/ponygo"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: bash tests/governance/run.sh
