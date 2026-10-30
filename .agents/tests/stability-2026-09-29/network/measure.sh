@@ -140,18 +140,18 @@ measure_egress() {
     local U="https://rn.ponygo.fun/api/proxy?url=https%3A%2F%2Fipinfo.io%2Fjson"
     for i in 1 2 3; do
       echo "--- run$i ---"
-      curl --noproxy '*' -s -m 15 "$U" -H "X-Proxy-Secret: b96ee9195c590bc9a08c0284814bf1fead74e2f626d931ab14c892effa8a5882"; echo
+      curl --noproxy '*' -s -m 15 "$U" -H "X-Proxy-Secret: <REDACTED>"; echo
     done
     echo "----- vedge.ponygo.fun /api/proxy x2 (已知 402 DEPLOYMENT_DISABLED) -----"
     local U2="https://vedge.ponygo.fun/api/proxy?url=https%3A%2F%2Fipinfo.io%2Fjson"
     for i in 1 2; do
       echo "--- run$i ---"
-      curl --noproxy '*' -s -m 15 "$U2" -H "X-Proxy-Secret: b96ee9195c590bc9a08c0284814bf1fead74e2f626d931ab14c892effa8a5882"; echo
+      curl --noproxy '*' -s -m 15 "$U2" -H "X-Proxy-Secret: <REDACTED>"; echo
     done
     echo "----- edge/gate 是否存在 /api/proxy（单次探测）-----"
     for h in edge gate; do
       echo "--- $h ---"
-      curl --noproxy '*' -s -m 10 "https://$h.ponygo.fun/api/proxy?url=https%3A%2F%2Fipinfo.io%2Fjson" -H "X-Proxy-Secret: b96ee9195c590bc9a08c0284814bf1fead74e2f626d931ab14c892effa8a5882" -w " [HTTP=%{http_code} t=%{time_total}s]"; echo
+      curl --noproxy '*' -s -m 10 "https://$h.ponygo.fun/api/proxy?url=https%3A%2F%2Fipinfo.io%2Fjson" -H "X-Proxy-Secret: <REDACTED>" -w " [HTTP=%{http_code} t=%{time_total}s]"; echo
     done
   } > "$E" 2>&1
   # 兜底检查：若 ipinfo 全部失败，补 ipify/ipapi 样本

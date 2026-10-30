@@ -5,7 +5,7 @@
 - 被测链路：
   - 链路1（antigravity 真实路径）：pod → `pproxy-host.ponyllm.svc:8899`（tencent 100.105.241.39:8899，Basic auth）→ CONNECT → `https://daily-cloudcode-pa.googleapis.com/`（根路径 404 = 通）
   - 链路2（反向网关真实路径）：pod → `100.95.193.103:8899/pony_.../opencode/zen/v1/models`（预期 200）
-- 端到端：pod → `ponyllm-pod-service.ponyllm.svc:8080/v1/chat/completions`（Bearer sk-pony-7cc4cd2c0cb646a9a571067ce89eefa9）
+- 端到端：pod → `ponyllm-pod-service.ponyllm.svc:8080/v1/chat/completions`（Bearer <REDACTED>）
 
 ## 1. 链路探测统计（链路1 每 3s / 链路2 每 8s，实际窗口 16:49:44 → 17:13:20 CST）
 
@@ -62,7 +62,7 @@
 - ppx（直连 pproxy 隧道）：成功率 92.52%，ewma_ttft≈30.4s，stalls=738，max_gap=56.7s，latest_latency=19.5s
 
 ### 用量与探针（`history-usage.csv` / `metrics.txt`）
-- usage_hourly 近 30h 仅 opencode 路由有流量（今日 10:00–16:00 高峰，最高 222 req/h@13:00）；pony_31abcbd... token 路由近 24h 无独立记录（经 opencode 路由汇总）
+- usage_hourly 近 30h 仅 opencode 路由有流量（今日 10:00–16:00 高峰，最高 222 req/h@13:00）；<REDACTED> token 路由近 24h 无独立记录（经 opencode 路由汇总）
 - prober /metrics：synthetic probe success=1，failures=0（探针自身历史健康）
 
 ## 4. 影响量化结论

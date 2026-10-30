@@ -1,7 +1,7 @@
 import urllib.request, urllib.error, time, json
 
 GW = "http://ponyllm-pod-service.ponyllm.svc:8080/v1/chat/completions"
-TOKEN = "sk-pony-7cc4cd2c0cb646a9a571067ce89eefa9"
+TOKEN = "<REDACTED>"
 
 def do_stream(model, content, max_tokens):
     body = json.dumps({

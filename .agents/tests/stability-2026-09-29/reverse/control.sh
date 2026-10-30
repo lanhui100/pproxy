@@ -4,8 +4,8 @@
 #   2) management-side route test API                    -> control_route_test.csv
 set -u
 D="$(cd "$(dirname "$0")" && pwd)"
-SECRET="b96ee9195c590bc9a08c0284814bf1fead74e2f626d931ab14c892effa8a5882"
-ADMIN="Authorization: Bearer pony_admin_88d1b64c486f0a1cbdfbb089a5453ef6cf0b3afda0787f7a"
+SECRET="<REDACTED>"
+ADMIN="Authorization: Bearer <REDACTED>"
 MGMT="http://100.95.193.103:8900"
 UENC="$(python3 -c "import urllib.parse;print(urllib.parse.quote('https://httpbin.org/status/200'))")"
 D_OUT="$D/control_direct.csv"

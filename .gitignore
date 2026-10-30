@@ -56,3 +56,9 @@ desktop/src-tauri/tauri.updater.json
 
 # 本地中继下载的桌面安装包（不入库，用户自行取用）
 desktop/releases/
+
+# AI 测试运行产物（2026-10-30 治理修复：gateway-logs/metrics/probe CSV 属运行时采样，
+# 可再生产且曾夹带明文凭据；只保留脚本与 .md 结论。解跟踪用 git rm --cached，勿删磁盘文件）
+.agents/tests/**/logs/
+.agents/tests/**/*.txt
+.agents/tests/**/*.csv

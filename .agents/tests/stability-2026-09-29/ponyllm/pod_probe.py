@@ -1,6 +1,6 @@
 import urllib.request, urllib.error, time, base64, json, sys
 
-PROXY_B64 = base64.b64encode(b"user:0d1fa1ac39d22b5062c56fa25a33062921a8d4eb4492fc5f").decode()
+PROXY_B64 = base64.b64encode(b"user:<REDACTED>").decode()
 
 def req(url, method="GET", body=None, headers=None, timeout=20):
     r = urllib.request.Request(url, data=body, method=method)
@@ -17,7 +17,7 @@ def req(url, method="GET", body=None, headers=None, timeout=20):
         return round(time.time()-t0, 3), -1, type(e).__name__ + ":" + str(e)[:100]
 
 def proxy_https(url):
-    ph = urllib.request.ProxyHandler({"https": "http://user:0d1fa1ac39d22b5062c56fa25a33062921a8d4eb4492fc5f@pproxy-host.ponyllm.svc:8899"})
+    ph = urllib.request.ProxyHandler({"https": "http://user:<REDACTED>@pproxy-host.ponyllm.svc:8899"})
     opener = urllib.request.build_opener(ph)
     t0 = time.time()
     try:
@@ -40,7 +40,7 @@ while time.time() < end:
     f1.flush()
     if time.time() - last2 >= 8.0:
         last2 = time.time()
-        dt2, code2, err2 = req("http://100.95.193.103:8899/pony_31abcbd448a003be0ea27524d60973d8/opencode/zen/v1/models", headers={"User-Agent": "curl/8.0"})
+        dt2, code2, err2 = req("http://100.95.193.103:8899/<REDACTED>/opencode/zen/v1/models", headers={"User-Agent": "curl/8.0"})
         f2.write(f"{ts},opencode-rev,{code2},{dt2},{err2}\n")
         f2.flush()
     n += 1
