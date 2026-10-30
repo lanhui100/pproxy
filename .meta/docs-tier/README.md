@@ -1,33 +1,35 @@
-# docs-tier/ —— 文档分层契约（按 tier 分类法给每个事实安一个家）
+# docs-tier/ —— 文档分层（激活状态与家清单索引）
+
+> **口径真源**：tier 分类法、每个 tier 的家、写作规则、slop checklist 一律以 `docs/AGENTS.md` 为准
+> （agent 自动加载的家）。本文件只回答两件本目录独有的问题：**分层是否已激活**、**哪些家已就位**。
+> 不在此复制 tier 表——同一条规则两个家 = 迟早漂移（`docs/AGENTS.md` Slop checklist 第 1 条）。
+>
+> 激活声明：`.meta/meta.yaml` 的 `docs-tier: on`（判据 2.5：声明 on 即承诺分层已落地且无占位残留）。
 
 ## 已激活文档家清单
 
-本项目已正式激活文档分层管理。各 tier 职责明确，家载体分工如下：
+本仓文档分层已激活。各 tier 的家在 `docs/AGENTS.md` §Tier 分类法（唯一真源），此处只列就位状态：
 
-| tier | Job（该承载） | 不承载 | 本项目家（待填 / 骨架已生成标 ✓） |
-|---|---|---|---|
-| 常载命约 | 每次会话必载的 standing orders，1-3 行每条，链到 home | 故事/示例/复述 | `AGENTS.md` ✓（sync 投影） |
-| 文档标准 | tier 分类 / 写作规则 / slop checklist | 具体文档正文 | `docs/AGENTS.md` ✓（init 播种） |
-| 架构地图 | 组合、核心模块、接缝、扩展点（有序地图） | 类型细节/决策理由/状态标注 | `docs/architecture/` ✓ |
-| 决策记录 | 活动决策（当前态现在时） | 迁移计划/验收清单 | `.agents/notes/` ✓ |
-| 事故复盘 | 事故年表、证据、因果链、预防 | 教学叙事 | `docs/ops/` ✓ |
-| how-to | 带编号验证步的操作指引 | 设计理由（→ 决策记录） | `docs/dev-team/` ✓ |
-| 用户文档 | 产品面向指南 | 贡献流程/决策史 | 根目录 `README.md` ✓ |
-| 包/模块契约 | 单模块配置/语义/限制/扩展点 | 逐行注释复述 | 各包 `crates/*/README.md` ✓ |
-| 生成参考 | 从源码再生成的参考 + 新鲜度门禁 | 手编生成源 | `desktop/` 等独立端点 ✓ |
+| tier | 家（已就位） | 状态 |
+|---|---|---|
+| 根 AGENTS.md（常载 standing orders） | `AGENTS.md`、`CLAUDE.md`（`ponygo sync` 投影同源） | ✓ |
+| 文档标准 | `docs/AGENTS.md` | ✓ |
+| 架构地图 | `docs/architecture/CURRENT.md` | ✓ |
+| 决策记录（活动） | `.agents/notes/{proposed,implemented,rejected,archived}/` | ✓ |
+| 决策记录（历史存档，冻结只读） | `docs/architecture/decisions/`（001–008，不再新增） | ✓ 冻结 |
+| 包/模块契约 | `crates/{cli,core,engine,gate-server,server,transport}/README.md`、`desktop/README.md` | ✓ |
+| how-to（运行手册） | `docs/ops/`（DEPLOY / ROLLING-UPGRADE / TROUBLESHOOTING / DESKTOP-TROUBLESHOOTING / MUSE-REMOTE-CONNECT / CF-RISK-SOP） | ✓ |
+| 接口契约 | `docs/ops/API.md` | ✓ |
+| 事故复盘 | `docs/ops/stability-report-2026-09-29.md` | ✓ |
+| 用户文档 | `README.md`、`README.en.md`、`desktop/README.md` | ✓ |
 
-**放置速查**：bug→事故复盘；理由→决策记录；过程→how-to；契约→模块 README；
-standing orders→常载命约 + 理由链。
+**放置速查**（与 `docs/AGENTS.md` 同口径，此处只留最常用四条）：bug→事故复盘；理由→决策记录；
+过程→how-to；契约→包 README。
 
-## slop checklist（审计清单，原理：methodology §5.4）
+## 本目录不承载的事
 
-- 同一条规则出现在多个家（留一个家，其余链过去）；
-- 叙述历史/战争故事（previously/now/no longer——状态会腐烂）；
-- 实现状态标注（"implemented!"/"future:"——布局与 manifest 携带状态，散文不携带）；
-- 手抄目录/逐行注释复述（源码或生成器是权威）；
-- 段落墙、强调通胀（到处都是 bold = 没有强调）。
-
-## 词数预算（doc-sync 门，L2 选装）
-
-standing-doc 设上限，超限按 **relocate → condense → raise** 顺序处理；
-上限是护栏不是压减目标，目标线下保留至少 5% 余量。
+- **tier 分类表与写作规则**：在 `docs/AGENTS.md`（真源；改口径只改那里）。
+- **词数/体积门禁（doc-sync 门）**：**未实现，靠 review**——本仓无 `scripts/check-docs-budget.sh`，
+  pre-commit 与 CI 都没有词数判定；经验阈值（>1000 词的文档考虑拆分）只在 `docs/AGENTS.md` 声明，
+  不产生退出码。把它写成"已启用"就是虚假安全感。
+- **包文档豁免清单**：若某包确需豁免，写 `.meta/docs-tier/exemptions`（判据 1.9 的读取面），不写进本表。

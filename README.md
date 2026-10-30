@@ -196,6 +196,7 @@ pproxy serve
 | `PPROXY_TUNNEL_GATE_URL` / `PPROXY_TUNNEL_TOKEN_DATA` / `PPROXY_TUNNEL_TOKEN` / `PPROXY_TUNNEL_ALLOWLIST` | 隧道端点/数据面令牌（优先）/下发租户令牌/白名单（server 侧 `.pproxy.env`） |
 | `PPROXY_LISTEN_ADMIN` | 管理面监听地址（tailnet 重绑，systemd drop-in） |
 | `PPROXY_SERVICE_USER` | `m4_test.sh` 断言的服务运行用户（默认 `pproxy`） |
+| `PPROXY_YOUTUBE_PROXY` | YouTube/`googlevideo` 目标的**专属上游代理**：非空即启用（`http://host:port` 或 `socks5://host:port`，只写 `host:port` 按 HTTP CONNECT 处理），命中此类 host 时直接经它转发、不再消耗隧道出口；单条连接失败回落到常规隧道并打 WARN。空/未设 = 关闭分流（server 与 engine 均读同一变量） |
 
 ### 4. 桌面端配置
 
@@ -234,6 +235,8 @@ curl -fsSL https://raw.githubusercontent.com/lanhui100/pproxy/master/scripts/ins
 | [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md) | 部署、更新、回滚 |
 | [docs/ops/API.md](docs/ops/API.md) | 数据面/管理面协议 |
 | [docs/ops/TROUBLESHOOTING.md](docs/ops/TROUBLESHOOTING.md) | 故障排查手册 |
+| [docs/AGENTS.md](docs/AGENTS.md) | 文档标准与 tier 家索引（每个事实一个家） |
+| [desktop/README.md](desktop/README.md) | 桌面端（Windows/Tauri）：配置项、PAC 语义、构建发布、限制 |
 
 ## 代码结构
 

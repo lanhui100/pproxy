@@ -2,3 +2,6 @@
 # 版本由 git 派生；组件清单由 .meta/ + .agents/ 目录存在性充当；演进由 git + .agents/notes/ 的 ADR 充当。
 
 level: 2
+
+# 文档分层激活（判据 2.5）：on = 声明已落地且无占位残留；家清单真源 = docs/AGENTS.md
+docs-tier: on
