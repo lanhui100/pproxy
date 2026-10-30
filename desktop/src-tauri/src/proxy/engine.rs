@@ -38,6 +38,18 @@ impl std::fmt::Debug for Upstream {
     }
 }
 
+/// 会话有界生命周期（`None` = 无界）。
+///
+/// 回环引擎（127.0.0.1:18900）保持 `Default`（无界），行为零变更；
+/// LAN 监听注入 idle 300s / absolute 86400s（对齐 gate 数据面口径）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelayLimits {
+    /// 双向连续无字节窗口（有字节即重置）
+    pub idle: Option<std::time::Duration>,
+    /// 自 relay 启动起的总时长硬界（不随活动重置）
+    pub absolute: Option<std::time::Duration>,
+}
+
 /// 引擎配置。
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -50,6 +62,8 @@ pub struct EngineConfig {
     pub upstream: watch::Receiver<Option<Upstream>>,
     /// 待命隧道池（性能专项）：预建 WS 会话，establish 冷建连压到热态首帧。
     pub pool: std::sync::Arc<super::engine_tunnel::TunnelPool>,
+    /// 会话有界生命周期（LAN 监听注入；回环监听保持无界）
+    pub limits: RelayLimits,
 }
 
 impl Default for EngineConfig {
@@ -67,6 +81,7 @@ impl Default for EngineConfig {
             tunnel: trx,
             upstream: urx,
             pool: super::engine_tunnel::TunnelPool::with_size(prx, 0),
+            limits: RelayLimits::default(),
         }
     }
 }
@@ -229,9 +244,18 @@ fn split_host_port(authority: &str, default_port: u16) -> Option<(String, u16)> 
 
 const CLIENT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// 一次读头的产物：**头区**（可安全按 UTF-8 解析）与**头区之后的原始字节**。
+///
+/// 头之后的字节可能是二进制（如 CONNECT 后紧跟的 TLS ClientHello），必须按字节切片
+/// 原样转发，严禁经 `from_utf8_lossy` 转换（替换字符会污染首包）。
+pub(crate) struct ReadRequest {
+    pub head: String,
+    pub preamble: Vec<u8>,
+}
+
 /// 读取请求头（至 `\r\n\r\n`，上限 16 KiB，含 15 秒超时防 Slowloris 悬挂）。
 /// 对端在头完成前关闭 → `Ok(None)`（无数据可处理）。
-async fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<String>> {
+async fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<ReadRequest>> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 2048];
     let deadline = tokio::time::Instant::now() + CLIENT_READ_TIMEOUT;
@@ -243,11 +267,24 @@ async fn read_head(stream: &mut TcpStream) -> std::io::Result<Option<String>> {
             return Ok(None); // 对端关闭
         }
         buf.extend_from_slice(&tmp[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.len() > 16 * 1024 {
+        // 按字节定位头结束：头区走 UTF-8 解析，余下字节原样保留（二进制安全）
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let split = pos + 4;
+            let head = String::from_utf8_lossy(&buf[..split]).into_owned();
+            return Ok(Some(ReadRequest {
+                head,
+                preamble: buf[split..].to_vec(),
+            }));
+        }
+        if buf.len() > 16 * 1024 {
             break;
         }
     }
-    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
+    // 超限仍无终止符：整段按头处理（后续 parse_head 会 400），不猜测二进制边界
+    Ok(Some(ReadRequest {
+        head: String::from_utf8_lossy(&buf).into_owned(),
+        preamble: Vec::new(),
+    }))
 }
 
 /// 引擎自身的控制面：PAC 脚本（放行 /pac 或 /pac?t=...）。
@@ -267,11 +304,11 @@ async fn handle_conn(
     cfg: &EngineConfig,
     stats: &EngineStats,
 ) -> std::io::Result<()> {
-    let Some(head) = read_head(&mut stream).await? else {
+    let Some(req) = read_head(&mut stream).await? else {
         return Ok(());
     };
 
-    if is_pac_request(&head) {
+    if is_pac_request(&req.head) {
         let wl_snapshot = {
             let guard = cfg.whitelist.borrow();
             guard.clone()
@@ -286,7 +323,7 @@ async fn handle_conn(
         return stream.write_all(resp.as_bytes()).await;
     }
 
-    dispatch(stream, cfg, stats, head).await
+    dispatch(stream, cfg, stats, req).await
 }
 
 /// 解析已完成读头的请求并分派（回环引擎与 LAN 监听共用同一套 decide/建连逻辑）。
@@ -294,9 +331,9 @@ async fn dispatch(
     mut stream: TcpStream,
     cfg: &EngineConfig,
     stats: &EngineStats,
-    head: String,
+    req: ReadRequest,
 ) -> std::io::Result<()> {
-    let Some(parsed) = parse_head(&head) else {
+    let Some(parsed) = parse_head(&req.head) else {
         return stream
             .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
             .await;
@@ -312,14 +349,31 @@ async fn dispatch(
     match route {
         Route::Direct => {
             stats.direct.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            direct_relay(stream, parsed, &head).await
+            direct_relay(stream, parsed, &req.head, &req.preamble, cfg.limits).await
         }
         Route::Tunnel => {
             stats.tunneled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let upstream = cfg.upstream.borrow().clone();
             let result = match upstream {
-                Some(u) => super::engine_upstream::connect_and_relay(stream, parsed, &head, &u, stats).await,
-                None => super::engine_tunnel::connect_and_relay(stream, parsed, &head, cfg, stats).await,
+                Some(u) => super::engine_upstream::connect_and_relay(
+                    stream,
+                    parsed,
+                    &req.head,
+                    &req.preamble,
+                    &u,
+                    stats,
+                    cfg.limits,
+                )
+                .await,
+                None => super::engine_tunnel::connect_and_relay(
+                    stream,
+                    parsed,
+                    &req.head,
+                    &req.preamble,
+                    cfg,
+                    stats,
+                )
+                .await,
             };
             match result {
                 Ok(()) => Ok(()),
@@ -336,10 +390,15 @@ async fn dispatch(
 
 /// 直连路径：本机 dial 目标后双向拷贝。CONNECT 需先回 200 Established；
 /// absolute-form 则把请求头重写为 origin-form 转发。
+///
+/// 头区之后已读到的字节（`preamble`）按原始字节转发，保证 CONNECT 后的二进制首包
+/// （如 TLS ClientHello）不被 UTF-8 转换污染。
 async fn direct_relay(
     mut client: TcpStream,
     parsed: ReqHead,
     head: &str,
+    preamble: &[u8],
+    limits: RelayLimits,
 ) -> std::io::Result<()> {
     let target = match TcpStream::connect((parsed.host.as_str(), parsed.port)).await {
         Ok(t) => t,
@@ -359,11 +418,17 @@ async fn direct_relay(
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
-        relay_bidir(client, target).await
+        if !preamble.is_empty() {
+            target.write_all(preamble).await?;
+        }
+        relay_bidir_with_stats(client, target, None, limits).await
     } else {
         let forwarded = rebuild_request(head);
         target.write_all(forwarded.as_bytes()).await?;
-        relay_bidir(client, target).await
+        if !preamble.is_empty() {
+            target.write_all(preamble).await?;
+        }
+        relay_bidir_with_stats(client, target, None, limits).await
     }
 }
 
@@ -402,17 +467,12 @@ fn rewrite_first_line_absolute(first: &str) -> String {
 /// - **禁止 `select!` 取消另一方向**：被取消的 copy 已读未写的数据会静默丢弃，响应被截断；
 /// - 正确做法：单一循环里同时监听两端读，单端 EOF 时对该方向对端写半区发 FIN（半关闭），
 ///   另一端继续转发直到也 EOF，两端都 EOF 才退出。
-pub(crate) async fn relay_bidir(
-    a: TcpStream,
-    b: TcpStream,
-) -> std::io::Result<()> {
-    relay_bidir_with_stats(a, b, None).await
-}
-
+/// - `limits` 提供可选 idle / absolute 硬界（LAN 注入；回环监听为 `Default` 即无界）。
 pub(crate) async fn relay_bidir_with_stats(
     a: TcpStream,
     b: TcpStream,
     stats: Option<(&AtomicU64, &AtomicU64)>,
+    limits: RelayLimits,
 ) -> std::io::Result<()> {
     let (mut ar, mut aw) = a.into_split();
     let (mut br, mut bw) = b.into_split();
@@ -420,17 +480,37 @@ pub(crate) async fn relay_bidir_with_stats(
     let mut b_eof = false;
     let mut buf_a = [0u8; 8192];
     let mut buf_b = [0u8; 8192];
+    // 无界时给一个远端 deadline，select 分支由守卫条件禁用（与 transport 口径一致）
+    let idle_window = limits.idle.unwrap_or(std::time::Duration::from_secs(86400 * 365));
+    let started = tokio::time::Instant::now();
+    let mut idle_deadline = started + idle_window;
+    let absolute_deadline = started + limits.absolute.unwrap_or(std::time::Duration::from_secs(86400 * 365));
     loop {
         if a_eof && b_eof {
             break;
         }
         tokio::select! {
+            // 空闲超时：双向连续无字节窗口到点 → 双端关闭（防关闭开关后僵尸会话续命）
+            _ = tokio::time::sleep_until(idle_deadline), if limits.idle.is_some() => {
+                log::info!("relay closed: idle timeout reached after {idle_window:?}");
+                let _ = aw.shutdown().await;
+                let _ = bw.shutdown().await;
+                return Ok(());
+            }
+            // 绝对上限：单次 relay 总时长硬界（不随活动重置）
+            _ = tokio::time::sleep_until(absolute_deadline), if limits.absolute.is_some() => {
+                log::info!("relay closed: absolute lifetime reached");
+                let _ = aw.shutdown().await;
+                let _ = bw.shutdown().await;
+                return Ok(());
+            }
             n = ar.read(&mut buf_a), if !a_eof => {
                 let n = n?;
                 if n == 0 {
                     a_eof = true;
                     let _ = bw.shutdown().await;
                 } else {
+                    idle_deadline = tokio::time::Instant::now() + idle_window;
                     if let Some((up, _)) = stats {
                         up.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -443,6 +523,7 @@ pub(crate) async fn relay_bidir_with_stats(
                     b_eof = true;
                     let _ = aw.shutdown().await;
                 } else {
+                    idle_deadline = tokio::time::Instant::now() + idle_window;
                     if let Some((_, down)) = stats {
                         down.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -481,6 +562,15 @@ pub fn lan_port_from_env() -> u16 {
 /// 优雅停止的等待上限；超时兜底 abort，保证不泄漏监听任务。
 const LAN_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// LAN 会话空闲超时（对齐 gate CONNECT 数据面 300s）：双向连续无字节即回收。
+pub const LAN_SESSION_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+/// LAN 会话绝对上限（对齐 gate）：单次连接总时长硬界。
+pub const LAN_SESSION_ABSOLUTE: std::time::Duration = std::time::Duration::from_secs(86400);
+/// accept 连续失败阈值：短暂 backoff 重试，连续失败达阈值才退出（对齐 gate 重试语义）。
+const LAN_ACCEPT_MAX_CONSECUTIVE_ERRORS: u32 = 10;
+const LAN_ACCEPT_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_millis(50);
+const LAN_ACCEPT_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
 type TokenProvider = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 type YamlProvider = Arc<dyn Fn() -> String + Send + Sync>;
 
@@ -506,7 +596,13 @@ pub struct LanListener {
 
 impl LanListener {
     /// 绑定端口并启动 accept 循环；**绑定失败立即返回错误**（端口占用可回显给 UI）。
-    pub async fn start(cfg: LanConfig) -> std::io::Result<Self> {
+    ///
+    /// LAN 会话强制注入 idle/absolute 有界生命周期（回环引擎不入此路径，保持无界）。
+    pub async fn start(mut cfg: LanConfig) -> std::io::Result<Self> {
+        cfg.engine.limits = RelayLimits {
+            idle: Some(LAN_SESSION_IDLE),
+            absolute: Some(LAN_SESSION_ABSOLUTE),
+        };
         let listener = TcpListener::bind(&cfg.listen_addr).await?;
         let port = listener.local_addr()?.port();
         let (stop, stop_rx) = watch::channel(false);
@@ -514,7 +610,12 @@ impl LanListener {
         Ok(Self { port, stop, handle })
     }
 
-    /// 优雅停止：通知 accept 循环退出并等待任务结束；超时兜底 abort。
+    /// 监听任务是否仍在运行（accept 循环致命退出后为 false，供 UI 状态对齐实况）。
+    pub fn is_alive(&self) -> bool {
+        !self.handle.is_finished()
+    }
+
+    /// 优雅停止：通知 accept 循环与全部在飞会话退出，等待监听任务结束；超时兜底 abort。
     pub async fn stop(self) {
         let _ = self.stop.send(true);
         let mut handle = self.handle;
@@ -529,7 +630,20 @@ impl LanListener {
     }
 }
 
+/// 等待取消信号：stop 置 true 或发送端被丢弃（进程退出）都返回。
+async fn wait_cancelled(stop: &mut watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow() {
+            return;
+        }
+        if stop.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 async fn lan_accept_loop(listener: TcpListener, cfg: Arc<LanConfig>, mut stop: watch::Receiver<bool>) {
+    let mut consecutive_errors: u32 = 0;
     loop {
         tokio::select! {
             changed = stop.changed() => {
@@ -540,21 +654,43 @@ async fn lan_accept_loop(listener: TcpListener, cfg: Arc<LanConfig>, mut stop: w
             }
             accepted = listener.accept() => match accepted {
                 Ok((stream, peer)) => {
+                    consecutive_errors = 0;
                     let cfg = Arc::clone(&cfg);
                     let peer_is_loopback = peer.ip().is_loopback();
+                    let mut session_stop = stop.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_lan_conn(stream, peer_is_loopback, &cfg).await {
-                            log::warn!("lan proxy conn failed from {peer}: {e}");
+                        tokio::select! {
+                            // 开关关闭 → 取消在飞会话（drop future 即关闭双端 socket）
+                            _ = wait_cancelled(&mut session_stop) => {
+                                log::info!("lan session cancelled by toggle-off: {peer}");
+                            }
+                            r = handle_lan_conn(stream, peer_is_loopback, &cfg) => {
+                                if let Err(e) = r {
+                                    log::warn!("lan proxy conn failed from {peer}: {e}");
+                                }
+                            }
                         }
                     });
                 }
                 Err(e) => {
-                    log::warn!("lan accept failed: {e}");
-                    break;
+                    // 有限重试：短暂 backoff 后继续 accept，连续失败达阈值才退出（不因单次 EMFILE 永久停摆）
+                    consecutive_errors += 1;
+                    if consecutive_errors >= LAN_ACCEPT_MAX_CONSECUTIVE_ERRORS {
+                        log::warn!("lan accept failed {consecutive_errors} times consecutively, listener exiting: {e}");
+                        break;
+                    }
+                    let backoff = std::cmp::min(
+                        LAN_ACCEPT_BACKOFF_BASE * (1 << (consecutive_errors - 1).min(5)),
+                        LAN_ACCEPT_BACKOFF_MAX,
+                    );
+                    log::warn!("lan accept failed ({consecutive_errors}/{LAN_ACCEPT_MAX_CONSECUTIVE_ERRORS}), retry in {backoff:?}: {e}");
+                    tokio::time::sleep(backoff).await;
                 }
             }
         }
     }
+    // 退出即代表不再监听：下游以 LanListener::is_alive() 对齐实况
+    log::info!("lan accept loop exited");
 }
 
 /// LAN 连接处理：订阅端点 → 非回环鉴权 → 剥掉代理凭据后走既有分派。
@@ -563,12 +699,12 @@ async fn handle_lan_conn(
     peer_is_loopback: bool,
     cfg: &LanConfig,
 ) -> std::io::Result<()> {
-    let Some(head) = read_head(&mut stream).await? else {
+    let Some(mut req) = read_head(&mut stream).await? else {
         return Ok(());
     };
 
     // 1) 订阅端点：LAN 模式的 clash://install-config URL 指向本监听，扫码后 Clash 在此拉 YAML。
-    if let Some(query_token) = subscription_request(&head) {
+    if let Some(query_token) = subscription_request(&req.head) {
         let expected = (cfg.token_provider)().filter(|t| !t.trim().is_empty());
         if let Some(tok) = expected {
             match query_token {
@@ -586,16 +722,16 @@ async fn handle_lan_conn(
         let token = (cfg.token_provider)().filter(|t| !t.trim().is_empty());
         let authorized = token
             .as_deref()
-            .map(|t| lan_auth_ok(&head, t))
+            .map(|t| lan_auth_ok(&req.head, t))
             .unwrap_or(false);
         if !authorized {
             return write_407(&mut stream).await;
         }
     }
 
-    // 3) 客户端给本监听的 Proxy-Authorization 不外泄给上游/目标。
-    let cleaned = strip_proxy_authorization(&head);
-    dispatch(stream, &cfg.engine, &cfg.stats, cleaned).await
+    // 3) 客户端给本监听的 Proxy-Authorization 不外泄给上游/目标；preamble 保持原始字节。
+    req.head = strip_proxy_authorization(&req.head);
+    dispatch(stream, &cfg.engine, &cfg.stats, req).await
 }
 
 /// 解析 `Proxy-Authorization: Basic base64(user:pass)`（头名大小写不敏感）。
@@ -1144,7 +1280,140 @@ mod integration {
             .expect("LAN 监听应能绑定");
         let addr = listener.port;
         assert!(addr > 0);
+        assert!(listener.is_alive(), "运行中应报在监听");
         listener.stop().await;
+    }
+
+    // ---- 有界会话生命周期（L3 必修 2）与二进制首包（L3 必修 4） ----
+
+    #[tokio::test]
+    async fn relay_idle_timeout_closes_idle_session() {
+        let echo_addr = echo_listener().await;
+        let (mut client, srv) = socket_pair().await;
+        let target = TcpStream::connect(echo_addr).await.unwrap();
+        let limits = RelayLimits { idle: Some(std::time::Duration::from_millis(80)), absolute: None };
+        let h = tokio::spawn(async move { relay_bidir_with_stats(srv, target, None, limits).await });
+        // 双方都不发数据 → idle 到点必须关闭，而不是永久挂着
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("idle 超时应关闭会话")
+            .unwrap();
+        assert_eq!(n, 0, "idle 超时后客户端应收到 EOF");
+        h.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_absolute_limit_closes_long_lived_session() {
+        let echo_addr = echo_listener().await;
+        let (mut client, srv) = socket_pair().await;
+        let target = TcpStream::connect(echo_addr).await.unwrap();
+        let limits = RelayLimits { idle: None, absolute: Some(std::time::Duration::from_millis(80)) };
+        let h = tokio::spawn(async move { relay_bidir_with_stats(srv, target, None, limits).await });
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("absolute 上限应关闭会话")
+            .unwrap();
+        assert_eq!(n, 0, "absolute 上限后客户端应收到 EOF");
+        h.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_activity_resets_idle_deadline() {
+        let echo_addr = echo_listener().await;
+        let (mut client, srv) = socket_pair().await;
+        let target = TcpStream::connect(echo_addr).await.unwrap();
+        let idle = std::time::Duration::from_millis(600);
+        let limits = RelayLimits { idle: Some(idle), absolute: None };
+        tokio::spawn(async move { relay_bidir_with_stats(srv, target, None, limits).await });
+        // 每 200ms 一次往返、持续 ~600ms：若活动不重置 idle，早该被关；能通即证明重置生效
+        for _ in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            client.write_all(b"PING").await.unwrap();
+            let mut buf = [0u8; 64];
+            let n = tokio::time::timeout(std::time::Duration::from_secs(1), client.read(&mut buf))
+                .await
+                .expect("活动会话不应被判空闲")
+                .unwrap();
+            assert_eq!(&buf[..n], b"PING", "活动期间会话必须保持可用");
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_connect_forwards_binary_preamble_unchanged() {
+        let echo_addr = echo_listener().await;
+        let cfg = EngineConfig::default();
+        let stats = Arc::new(EngineStats::default());
+        let (mut client, srv) = socket_pair().await;
+        tokio::spawn(async move {
+            handle_conn(srv, &cfg, &stats).await.ok();
+        });
+        // CONNECT 头 + 二进制首包（模拟 TLS ClientHello 首段）同一包发出
+        let binary = [0xFFu8, 0x00, 0xFE, 0x01, 0x80, 0xC3, 0x28];
+        let mut req = format!("CONNECT {echo_addr} HTTP/1.1\r\n\r\n").into_bytes();
+        req.extend_from_slice(&binary);
+        client.write_all(&req).await.unwrap();
+
+        let mut all = Vec::new();
+        loop {
+            let mut tmp = [0u8; 256];
+            let n = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut tmp))
+                .await
+                .expect("应收到 200 与回显")
+                .unwrap();
+            assert!(n > 0, "会话提前关闭");
+            all.extend_from_slice(&tmp[..n]);
+            if let Some(pos) = all.windows(4).position(|w| w == b"\r\n\r\n") {
+                if all.len() >= pos + 4 + binary.len() {
+                    break;
+                }
+            }
+        }
+        let pos = all.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&all[..pos]).to_string();
+        assert!(head.contains("200 Connection Established"), "应先回 200，实际: {head}");
+        assert_eq!(
+            &all[pos + 4..pos + 4 + binary.len()],
+            &binary,
+            "二进制首包不得被 UTF-8 转换污染"
+        );
+    }
+
+    #[tokio::test]
+    async fn lan_toggle_off_cancels_inflight_sessions() {
+        let echo_addr = echo_listener().await;
+        let cfg = lan_cfg(Some("tok"), "mixed-port: 7890\n");
+        let listener = LanListener::start(LanConfig { listen_addr: "127.0.0.1:0".into(), ..cfg })
+            .await
+            .unwrap();
+        assert!(listener.is_alive());
+        let mut client = TcpStream::connect(("127.0.0.1", listener.port)).await.unwrap();
+        // 回环来源免鉴权，直接建立到 echo 的隧道
+        client
+            .write_all(format!("CONNECT {echo_addr} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut buf = [0u8; 256];
+        let n = client.read(&mut buf).await.unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("200 Connection Established"));
+        client.write_all(b"PING").await.unwrap();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(1), client.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"PING", "会话在飞时应可正常中继");
+
+        // 关闭「允许局域网设备接入」：在飞会话必须被取消关闭（不是继续代理）
+        listener.stop().await;
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut buf))
+            .await
+            .expect("stop 后在飞会话必须被取消");
+        match closed {
+            Ok(0) => {}
+            Ok(n) => panic!("stop 后仍收到 {n} 字节，会话未被取消"),
+            Err(_) => {} // RST 同样视为已关闭
+        }
     }
 }
 

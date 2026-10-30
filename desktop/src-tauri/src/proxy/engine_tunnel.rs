@@ -12,8 +12,8 @@ use tokio::net::TcpStream;
 #[allow(unused_imports)]
 pub use pproxy_transport::{
     bind_target, classify_egress, is_google_or_ai_host, order_endpoints, probe_gate_rtt,
-    probe_via_gate, relay_bidir_ws, token_fp8_of, try_establish_url, AUTH_401_MARKER, Egress,
-    TunnelPool, WsPair,
+    probe_via_gate, relay_bidir_ws, relay_bidir_ws_bounded, token_fp8_of, try_establish_url,
+    AUTH_401_MARKER, Egress, TunnelPool, WsPair,
 };
 
 use super::engine::{EngineConfig, EngineStats, Kind, ReqHead};
@@ -296,6 +296,7 @@ pub async fn connect_and_relay(
     mut client: TcpStream,
     parsed: ReqHead,
     head: &str,
+    preamble: &[u8],
     cfg: &EngineConfig,
     stats: &EngineStats,
 ) -> std::io::Result<()> {
@@ -314,9 +315,24 @@ pub async fn connect_and_relay(
                     client
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         .await?;
+                    // CONNECT 后已读到的二进制首包（如 TLS ClientHello）：原样送入隧道
+                    if !preamble.is_empty() {
+                        match egress {
+                            Egress::Cf => &stats.cf_up,
+                            Egress::Vercel => &stats.vercel_up,
+                            Egress::NativeVps => &stats.rn_up,
+                        }
+                        .fetch_add(preamble.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                        use futures_util::SinkExt as _;
+                        ws_tx
+                            .send(tokio_tungstenite::tungstenite::Message::Binary(preamble.to_vec()))
+                            .await
+                            .map_err(io)?;
+                    }
                 } else {
                     let full_req = rebuild_request(head);
-                    let bytes = full_req.into_bytes();
+                    let mut bytes = full_req.into_bytes();
+                    bytes.extend_from_slice(preamble);
                     match egress {
                         Egress::Cf => &stats.cf_up,
                         Egress::Vercel => &stats.vercel_up,
@@ -329,7 +345,18 @@ pub async fn connect_and_relay(
                         .await
                         .map_err(io)?;
                 }
-                return relay_bidir_ws(client, ws_tx, ws_rx, egress, stats).await;
+                // LAN 注入的 idle/absolute 界在 WS relay 内生效；回环监听为 Default（无界）
+                return relay_bidir_ws_bounded(
+                    client,
+                    ws_tx,
+                    ws_rx,
+                    egress,
+                    stats,
+                    cfg.limits.idle,
+                    cfg.limits.absolute,
+                )
+                .await
+                .map(|_| ());
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -448,6 +475,7 @@ pub(crate) mod tests {
             tunnel: trx,
             upstream: urx,
             pool: TunnelPool::with_size(prx, 0),
+            limits: crate::proxy::engine::RelayLimits::default(),
         }
     }
 
@@ -463,6 +491,7 @@ pub(crate) mod tests {
             tunnel: trx,
             upstream: urx,
             pool,
+            limits: crate::proxy::engine::RelayLimits::default(),
         }
     }
 

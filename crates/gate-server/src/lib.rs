@@ -11,6 +11,8 @@
 //! 3. Diagnostics (`/debug`):
 //!    - Reports token hash presence & length for alignment check
 
+pub mod connect_proxy;
+
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -371,6 +373,7 @@ async fn handle_clash_subscription(
     };
 
     // 补充标准 Clash 订阅响应头，杜绝移动端/Mihomo 在拉取订阅时 EOF
+    // 响应体内含长期令牌：必须 no-store，禁止中间缓存/客户端落盘复用
     (
         StatusCode::OK,
         [
@@ -378,6 +381,7 @@ async fn handle_clash_subscription(
             ("content-disposition", "inline; filename=\"clash.yaml\""),
             ("subscription-userinfo", "upload=0; download=0; total=107374182400; expire=0"),
             ("profile-update-interval", "24"),
+            ("cache-control", "no-store"),
         ],
         yaml,
     )
@@ -423,7 +427,7 @@ proxies:
 proxy-groups:
   - name: "PROXY"
     type: select
-    url: "http://cp.cloudflare.com/generate_204"
+    url: "https://www.gstatic.com/generate_204"
     interval: 300
     proxies:
       - "Pony-Tunnel"
@@ -915,6 +919,10 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
         revoked_tokens,
         gate_admin_token,
     });
+
+    // 契约 C1：标准 HTTP CONNECT 正向代理裸 TCP 监听（env GATE_CONNECT_LISTEN，未设置则不启动）。
+    // 放在 lib 入口而非仅 bin：CLI `pproxy gate-server` 路径也经此启动，避免能力分叉。
+    connect_proxy::spawn_from_env(state.clone());
 
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;

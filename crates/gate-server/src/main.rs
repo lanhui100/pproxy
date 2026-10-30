@@ -1,5 +1,3 @@
-mod connect_proxy;
-
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -63,8 +61,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = pproxy_gate_server::build_router(state.clone());
 
-    // 契约 C1：标准 HTTP CONNECT 正向代理裸 TCP 监听（env GATE_CONNECT_LISTEN，未设置则不启动）
-    connect_proxy::spawn_from_env(state);
+    // 契约 C1：标准 HTTP CONNECT 正向代理裸 TCP 监听（env GATE_CONNECT_LISTEN，未设置则不启动）。
+    // 模块已移入 lib（`pproxy_gate_server::connect_proxy`），与 CLI 的 run_server 路径同源。
+    pproxy_gate_server::connect_proxy::spawn_from_env(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())

@@ -51,18 +51,22 @@ CLI 用例同样用临时 `HOME` 承载 `config.toml` / `clash.yaml`，`admin` �
 | `G3` | C1 / G3 | `example.com:80` → 403（仅 443 放行） |
 | `C1-ACL` | C1 | `127.0.0.1:443` → 403（`is_valid_host` 拒回环/私网） |
 | `G4` | C2 / G4 | 生产端到端 `https://rn.ponygo.fun:8443` → `https://www.gstatic.com/generate_204` = 204（**默认 SKIP**，仅设 `PPROXY_E2E_TOKEN` 时执行） |
-| `C1-502` | C1 | 黑洞目标 `192.0.2.1:443` → 502（建连失败有界返回，30s 预算） |
+| `C1-BOUNDED` | C1（演进） | 不可达/被拒目标（`192.0.2.1:443`、`192.88.99.1:443`）→ 码 ∈ {403,502} **且** ≤30s 内返回（性质是"不无限挂起"） |
+| `C1-ACL-ENCODINGS` | C1（演进） | ACL 编码绕过族 12 变体全部 403：`0.0.0.0`、`2130706433`、`0x7f000001`、`[::ffff:127.0.0.1]`、`[::]`、`[0:0:0:0:0:0:0:1]`、`100.64.0.1`、`[fe80::1]`、`10.`、`172.16.`、`192.168.`、`[fc00::1]` |
 | `G5a` | C5 / G5 | `/api/clash?token=probe` → 401 + body `invalid token` |
 | `G5b` | C5 | `/clash` 缺令牌 → 401 + body `missing token` |
 | `G5c` | C5 | 有效令牌 → 200 + `subscription-userinfo` / `profile-update-interval` / `content-disposition` |
 | `G5d` | C5 | `/clash` 别名端点同口径 → 200 |
+| `HEALTH-gate` | C3（演进） | 组自检 `url: "https://www.gstatic.com/generate_204"`，全文无 `http://cp.cloudflare.com` |
 | `G6-gate` | C3 / G6 | gate 生成器：`port: 8443`、`username`/`password`=请求令牌、无 `Authorization: Bearer` |
 | `G7-gate` | C6 / G7 | 尾部 `- MATCH,PROXY`、`GEOIP,CN,DIRECT` 紧邻其前、5 个探活域+内网 CIDR 在全 PROXY 之前 |
 | `G6-cli` | C3 / G6 | CLI 生成器同口径（`~/.pony/clash.yaml` 或 stdout 物理产物） |
+| `HEALTH-cli` | C3（演进） | CLI 组自检 URL 同口径 |
 | `G7-cli` | C6 / G7 | CLI 分流尾部同口径 |
 | `G6-cli-failfast` | C3 末条 | token 缺失 → 非零退出，且绝不产出 `username: ""` 空凭据 |
 | `G8-static` | C4 / G8 | 桌面端源码级：8899 / `PPROXY_LAN_PORT` / `0.0.0.0` / 407+质询头 / 回环豁免 / lib.rs 接线 / `allow-lan: false` |
 | `G6-desktop-static` | C3 | 桌面端 `build_clash_meta_yaml` 函数体内同口径 + 生成器返回 `Result`（fail-fast） |
+| `HEALTH-desktop-static` | C3（演进） | 桌面端 `build_clash_meta_yaml` 体内组自检 URL 同口径 |
 | `G7-desktop-static` | C6 | 同函数体内规则尾部与探活域顺序 |
 | `AT1a` | L2-AT 超时 | 半截首部后静默 → 服务端在 30s+5s margin 内有界关闭 |
 | `AT1b` | L2-AT 超时 | 连上后零字节 → 同上（首字节窗口） |
@@ -96,3 +100,17 @@ CLI 用例同样用临时 `HOME` 承载 `config.toml` / `clash.yaml`，`admin` �
 - 固定迭代次数 + 固定超时预算，无随机 sleep、无概率重试；轮询仅用于"等服务拉起"。
 - 每条断言失败必须带实测值与片段；辅助脚本退出码必须透传（`run_helper`，有自检用例）。
 - 变异/负控制全部发生在临时目录副本上，绝不写仓库文件；套件自建进程在 `EXIT` trap 中回收。
+
+## 契约演进记录（2026-10-30 Lead 裁决，本套件已迁移）
+
+1. **C1 ACL 补充条款**：CONNECT 目标必须是**解析后的公网 IP**；loopback / private / link-local /
+   unspecified / multicast / CGNAT `100.64.0.0/10` / 文档段（`192.0.2.0/24`、`198.51.100.0/24`、
+   `203.0.113.0/24`、`2001:db8::/32`）/ `fc00::/7` / `fe80::/10` 一律 `403`。
+   背景：L3 安全审查 BLOCKING —— 旧实现是字符串前缀黑名单，`0.0.0.0`、`2130706433`、
+   `0x7f000001`、`[::ffff:127.0.0.1]` 等编码可绕过内网拦截。
+   黑盒钉：`C1-ACL`（回环）+ `C1-ACL-ENCODINGS`（12 变体）。
+2. **`C1-502` → `C1-BOUNDED`**：文档段目标现按新 ACL 返回 403，502 不再是唯一正确码；
+   断言改为「状态码 ∈ {403,502} 且 ≤30s 内返回」——钉的性质是**有界返回**，不是具体码。
+3. **组自检 URL**：三处生成器的 `proxy-groups[].url` 必须为
+   `https://www.gstatic.com/generate_204`，全文不得出现 `http://cp.cloudflare.com`
+   （原明文 80 会让所有节点健康检查恒红）；订阅 200 响应必须带 `cache-control: no-store`。

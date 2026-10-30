@@ -1,5 +1,5 @@
-//! 标准 HTTP/1.1 CONNECT 正向代理数据面（契约 C1，`crates/gate-server/src/main.rs` 的
-//! 独立裸 TCP 监听，地址取 env `GATE_CONNECT_LISTEN`）。
+//! 标准 HTTP/1.1 CONNECT 正向代理数据面（契约 C1；lib 模块，由 `main.rs` 与 `run_server`
+//! 两条启动路径共同调用，独立裸 TCP 监听，地址取 env `GATE_CONNECT_LISTEN`）。
 //!
 //! 与 axum 路由面的关系：`/ws` 是 WS↔TCP 桥（Clash 等客户端需自行实现帧协议），
 //! 而 Clash Meta `type: http` + `tls: true` 节点只会说标准 `CONNECT host:443`。
@@ -8,19 +8,23 @@
 //!
 //! 令牌语义与 `lib.rs::handle_ws` 严格同源，不另造第二套：
 //! - `usr_live_` 前缀 → `pproxy_core::TokenVerifier` Ed25519 验签 + `revoked_tokens` 撤销表；
-//! - 其它 → `sha256(token) == tunnel_token_hash`（回退单口令模式）。
+//! - 其它 → `sha256(token) == tunnel_token_hash`（回退单口令模式，常量时间比较）。
 //!
-//! Basic 解析复用 `pproxy_core::auth::parse_basic_auth`（user 或 pass 任一命中即通过）。
+//! ACL（SSRF 防线）：**先解析再判定**，不看字符串前缀——
+//! 目标 authority 先判是否为 IP 字面量（含十进制/十六进制/八进制 IPv4、IPv4-mapped IPv6、
+//! `::1` 完整写法、`::` 未指定地址），是则对解析结果做公网判定；非字面量则 `lookup_host`
+//! 解析出全部地址、**任一**非公网即拒；最终 `TcpStream::connect` 只用已校验的 `IpAddr`，
+//! 不对域名二次解析（封 DNS rebinding 时间窗）。
 //!
 //! fail-closed：`GATE_CONNECT_LISTEN` 未设置/为空 → 不监听，仅打一行 info。
 
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use pproxy_core::UserTokenClaims;
-use pproxy_gate_server::{is_valid_host, sha256_hex, ServerConfig};
+use crate::{is_valid_host, sha256_hex, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -33,7 +37,7 @@ const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// 空闲超时：任一方向 300 s 无字节即断开
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-/// 目标建连超时
+/// 目标建连（含域名解析）超时
 const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 /// 单连接绝对生命周期上限（对齐 nginx stream `proxy_timeout 86400s`）。
 /// 进程级可覆盖：`GATE_CONNECT_MAX_LIFETIME_SECS`（缺失/非法 → 86400）。
@@ -68,6 +72,12 @@ impl Principal {
             Principal::User(c) => Some(c.quota_bytes),
         }
     }
+}
+
+/// 目标解析失败类别：ACL 拒绝（403）vs 不可达（502）。
+enum TargetError {
+    AclDenied,
+    Dial,
 }
 
 /// 按 env 启动 CONNECT 监听；未配置则不启动（fail-closed，仅一行 info）。
@@ -123,8 +133,8 @@ async fn run(addr: SocketAddr, cfg: Arc<ServerConfig>) -> std::io::Result<()> {
 }
 
 async fn serve(mut stream: TcpStream, peer: SocketAddr, cfg: Arc<ServerConfig>, max_lifetime: u64) {
-    let raw_head = match read_head(&mut stream).await {
-        Ok(h) => h,
+    let raw = match read_head(&mut stream).await {
+        Ok(b) => b,
         Err(reason) => {
             tracing::debug!(%peer, reason, "CONNECT head rejected");
             let _ = stream.write_all(RESP_400).await;
@@ -132,7 +142,18 @@ async fn serve(mut stream: TcpStream, peer: SocketAddr, cfg: Arc<ServerConfig>, 
         }
     };
 
-    let head = String::from_utf8_lossy(&raw_head);
+    // 首部与首包可能同段到达（管线化 TLS ClientHello）：head 只取到 `\r\n\r\n`，
+    // 其后字节必须原样作为 leftover 转发给上游，绝不丢弃。
+    let (head_bytes, leftover) = match split_head(&raw) {
+        Some(v) => v,
+        None => {
+            let _ = stream.write_all(RESP_400).await;
+            return;
+        }
+    };
+    let leftover = leftover.to_vec();
+
+    let head = String::from_utf8_lossy(head_bytes);
     let (host, port) = match parse_connect_head(&head) {
         Some(v) => v,
         None => {
@@ -152,12 +173,25 @@ async fn serve(mut stream: TcpStream, peer: SocketAddr, cfg: Arc<ServerConfig>, 
         }
     };
 
-    // 2. 目标 ACL：仅 443 + 合法 host
-    if port != 443 || !acl_host_ok(&host) {
-        tracing::warn!(%peer, host = %host, port, "CONNECT denied by ACL (only port 443 + valid host)");
+    // 2. 目标 ACL：仅 443，且目标必须是「解析后判定为公网」的地址
+    if port != 443 {
+        tracing::warn!(%peer, host = %host, port, "CONNECT denied by ACL (only port 443)");
         let _ = stream.write_all(RESP_403).await;
         return;
     }
+    let upstream_ip = match resolve_target(&host, port).await {
+        Ok(ip) => ip,
+        Err(TargetError::AclDenied) => {
+            tracing::warn!(%peer, host = %host, port, "CONNECT denied by ACL (non-public target)");
+            let _ = stream.write_all(RESP_403).await;
+            return;
+        }
+        Err(TargetError::Dial) => {
+            tracing::warn!(%peer, host = %host, port, "CONNECT target resolution failed");
+            let _ = stream.write_all(RESP_502).await;
+            return;
+        }
+    };
 
     // 3. 配额入口检查（与 /ws 同口径：已用量 >= 配额即拒绝）
     let uid = principal.sub().map(|s| s.to_string());
@@ -171,20 +205,21 @@ async fn serve(mut stream: TcpStream, peer: SocketAddr, cfg: Arc<ServerConfig>, 
         }
     }
 
-    // 4. 建连目标
-    let dial = match host.parse::<Ipv6Addr>() {
-        Ok(_) => format!("[{host}]:{port}"),
-        Err(_) => format!("{host}:{port}"),
-    };
-    let upstream = match tokio::time::timeout(DIAL_TIMEOUT, TcpStream::connect(&dial)).await {
+    // 4. 建连：只用已校验的 IpAddr，不再按域名二次解析（封 DNS rebinding 窗口）
+    let upstream = match tokio::time::timeout(
+        DIAL_TIMEOUT,
+        TcpStream::connect(SocketAddr::new(upstream_ip, port)),
+    )
+    .await
+    {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            tracing::warn!(host = %host, port, error = %e, "CONNECT upstream connect failed");
+            tracing::warn!(host = %host, ip = %upstream_ip, port, error = %e, "CONNECT upstream connect failed");
             let _ = stream.write_all(RESP_502).await;
             return;
         }
         Err(_) => {
-            tracing::warn!(host = %host, port, "CONNECT upstream connect timeout");
+            tracing::warn!(host = %host, ip = %upstream_ip, port, "CONNECT upstream connect timeout");
             let _ = stream.write_all(RESP_502).await;
             return;
         }
@@ -194,12 +229,9 @@ async fn serve(mut stream: TcpStream, peer: SocketAddr, cfg: Arc<ServerConfig>, 
     if stream.write_all(RESP_200).await.is_err() {
         return;
     }
-    tracing::info!(%peer, host = %host, port, "CONNECT established");
+    tracing::info!(%peer, host = %host, ip = %upstream_ip, port, "CONNECT established");
 
-    // 5. 中继（含：客户端可能已把 TLS 首个字节与首部同包送达的 leftover）
-    let leftover = head_end_offset(&raw_head)
-        .map(|i| raw_head[i..].to_vec())
-        .unwrap_or_default();
+    // 5. 中继（leftover = 首部同包到达的 payload 首段）
     relay(stream, upstream, leftover, cfg, uid, quota, max_lifetime).await;
 }
 
@@ -313,11 +345,14 @@ where
 }
 
 /// 首部读取：首字节 30 s，其余首部自首字节起 30 s，上限 16 KiB。
+///
+/// 返回**本次读到的全部字节**（可能含首部之后的 payload）；切分交给 [`split_head`]，
+/// 绝不在此截断——否则与首部同包到达的 TLS ClientHello 会被静默丢弃。
 async fn read_head(stream: &mut TcpStream) -> Result<Vec<u8>, &'static str> {
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut chunk = [0u8; 2048];
 
-    // 阶段 1：首个字节
+    // 阶段 1：首个字节（本段可能已含完整首部 + payload，必须整段保留）
     let n = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, stream.read(&mut chunk)).await {
         Err(_) => return Err("first_byte_timeout"),
         Ok(Err(_)) => return Err("io_error"),
@@ -325,8 +360,9 @@ async fn read_head(stream: &mut TcpStream) -> Result<Vec<u8>, &'static str> {
         Ok(Ok(n)) => n,
     };
     buf.extend_from_slice(&chunk[..n]);
-    if let Some(i) = head_end_offset(&buf) {
-        return Ok(buf[..i].to_vec());
+    if head_end_offset(&buf).is_some() {
+        // 整段返回（含首部之后的 payload），由 split_head 切分
+        return Ok(buf);
     }
 
     // 阶段 2：剩余首部
@@ -347,12 +383,18 @@ async fn read_head(stream: &mut TcpStream) -> Result<Vec<u8>, &'static str> {
         };
         buf.extend_from_slice(&chunk[..n]);
         if head_end_offset(&buf).is_some() {
-            if buf.len() > MAX_HEAD_BYTES {
-                return Err("head_too_large");
-            }
             return Ok(buf);
         }
     }
+}
+
+/// 在 `\r\n\r\n` 处切分：`(首部含空行, 其后 payload)`。首部超限返回 `None`。
+fn split_head(buf: &[u8]) -> Option<(&[u8], &[u8])> {
+    let end = head_end_offset(buf)?;
+    if end > MAX_HEAD_BYTES {
+        return None;
+    }
+    Some((&buf[..end], &buf[end..]))
 }
 
 /// 返回首部结束（`\r\n\r\n` 之后第一个字节）的偏移；未结束返回 `None`。
@@ -383,17 +425,177 @@ fn parse_authority(authority: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port.parse::<u16>().ok()?))
 }
 
-/// ACL host 校验：`is_valid_host`（拒内网/回环，与 /ws 同源）+
-/// 字符集白名单（`[A-Za-z0-9.-]` 或 IPv6 字面量），堵死花式注入。
-fn acl_host_ok(host: &str) -> bool {
-    if host.is_empty() || !is_valid_host(host) {
+/// 把目标 host 解析成一个**已校验为公网**的 IP，供建连使用（SSRF 防线）。
+///
+/// 顺序：IP 字面量（含十进制/十六进制/八进制 IPv4、IPv4-mapped IPv6）→ 直接判定；
+/// 否则 DNS 解析全部地址 → 任一非公网即拒 → 返回首个地址。
+async fn resolve_target(host: &str, port: u16) -> Result<IpAddr, TargetError> {
+    if let Some(ip) = parse_ip_literal(host) {
+        return if is_public_ip(ip) {
+            Ok(ip)
+        } else {
+            Err(TargetError::AclDenied)
+        };
+    }
+
+    // 域名：字符集与基本形态校验（拒 localhost / 内网后缀 / 超长）
+    if !is_domain_host(host) || !is_valid_host(host) {
+        return Err(TargetError::AclDenied);
+    }
+
+    let addrs = match tokio::time::timeout(DIAL_TIMEOUT, tokio::net::lookup_host((host, port)))
+        .await
+    {
+        Ok(Ok(it)) => it.map(|sa| sa.ip()).collect::<Vec<_>>(),
+        _ => return Err(TargetError::Dial),
+    };
+    if addrs.is_empty() {
+        return Err(TargetError::Dial);
+    }
+    // Lead 裁决口径从严：任一解析结果非公网即整体拒绝
+    if addrs.iter().any(|ip| !is_public_ip(*ip)) {
+        return Err(TargetError::AclDenied);
+    }
+    Ok(addrs[0])
+}
+
+/// IP 字面量解析：标准写法 + 十进制/十六进制/八进制 IPv4（`2130706433`、`0x7f000001`、`0177.0.0.1`）。
+fn parse_ip_literal(host: &str) -> Option<IpAddr> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    parse_legacy_ipv4(host).map(IpAddr::V4)
+}
+
+fn is_domain_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// 兼容 inet_aton 风格的 IPv4 字面量（`a`/`a.b`/`a.b.c`/`a.b.c.d`，各段可为十进制/0x 十六进制/前导 0 八进制）。
+fn parse_legacy_ipv4(s: &str) -> Option<Ipv4Addr> {
+    if s.is_empty() || s.contains(':') {
+        return None;
+    }
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() > 4 {
+        return None;
+    }
+    let nums: Vec<u32> = parts
+        .iter()
+        .map(|p| parse_u32_auto(p))
+        .collect::<Option<Vec<_>>>()?;
+    let last = nums.len() - 1;
+    let mut acc: u32 = 0;
+    for (i, n) in nums.iter().enumerate() {
+        if i == last {
+            // 末段占用剩余全部位宽（8..=32 位），用 u64 避免 1u32 << 32 溢出
+            let bits: u32 = 8 * (4 - last as u32);
+            let space: u64 = 1u64 << bits;
+            if (*n as u64) >= space {
+                return None;
+            }
+            acc = (((acc as u64) << bits) | (*n as u64)) as u32;
+        } else {
+            if *n > 255 {
+                return None;
+            }
+            acc = (acc << 8) | n;
+        }
+    }
+    Some(Ipv4Addr::from(acc))
+}
+
+fn parse_u32_auto(p: &str) -> Option<u32> {
+    if p.is_empty() {
+        return None;
+    }
+    if let Some(h) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+        if h.is_empty() {
+            return None;
+        }
+        u32::from_str_radix(h, 16).ok()
+    } else if p.len() > 1 && p.starts_with('0') {
+        u32::from_str_radix(&p[1..], 8).ok()
+    } else {
+        p.parse::<u32>().ok()
+    }
+}
+
+/// 公网可达性判定：loopback / private / link-local / unspecified / multicast /
+/// unique-local / CGNAT / 保留与文档段 全部视为非公网。
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_public_v4(v4),
+        IpAddr::V6(v6) => is_public_v6(v6),
+    }
+}
+
+fn is_public_v4(ip: Ipv4Addr) -> bool {
+    if ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+    {
         return false;
     }
-    if host.contains(':') {
-        return host.parse::<Ipv6Addr>().is_ok();
+    let o = ip.octets();
+    if o[0] == 0 {
+        return false; // 0.0.0.0/8
     }
-    host.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    if o[0] == 100 && (64..=127).contains(&o[1]) {
+        return false; // 100.64.0.0/10 CGNAT / Tailscale
+    }
+    if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+        return false; // 198.18.0.0/15 benchmark
+    }
+    if o[0] == 192 && o[1] == 0 && o[2] == 0 {
+        return false; // 192.0.0.0/24 IETF
+    }
+    if o[0] == 192 && o[1] == 88 && o[2] == 99 {
+        return false; // 192.88.99.0/24 6to4 relay anycast
+    }
+    if o[0] >= 240 {
+        return false; // 240.0.0.0/4 保留（含 255.255.255.255）
+    }
+    true
+}
+
+fn is_public_v6(ip: Ipv6Addr) -> bool {
+    // IPv4-mapped（::ffff:a.b.c.d）→ 按内层 IPv4 判定
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_public_v4(v4);
+    }
+    let seg = ip.segments();
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    if (seg[0] & 0xfe00) == 0xfc00 {
+        return false; // fc00::/7 unique local
+    }
+    if (seg[0] & 0xffc0) == 0xfe80 {
+        return false; // fe80::/10 link local
+    }
+    if (seg[0] & 0xffc0) == 0xfec0 {
+        return false; // fec0::/10 site local（已弃用）
+    }
+    if seg[0] == 0x2001 && seg[1] == 0x0db8 {
+        return false; // 2001:db8::/32 文档段
+    }
+    if seg[0] == 0x0064 && seg[1] == 0xff9b {
+        return false; // 64:ff9b::/96 NAT64（可映射任意 v4）
+    }
+    // ::/96 已弃用的 IPv4-compatible 与未指定段：一律拒绝
+    if seg[..6].iter().all(|s| *s == 0) {
+        return false;
+    }
+    true
 }
 
 /// 凭据校验：`X-Pony-Token` 优先，其次 `Proxy-Authorization: Basic`（user 或 pass 任一命中）。
@@ -465,7 +667,8 @@ fn principal_for_token(cfg: &ServerConfig, token: &str) -> Option<Principal> {
         if expected.is_empty() {
             return None;
         }
-        if sha256_hex(token) == expected {
+        // 常量时间比较（与 lib.rs 管理端点同口径），杜绝时序侧信道
+        if pproxy_core::user::constant_time_eq(sha256_hex(token).as_bytes(), expected.as_bytes()) {
             Some(Principal::Tunnel)
         } else {
             None
@@ -478,4 +681,119 @@ fn used_bytes(cfg: &ServerConfig, uid: &str) -> u64 {
         .get(uid)
         .map(|v| v.load(Ordering::Relaxed))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pipe_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (client, server)
+    }
+
+    /// B1 回归：首部与 payload 同一次 write 到达时，payload 必须原样保留为 leftover。
+    #[tokio::test]
+    async fn head_and_payload_in_single_write_keeps_leftover() {
+        let (mut client, mut server) = pipe_pair().await;
+        let head = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+        let payload = [0x16u8, 0x03, 0x01, 0x02, 0x00, 0x01, 0xAA, 0xBB];
+        let mut one_write = head.to_vec();
+        one_write.extend_from_slice(&payload);
+        client.write_all(&one_write).await.unwrap();
+
+        let raw = read_head(&mut server).await.expect("head ok");
+        let (head_part, leftover) = split_head(&raw).expect("head terminated");
+        assert!(head_part.ends_with(b"\r\n\r\n"));
+        assert_eq!(leftover, &payload, "payload sent with head must be preserved");
+        assert_eq!(head_part, head, "head must be sliced exactly at CRLFCRLF");
+    }
+
+    /// 首部拆两次 write 仍正常（不得因改动回归）。
+    #[tokio::test]
+    async fn head_split_across_writes_is_ok() {
+        let (mut client, mut server) = pipe_pair().await;
+        let (a, b) = b"CONNECT example.com:443 HTTP/1.1\r\nHost: ex".split_at(20);
+        client.write_all(a).await.unwrap();
+        client.write_all(b).await.unwrap();
+        client
+            .write_all(b"ample.com:443\r\n\r\n")
+            .await
+            .unwrap();
+        let raw = read_head(&mut server).await.expect("head ok");
+        let (_, leftover) = split_head(&raw).unwrap();
+        assert!(leftover.is_empty());
+    }
+
+    /// 首部超 16 KiB → Err（不得无界缓冲）。
+    #[tokio::test]
+    async fn oversized_head_is_rejected() {
+        let (mut client, mut server) = pipe_pair().await;
+        let mut raw = b"CONNECT example.com:443 HTTP/1.1\r\nX-Junk: ".to_vec();
+        raw.extend(std::iter::repeat_n(b'A', 20 * 1024));
+        raw.extend_from_slice(b"\r\n\r\n");
+        client.write_all(&raw).await.unwrap();
+        assert!(read_head(&mut server).await.is_err());
+    }
+
+    /// B2 回归：编码变体必须解析为对应 IP（后续 is_public_ip 拒绝）。
+    #[test]
+    fn ip_literal_encodings_are_parsed() {
+        let cases: &[(&str, &str)] = &[
+            ("127.0.0.1", "127.0.0.1"),
+            ("2130706433", "127.0.0.1"),
+            ("0x7f000001", "127.0.0.1"),
+            ("0177.0.0.1", "127.0.0.1"),
+            ("0.0.0.0", "0.0.0.0"),
+            ("0", "0.0.0.0"),
+            ("::1", "::1"),
+            ("0:0:0:0:0:0:0:1", "::1"),
+            ("::", "::"),
+            ("::ffff:127.0.0.1", "::ffff:127.0.0.1"),
+            ("::ffff:169.254.169.254", "::ffff:169.254.169.254"),
+        ];
+        for (input, expect) in cases {
+            let ip = parse_ip_literal(input).unwrap_or_else(|| panic!("{input} must parse as IP"));
+            assert_eq!(ip.to_string(), *expect, "input={input}");
+            assert!(!is_public_ip(ip), "{input} -> {ip} must be non-public");
+        }
+    }
+
+    #[test]
+    fn public_literals_pass_acl() {
+        for s in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            let ip = parse_ip_literal(s).expect("literal");
+            assert!(is_public_ip(ip), "{s} should be public");
+        }
+        for s in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "198.18.0.1",
+            "240.0.0.1",
+        ] {
+            let ip = parse_ip_literal(s).expect("literal");
+            assert!(!is_public_ip(ip), "{s} must be non-public");
+        }
+        for s in ["fc00::1", "fe80::1", "::ffff:10.0.0.1", "2001:db8::1"] {
+            let ip = parse_ip_literal(s).expect("literal");
+            assert!(!is_public_ip(ip), "{s} must be non-public");
+        }
+    }
+
+    /// 域名路径：带内网解析的名字不得被当作 IP 字面量放过，且 ACL 判定必须落到 IP。
+    #[tokio::test]
+    async fn literal_targets_resolve_without_dns() {
+        let err = resolve_target("0x7f000001", 443).await;
+        assert!(matches!(err, Err(TargetError::AclDenied)));
+        let err = resolve_target("0.0.0.0", 443).await;
+        assert!(matches!(err, Err(TargetError::AclDenied)));
+        let err = resolve_target("::ffff:127.0.0.1", 443).await;
+        assert!(matches!(err, Err(TargetError::AclDenied)));
+    }
 }

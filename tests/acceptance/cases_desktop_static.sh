@@ -76,3 +76,15 @@ case_G7_desktop_static() {
     record G7-desktop-static 1 "$detail（运行态豁免：Tauri 构建图外，见文件头理由）"
   fi
 }
+
+# HEALTH-desktop-static — 桌面端组自检 URL 口径（源码级，作用域同 G6-desktop-static）
+case_HEALTH_desktop_static() {
+  [ -f "$DESKTOP_LIB" ] || { record HEALTH-desktop-static 1 "桌面端 lib.rs 缺失：$DESKTOP_LIB"; return; }
+  local detail rc=0
+  detail=$(run_helper "$HELPERS/desktop_static.py" health --file "$DESKTOP_LIB") || rc=$?
+  if [ "$rc" = "0" ]; then
+    record HEALTH-desktop-static 0 "$detail"
+  else
+    record HEALTH-desktop-static 1 "$detail（运行态豁免：Tauri 构建图外）"
+  fi
+}

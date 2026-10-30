@@ -92,7 +92,37 @@
     "qa"
   ],
   "roster_count": 5,
-  "l3_reviews": [],
+  "l3_reviews": [
+    {
+      "perspective": "A 并发/资源泄漏（review-l3a.json）",
+      "verdict": "FAIL(2 BLOCKING)",
+      "findings": 9,
+      "blocking": [
+        "connect_proxy.rs:329 首包同段截断丢字节",
+        "connect_proxy.rs:395 ACL 编码绕过→SSRF"
+      ],
+      "resolution": "已修并复核"
+    },
+    {
+      "perspective": "B 安全/协议一致性（review-l3b.json）",
+      "verdict": "FAIL(2 BLOCKING)",
+      "findings": 4,
+      "blocking": [
+        "connect_proxy.rs:389 ACL 可绕过（0.0.0.0/2130706433/[::ffff:127.0.0.1]）",
+        "connect_proxy.rs:329 首部同包截断"
+      ],
+      "resolution": "已修；另收 2 条 ADVISORY（constant_time_eq、cache-control no-store）"
+    },
+    {
+      "perspective": "方案取舍/残留风险（review-plan.json）",
+      "verdict": "FAIL(1 BLOCKING)",
+      "findings": 9,
+      "blocking": [
+        "lib.rs:426 组自检 URL 走 80，而 ACL 只放行 443 → 节点健康检查恒红"
+      ],
+      "resolution": "三处生成器已改 https 探活；ADVISORY 1(engine.rs 同源)、4(并发上限)、7(回滚步骤)、8(令牌走 query) 登记 backlog B016"
+    }
+  ],
   "nfr": ".dev-team/nfr-baseline.json",
   "deploy": {
     "target": "rn.ponygo.fun (RackNerd VPS, 192.210.231.8)",
@@ -106,9 +136,12 @@
     "cargo_check_workspace": "exit 0 (基线 d0a661b 与提交态各一次)",
     "cargo_test_workspace": "exit 0（提交态隔离 worktree: 119+106+2+16+3+7+46+3+1+1+17 passed）",
     "cargo_test_desktop": "exit 0, 80 passed",
-    "acceptance_suite": "bash tests/acceptance/run.sh -> PASS=27 FAIL=0 SKIP=1 ACCEPT_EXIT=0；设 PPROXY_E2E_TOKEN 后 PASS=28 FAIL=0 SKIP=0 ACCEPT_EXIT=0",
+    "acceptance_suite": "bash tests/acceptance/run.sh（PPROXY_E2E_TOKEN 已设）→ PASS=32 FAIL=0 SKIP=0 ACCEPT_EXIT=0（契约演进后）",
     "prod_e2e_curl": "curl -x https://rn.ponygo.fun:8443 -U <token>:<token> -> google 204 / youtube 200 / ipinfo.io/ip=192.210.231.8",
     "real_client": "Mihomo Meta v1.19.2 加载生产下发 YAML：listening 127.0.0.1:7890，经其访问 google 204 / youtube 200 / ipinfo 出口 192.210.231.8，日志 match Match using PROXY[Pony-Tunnel]",
-    "staged_isolation": "git apply 暂存 diff 到 /tmp/verify-head(HEAD) 后 cargo check --workspace --all-targets exit 0 且 cargo test --workspace exit 0"
-  }
+    "staged_isolation": "git apply 暂存 diff 到 /tmp/verify-head(HEAD) 后 cargo check --workspace --all-targets exit 0 且 cargo test --workspace exit 0",
+    "prod_acl_after_fix": "生产 8443：127.0.0.1 / 0.0.0.0 / 2130706433 / 0x7f000001 全部 403；正常路径 gstatic=204",
+    "prod_redeploy": "ACL 修复版二进制已重部署（backup .bak-*），pony-gate-rust active，3101/3102 均在监听"
+  },
+  "l3_convergence": "3 路独立审查对 ACL 绕过（A、B、方案保守）与首包截断（A、B）独立复现，交叉印证成立"
 }

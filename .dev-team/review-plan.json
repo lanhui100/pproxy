@@ -1,0 +1,100 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewed_commit": "a4f9766f432aae07e3458c558bfaebad9edffd75",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "rev-connect-2026-10-30-independent",
+    "fresh_context": true
+  },
+  "executed_by": "rev-connect-2026-10-30-independent",
+  "attestation": {
+    "self_signed": false,
+    "note": "独立只读审查；未参与实现，未修改被审文件"
+  },
+  "audited_scopes": [
+    ".dev-team/contract.md",
+    ".agents/notes/implemented/bug-fix/2026-10-30-fix-clash-meta-scan-no-proxy.md",
+    "crates/gate-server/src/connect_proxy.rs",
+    "crates/gate-server/src/lib.rs",
+    "crates/cli/src/cmd/clash.rs",
+    "desktop/src-tauri/src/lib.rs",
+    "desktop/src-tauri/src/proxy/engine.rs",
+    "deploy/nginx/stream-connect.conf",
+    "systemd/pony-gate-rust.service.d-connect.conf"
+  ],
+  "findings": [
+    {
+      "file": "crates/gate-server/src/lib.rs",
+      "line": 426,
+      "rule": "CORRECTNESS",
+      "severity": "BLOCKING",
+      "counterexample_cmd": "grep -n 'url: \"http://cp.cloudflare.com/generate_204\"' crates/gate-server/src/lib.rs crates/cli/src/cmd/clash.rs desktop/src-tauri/src/lib.rs; sed -n '156p' crates/gate-server/src/connect_proxy.rs; sed -n '366,371p' crates/gate-server/src/connect_proxy.rs",
+      "why": "三处生成器把 proxy-group 健康检查 URL 写成 http://cp.cloudflare.com/generate_204（80 端口），而 C1 ACL 只放行 port==443（connect_proxy.rs:156）：Mihomo 对该 URL 做周期探活时要么 CONNECT cp.cloudflare.com:80 → 403 acl_denied，要么走 absolute-form GET → parse_connect_head 只认 CONNECT 前缀（:368）→ 400。结果是下发给手机的配置里 Pony-Tunnel 节点在 select 组 interval:300 的自检中永远显示超时/不可用——恰好复现本 ADR 要消灭的『代理没生效』体感。修法：三处 url 改 https（如 https://cp.cloudflare.com/generate_204）或 ACL 放行 80，二者择一，不需动架构。"
+    },
+    {
+      "file": "crates/gate-server/src/lib.rs",
+      "line": 475,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '437,440p;473,475p' crates/gate-server/src/lib.rs; printf 'CONNECT cp.cloudflare.com:80 HTTP/1.1\\r\\nHost: cp.cloudflare.com:80\\r\\n\\r\\n' | nc -w 5 127.0.0.1 3102",
+      "why": "C6 的 MATCH,PROXY 把『未命中』一律送进只能 443 的出口：① 所有 plain HTTP（:80）流量由原来的直连成功退化为 403/400 硬失败；② 内网 CIDR 规则全带 no-resolve（:437-440），域名形态的局域网目标（nas.lan / openwrt.local:443）不会命中 IP-CIDR，直接落到 MATCH,PROXY 被送进隧道，在 VPS 侧解析用户内网域名必然 502。ADR『代价可控』只计了 GEOIP,CN，未计这一层。建议：ACL 增加 80（或可配 GATE_CONNECT_ALLOW_PORTS=443,80），并把 DOMAIN-SUFFIX,lan/local 前置 DIRECT。"
+    },
+    {
+      "file": "crates/gate-server/src/connect_proxy.rs",
+      "line": 328,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '326,330p;347,353p;199,203p' crates/gate-server/src/connect_proxy.rs",
+      "why": "首部与首包同段到达时 read_head 在 :329 返回 buf[..i]（已截断），而 serve 在 :200 又对这份已截断的 raw_head 重新 head_end_offset → 结果恒为空，:219 的 leftover 补偿在此之前被抹掉；只有首部跨多次 read 的路径（:353 返回整段 buf）才真的留下 leftover。即：对『CONNECT 与 TLS ClientHello 同包/紧随其后』的乐观客户端会静默吞掉 TLS 字节，握手挂到 30 s 超时。属该分支自己的注释（:199）声称已处理却未处理——修为 read_head 返回 (head, leftover) 元组即可。"
+    },
+    {
+      "file": "desktop/src-tauri/src/proxy/engine.rs",
+      "line": 246,
+      "rule": "CORRECTNESS",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '234,251p;596,598p;356,364p' desktop/src-tauri/src/proxy/engine.rs",
+      "why": "C4 新增的 LAN 监听复用 read_head：读到 \\r\\n\\r\\n 或 16 KiB 即整段返回并 String::from_utf8_lossy（:250），C4 路径随后只把 head 字符串交给 dispatch（:598）。两个后果：① CONNECT 之后同包的 TLS 字节既未写回客户端也未转发到目标（direct_relay 的 Kind::Connect 分支只回 200，engine.rs:356-361），局域网手机若预发数据 → 握手超时；② 非 CONNECT 的 binary body（明文 POST 上传）经 lossy 转换会被替换字符污染。回环 18900 早有此形状，但 C4 把它第一次暴露给用户 Wi-Fi 上的真实客户端，应在 LAN 路径改为字节级 head+leftover 透传。"
+    },
+    {
+      "file": "crates/gate-server/src/connect_proxy.rs",
+      "line": 146,
+      "rule": "CONCURRENCY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '107,122p;145,172p' crates/gate-server/src/connect_proxy.rs; grep -n 'user_active_conns' crates/gate-server/src/lib.rs crates/gate-server/src/connect_proxy.rs",
+      "why": "同一套令牌在 /ws 上受 max_conns*4（lib.rs:567-573）+ ConnGuard 计数约束，而 C1 只做了配额（:162-172），没有 user_active_conns 自增/自减，也没有 per-IP 或全局限速：accept 循环（:107-122）对任何来源无条件 spawn。公网 8443 打开后，单个有效 token（甚至无凭据连接，每条占 30 s 首字节窗口 × 2×16 KiB 缓冲）即可把 fd/内存推到 nginx worker_connections 上限。建议至少补 ConnGuard 同口径并发上限并复用 429/403。"
+    },
+    {
+      "file": "crates/gate-server/src/lib.rs",
+      "line": 881,
+      "rule": "CONTRACT_BREAK",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -rn 'spawn_from_env' crates/; sed -n '881,886p;926,932p' crates/gate-server/src/lib.rs; sed -n '810,815p' crates/cli/src/main.rs",
+      "why": "C1 只在独立 binary（main.rs:67）落地；库入口 run_server（:881，被 CLI `pproxy gate-server` 在 crates/cli/src/main.rs:813 调用）完全不含 spawn_from_env。两条启动路径能力分叉：同一份 GATE_CONNECT_LISTEN 在 CLI 路径下被静默忽略，而 /clash 仍照常 200 下发 8443 节点 → 又一次『导入成功但不可用』。C1 属于数据面契约，应在 run_server 里同样 spawn（或让 CLI 子命令直接 exec binary）。"
+    },
+    {
+      "file": "crates/gate-server/src/connect_proxy.rs",
+      "line": 74,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "sed -n '74,95p' crates/gate-server/src/connect_proxy.rs; sed -n '396,401p' crates/gate-server/src/lib.rs",
+      "why": "fail-closed 的代价是静默：未设/非法 GATE_CONNECT_LISTEN 只落到一行 info/error 日志（:78-88），env 只由 systemd drop-in 提供（重装 /opt/pproxy 或换 unit 时 drop-in 极易丢失），而订阅生成器（:396）完全不感知监听是否存在，照样返回 200 + port:8443。C1 的 fail-closed 是安全上的正确取舍，但缺少就绪耦合：建议 /debug 增加 connect_listen 状态位，且生成器在监听缺失时降级为 fail-fast 或返回告警头，另配一条 `ss -tlnp | grep 3102` 的部署自检。"
+    },
+    {
+      "file": "deploy/nginx/stream-connect.conf",
+      "line": 10,
+      "rule": "NFR_VIOLATION",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -nE 'ufw|include|reload|restart|rollback|回滚' deploy/nginx/stream-connect.conf systemd/pony-gate-rust.service.d-connect.conf",
+      "why": "三处不可逆面（nginx.conf 顶层 include、ufw allow 8443/tcp、systemd drop-in）都只有前向部署清单，没有一条回滚步骤。回滚并非零成本可知：删 drop-in 后必须 daemon-reload + restart 才算真正关闭 3102；`ufw delete allow 8443/tcp` 与删除 /etc/nginx/stream-connect/ 后 reload 应在同一清单里写明，否则回退只能靠记忆。建议两份文件各加 5 行『回滚』段（含 rsync/备份 nginx.conf 的前置）。"
+    },
+    {
+      "file": "desktop/src-tauri/src/lib.rs",
+      "line": 2529,
+      "rule": "SECURITY",
+      "severity": "ADVISORY",
+      "counterexample_cmd": "grep -n 'api/clash?token\\|clash.yaml?token' desktop/src-tauri/src/lib.rs; grep -n 'get(\"token\")' crates/gate-server/src/lib.rs",
+      "why": "订阅令牌走 query（https://host/api/clash?token=<token>，另 :1506 局域网同形），而 C5 的 token 就是 TUNNEL_TOKEN 主口令（sha256 单口令模式无配额）。query 会落进 nginx access_log、journal、扫码分享文本与浏览器历史，泄漏面比 header 大一个量级，且泄漏即等于给出无限配额出口。建议改成 header（Authorization/专用 X-Pony-Sub-Token）或签发仅能拉订阅的短期 sub-token；至少确认 nginx 侧对该路径 log_format 做了脱敏。"
+    }
+  ]
+}

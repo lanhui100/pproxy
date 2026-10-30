@@ -9,7 +9,7 @@ use base64::Engine as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use super::engine::{relay_bidir_with_stats, EngineStats, Kind, ReqHead, Upstream};
+use super::engine::{relay_bidir_with_stats, EngineStats, Kind, RelayLimits, ReqHead, Upstream};
 
 fn io(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(format!("upstream: {e}"))
@@ -137,8 +137,10 @@ pub async fn connect_and_relay(
     mut client: TcpStream,
     parsed: ReqHead,
     head: &str,
+    preamble: &[u8],
     up: &Upstream,
     stats: &EngineStats,
+    limits: RelayLimits,
 ) -> std::io::Result<()> {
     // 建连阶段可重试（尚未向客户端写 200）；一旦开始 relay 不再重试
     let mut last_err: Option<std::io::Error> = None;
@@ -152,10 +154,15 @@ pub async fn connect_and_relay(
                     client
                         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                         .await?;
+                    let mut target = target;
+                    if !preamble.is_empty() {
+                        target.write_all(preamble).await?;
+                    }
                     return relay_bidir_with_stats(
                         client,
                         target,
                         Some((&stats.upstream_up, &stats.upstream_down)),
+                        limits,
                     )
                     .await;
                 }
@@ -166,10 +173,14 @@ pub async fn connect_and_relay(
                     .upstream_up
                     .fetch_add(forwarded.len() as u64, std::sync::atomic::Ordering::Relaxed);
                 target.write_all(forwarded.as_bytes()).await?;
+                if !preamble.is_empty() {
+                    target.write_all(preamble).await?;
+                }
                 return relay_bidir_with_stats(
                     client,
                     target,
                     Some((&stats.upstream_up, &stats.upstream_down)),
+                    limits,
                 )
                 .await;
             }
@@ -304,8 +315,10 @@ mod tests {
                 client,
                 ReqHead { kind: Kind::Connect, host: "github.com".into(), port: 443 },
                 "CONNECT github.com:443 HTTP/1.1\r\n\r\n",
+                &[],
                 &up2,
                 &stats2,
+                RelayLimits::default(),
             )
             .await
         });
@@ -348,8 +361,10 @@ mod tests {
             client,
             ReqHead { kind: Kind::Connect, host: "github.com".into(), port: 443 },
             "CONNECT github.com:443 HTTP/1.1\r\n\r\n",
+            &[],
             &up,
             &stats,
+            RelayLimits::default(),
         )
         .await
         .expect_err("半死上游必须超时报错");
@@ -395,8 +410,10 @@ mod tests {
                 client,
                 ReqHead { kind: Kind::Plain, host: "x".into(), port: 80 },
                 head,
+                &[],
                 &up2,
                 &stats,
+                RelayLimits::default(),
             )
             .await
         });
@@ -427,8 +444,10 @@ mod tests {
             client,
             ReqHead { kind: Kind::Connect, host: "github.com".into(), port: 443 },
             "CONNECT github.com:443 HTTP/1.1\r\n\r\n",
+            &[],
             &up,
             &stats,
+            RelayLimits::default(),
         )
         .await
         .expect_err("非 2xx 必须报错");

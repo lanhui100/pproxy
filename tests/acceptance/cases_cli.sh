@@ -102,3 +102,18 @@ case_G6_cli_failfast() {
     record G6-cli-failfast 1 "token 缺失时期望非零退出且无空凭据，实测 rc=${rc} 空凭据='${bad:-无}' stderr: $(head -c 160 "$CLI_ERR" | tr '\n' ' ')"
   fi
 }
+
+# HEALTH-cli — CLI 生成器组自检 URL 口径（https 204 端点、禁明文 http://cp.cloudflare.com）
+case_HEALTH_cli() {
+  local yaml detail rc=0
+  if ! yaml=$(_cli_yaml_source "$CLI_HOME"); then
+    record HEALTH-cli 1 "生成器未产出 YAML（依赖 G6-cli 红相），健康检查 URL 无法验证"
+    return
+  fi
+  detail=$(run_helper "$HELPERS/yaml_contract.py" health --file "$yaml") || rc=$?
+  if [ "$rc" = "0" ]; then
+    record HEALTH-cli 0 "cli 生成器组自检: $detail"
+  else
+    record HEALTH-cli 1 "cli 生成器组自检不符: $detail"
+  fi
+}

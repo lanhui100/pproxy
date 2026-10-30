@@ -152,6 +152,31 @@ def cmd_rules(args):
     return 0
 
 
+def cmd_health(args):
+    """桌面端组自检 URL 口径（作用域同 fields：仅 build_clash_meta_yaml 函数体）。"""
+    try:
+        src = read(args.file)
+    except OSError as exc:
+        print(f"FAIL: read error: {exc}")
+        return 1
+    body_lines = extract_fn(src)
+    if not body_lines:
+        print(f"FAIL: 未定位到 fn {FN_NAME}")
+        return 1
+    text = "\n".join(body_lines)
+    expect = "https://www.gstatic.com/generate_204"
+    problems = []
+    if expect not in text:
+        problems.append(f"缺健康检查 URL {expect}")
+    if "http://cp.cloudflare.com" in text:
+        problems.append("仍出现 http://cp.cloudflare.com（明文 80 健康检查）")
+    if problems:
+        print("FAIL: " + "; ".join(problems) + f" | fn {FN_NAME}: lines={len(body_lines)}")
+        return 1
+    print(f"OK: 桌面端 health url={expect} plaintext_cp_cloudflare=absent (fn {FN_NAME}: lines={len(body_lines)})")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="桌面端 Clash 生成器源码级契约断言")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -161,6 +186,9 @@ def main():
     p = sub.add_parser("rules")
     p.add_argument("--file", required=True)
     p.set_defaults(fn=cmd_rules)
+    p = sub.add_parser("health")
+    p.add_argument("--file", required=True)
+    p.set_defaults(fn=cmd_health)
     args = parser.parse_args()
     return args.fn(args)
 

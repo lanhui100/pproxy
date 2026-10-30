@@ -105,26 +105,64 @@ case_C1_ACL() {
   fi
 }
 
-# C1 失败码契约：目标建连失败/超时 → 502（用 TEST-NET-1 192.0.2.0/24 做确定黑洞目标）
-case_C1_502() {
-  if ! _connect_precondition; then record C1-502 1 "$(_precond_detail)"; return; fi
-  local out
-  out=$(curl -s --noproxy '' -o /dev/null -m 30 -x "$PROXY_URL" -U "$TOKEN:$TOKEN" -v "https://192.0.2.1/" 2>&1)
-  local detail
-  detail=$(grep -iE 'response [0-9]+|HTTP/1\.[01] [0-9]{3}' <<<"$out" | head -3 | tr '\n' '|')
-  if grep -qE '(response 502|HTTP/1\.[01] 502)' <<<"$out"; then
-    record C1-502 0 "CONNECT 192.0.2.1:443（黑洞目标）→ 502（建连失败有界返回，预算 30s）"
+# C1-BOUNDED — 不可达/被拒目标必须「有界返回」（C1 演进条款，2026-10-30 Lead 裁决）。
+#
+# 口径演进说明：原用例 `C1-502` 打 192.0.2.1（TEST-NET-1 文档段）期望 502；
+# 新 ACL「目标必须是公网 IP」生效后该目标被正确拒绝为 403，故 502 不再是唯一正确码。
+# 真正要钉的性质是「不无限挂起」：状态码 ∈ {403, 502} 且在 30s 预算内有返回。
+case_C1_BOUNDED() {
+  if ! _connect_precondition; then record C1-BOUNDED 1 "$(_precond_detail)"; return; fi
+  local out1 out2 rc1=0 rc2=0
+  # 1) 文档段目标（新 ACL 必拒）：192.0.2.1（TEST-NET-1）
+  out1=$(run_helper "$HELPERS/raw_probe.py" probe \
+    --connect-host "$CONNECT_HOST" --connect-port "$CONNECT_PORT" \
+    --authority "192.0.2.1:443" --token "$TOKEN" --expect "403,502" --budget 30) || rc1=$?
+  # 2) 已退役公网段（可能不可路由 → 502，或按 ACL 拒绝 → 403）
+  out2=$(run_helper "$HELPERS/raw_probe.py" probe \
+    --connect-host "$CONNECT_HOST" --connect-port "$CONNECT_PORT" \
+    --authority "192.88.99.1:443" --token "$TOKEN" --expect "403,502" --budget 30) || rc2=$?
+  if [ "$rc1" = "0" ] && [ "$rc2" = "0" ]; then
+    record C1-BOUNDED 0 "不可达/被拒目标有界返回（码 ∈ {403,502}，≤30s）| $out1 | $out2"
   else
-    record C1-502 1 "CONNECT 黑洞目标期望 502，实测片段: ${detail:-<无响应/连接失败>}"
+    record C1-BOUNDED 1 "不可达/被拒目标未在预算内返回 {403,502}（rc1=$rc1 rc2=$rc2）| $out1 | $out2"
   fi
 }
 
-# G4 — 生产端到端（公网 https://rn.ponygo.fun:8443 → 真实出海 204）。
-#
-# 凭据纪律（硬约束）：
-#   * 令牌只从环境变量 PPROXY_E2E_TOKEN 读取，**不落盘、不打印、不进 argv**
-#     （用 `curl -K -` 从 stdin 读配置，避免 token 出现在 `ps` 与任何日志里）；
-#   * 未设置该 env 时本用例输出 [SKIP]，绝不猜测/复用其它凭据。
+# C1-ACL-ENCODINGS — ACL 编码绕过族（L3 安全审查 BLOCKING 的黑盒回归钉）。
+# 全部变体都必须解析后判定为「非公网」并返回 403；任何 200/502/挂起都算失败。
+ACL_BYPASS_AUTHORITIES=(
+  "0.0.0.0:443"
+  "2130706433:443"
+  "0x7f000001:443"
+  "[::ffff:127.0.0.1]:443"
+  "[::]:443"
+  "[0:0:0:0:0:0:0:1]:443"
+  "100.64.0.1:443"
+  "[fe80::1]:443"
+  "10.0.0.1:443"
+  "172.16.0.1:443"
+  "192.168.1.1:443"
+  "[fc00::1]:443"
+)
+case_C1_ACL_ENCODINGS() {
+  if ! _connect_precondition; then record C1-ACL-ENCODINGS 1 "$(_precond_detail)"; return; fi
+  local bad="" detail="" auth out rc
+  for auth in "${ACL_BYPASS_AUTHORITIES[@]}"; do
+    rc=0
+    out=$(run_helper "$HELPERS/raw_probe.py" probe \
+      --connect-host "$CONNECT_HOST" --connect-port "$CONNECT_PORT" \
+      --authority "$auth" --token "$TOKEN" --expect "403" --budget 15) || rc=$?
+    if [ "$rc" != "0" ]; then
+      bad="$bad $auth→$(sed -n 's/.*status=\([^ ]*\).*/\1/p' <<<"$out")"
+    fi
+  done
+  if [ -z "$bad" ]; then
+    record C1-ACL-ENCODINGS 0 "12 个编码/私网/未指定/多播/CGNAT/链路本地目标全部 403（解析后判定，非字符串前缀）"
+  else
+    record C1-ACL-ENCODINGS 1 "以下目标未被 403 拒绝（编码绕过残留或非公网漏判）:${bad}"
+  fi
+}
+
 case_G4() {
   if [ -z "${PPROXY_E2E_TOKEN:-}" ]; then
     skip G4 "需 PPROXY_E2E_TOKEN（生产令牌不入库、不入日志；未设即不执行）"

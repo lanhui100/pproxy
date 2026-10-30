@@ -71,6 +71,12 @@ mod tests {
             resp_clash.headers().get("profile-update-interval").and_then(|h| h.to_str().ok()),
             Some("24")
         );
+        // 响应体含长期令牌 → 必须禁止缓存
+        assert_eq!(
+            resp_clash.headers().get("cache-control").and_then(|h| h.to_str().ok()),
+            Some("no-store"),
+            "订阅响应含长期令牌，必须 cache-control: no-store"
+        );
         let clash_bytes = axum::body::to_bytes(resp_clash.into_body(), 1024 * 1024).await.unwrap();
         let clash_yaml = String::from_utf8(clash_bytes.to_vec()).unwrap();
         assert!(clash_yaml.contains("name: \"Pony-Tunnel\""));
@@ -78,6 +84,15 @@ mod tests {
         assert!(!clash_yaml.contains("type: ws"), "Clash Meta 严禁非法 type: ws 出站代理");
         assert!(clash_yaml.contains("tls: true"));
         assert!(clash_yaml.contains("server: rn.ponygo.fun"));
+        // B3：组自检必须走 443 探活（CONNECT 数据面只放行 443），明文 80 探活必然全超时
+        assert!(
+            clash_yaml.contains("url: \"https://www.gstatic.com/generate_204\""),
+            "B3：健康检查 URL 必须走 https/443"
+        );
+        assert!(
+            !clash_yaml.contains("http://cp.cloudflare.com"),
+            "B3：严禁明文 80 端口健康检查（CONNECT ACL 仅放行 443）"
+        );
         // C3：出站节点走公网 8443 标准 CONNECT + HTTP Basic；严禁 Bearer（CONNECT 不接受）
         assert!(clash_yaml.contains("port: 8443"), "C3：公网 CONNECT 数据面在 8443");
         assert!(!clash_yaml.contains("port: 443"), "C3：443 后面没有 CONNECT 能力");

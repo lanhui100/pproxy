@@ -98,19 +98,48 @@ Clash Meta 后**任何站点都不走代理**，用户的判断是"代理没启�
   实际落 `/etc/nginx/stream-connect/` + `nginx.conf` 顶层 include，并把 `libnginx-mod-stream`
   安装（本机为 `--with-stream=dynamic` 且原本未安装该包）与 `ufw allow 8443/tcp` 写成部署硬步骤。
 
+## 对抗审查后的加固（三路 L3 独立审查 → 3 个 BLOCKING）
+
+首版实现经三路独立对抗审查（并发/资源、安全/协议、方案取舍）后**全部判 FAIL**，暴露出三个
+真实缺陷，已修并复核：
+
+1. **首部与首包同段时丢字节**（两路独立命中）：`read_head` 在首个 read 命中 `\r\n\r\n` 时
+   返回截断后的 head，同包剩余字节（管线化 CONNECT、随首包发出的 TLS ClientHello）被静默丢弃，
+   `leftover` 转发成为死代码。改为整段返回 + 统一 `split_head()` 切分，leftover 交上游。
+   收据：首部 + 真实 ClientHello（517 B）同一次 `write` → 上游回 `160303007a` ServerHello。
+2. **目标 ACL 可被编码绕过 → SSRF**（三路独立命中）：原实现是**字符串前缀黑名单**
+   （只挡 `10.`/`127.`/`169.254.`/`192.168.`/`::1`），`0.0.0.0`、十进制 `2130706433`、
+   十六进制 `0x7f000001`、IPv4-mapped `[::ffff:127.0.0.1]`、`[::]` 全部放行并真的拨到回环。
+   改为**解析后判定**：IP 字面量（含十进制/十六进制/八进制/mapped）按解析结果判公网；
+   域名先 `lookup_host` 取全部地址、任一非公网即 403；最终**只对已校验的 `IpAddr` 建连**
+   （不对域名二次解析，封 DNS rebinding 窗口）。收据：生产 8443 上四种编码全部 `403`。
+3. **组自检 URL 与数据面能力不符**：三处生成器写 `http://cp.cloudflare.com/generate_204`（明文 80），
+   而 CONNECT 只放行 443 → Clash 对节点做的健康检查恒失败，面板上节点长期显示超时。
+   改用 `https://www.gstatic.com/generate_204`。
+
+同时修掉若干 ADVISORY：`run_server`（CLI `pproxy gate-server` 路径）原先不启动 CONNECT 监听
+（与 binary 路径能力分叉、env 静默忽略）→ 模块移入 lib 并在 `run_server` 内 `spawn_from_env`；
+桌面 LAN 会话加 idle 300 s / 绝对 86400 s 并在关闭开关时取消在飞会话；accept 单次出错不再
+永久退出；二进制首包不再经 `from_utf8_lossy` 改写；令牌比较改 `constant_time_eq`；
+订阅响应加 `Cache-Control: no-store`。其余 ADVISORY 登记为 `backlog/backlog.md` B016。
+
 ## 验证（物理收据）
 
 - 本机（契约 G1/G2/G3）：`curl -x http://127.0.0.1:3102 -U tok:tok .../generate_204` → 204；
-  去凭据 → `CONNECT tunnel failed, response 407`；`CONNECT example.com:80` → `403 acl_denied`。
-  `cargo test -p pproxy-gate-server` → 10 passed；`cargo test -p pproxy-cli clash` → 7 passed。
+  去凭据 → `CONNECT tunnel failed, response 407`；`CONNECT example.com:80` → `403 acl_denied`；
+  ACL 编码绕过族（`0.0.0.0` / `2130706433` / `0x7f000001` / `[::ffff:127.0.0.1]` / `[::]`）→ 全部 403。
+  `cargo test -p pproxy-gate-server` → 17 passed；`cargo test -p pproxy-cli clash` → 7 passed。
 - 生产（G4/G5）：`curl -x https://rn.ponygo.fun:8443 -U <token>:<token>` → google 204、
   youtube 200、`ipinfo.io/ip` 返回出口 `192.210.231.8`；订阅端点无 token / `?token=probe` → 401，
-  有效 token → 200 且 YAML 为 `port: 8443` + `username`/`password` + 结尾 `- MATCH,PROXY`。
+  有效 token → 200 且 YAML 为 `port: 8443` + `username`/`password` + 结尾 `- MATCH,PROXY`
+  + `url: "https://www.gstatic.com/generate_204"` + 响应头 `cache-control: no-store`；
+  生产 8443 上四种 ACL 编码变体全部 403。
 - **真客户端端到端**：以 `Mihomo Meta v1.19.2` 直接加载生产下发的 YAML 并作为手机等价客户端：
-  配置加载成功、`Mixed proxy listening at 127.0.0.1:7890`，经其访问 google → 204、youtube → 200、
+  配置加载成功、`Mixed proxy listening at 127.0.0.1:7890`，经其访问 google → 204、
   `ipinfo.io/ip` → `192.210.231.8`（即 VPS 出口），日志 `match Match using PROXY[Pony-Tunnel]`
   证明兜底规则已真正走隧道。
-- 独立验收套件：`tests/acceptance/`（L2-T + L2-AT，含半截首部、24 KiB 单行首部、20 并发 Barrier）。
+- 独立验收套件：`tests/acceptance/`（L2-T + L2-AT，含半截首部、24 KiB 单行首部、20 并发 Barrier、
+  harness 自检与变异敏感性/负控制）。
 
 ## 附带影响与残留
 

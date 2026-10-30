@@ -100,7 +100,7 @@ proxies:
 {proxy_block}proxy-groups:
   - name: "PROXY"
     type: select
-    url: "http://cp.cloudflare.com/generate_204"
+    url: "https://www.gstatic.com/generate_204"
     interval: 300
     proxies:
 {group_members}
@@ -415,6 +415,15 @@ mod tests {
         // C6：三处生成器同口径——兜底走代理，探活域仍在其之前
         assert!(yaml.trim_end().ends_with("- MATCH,PROXY"), "C6：兜底必须 MATCH,PROXY");
         assert!(!yaml.contains("MATCH,DIRECT"), "C6：严禁回落到 MATCH,DIRECT");
+        // B3：组自检必须是 https/443 探活，明文 80 探活在 CONNECT ACL 下必然超时
+        assert!(
+            yaml.contains("url: \"https://www.gstatic.com/generate_204\""),
+            "B3：健康检查 URL 必须走 https/443"
+        );
+        assert!(
+            !yaml.contains("http://cp.cloudflare.com"),
+            "B3：严禁明文 80 端口健康检查"
+        );
     }
 
     #[test]
@@ -455,6 +464,15 @@ mod tests {
         let probe_idx = yaml.find("- DOMAIN,connectivitycheck.gstatic.com,DIRECT").unwrap();
         let proxy_idx = yaml.find(",PROXY").unwrap();
         assert!(probe_idx < proxy_idx, "C6：探活域规则必须排在第一条 PROXY 规则之前");
+        // B3：组自检走 443 探活（CONNECT 数据面只放行 443）
+        assert!(
+            yaml.contains("url: \"https://www.gstatic.com/generate_204\""),
+            "B3：健康检查 URL 必须走 https/443"
+        );
+        assert!(
+            !yaml.contains("http://cp.cloudflare.com"),
+            "B3：严禁明文 80 端口健康检查"
+        );
     }
 
     #[test]

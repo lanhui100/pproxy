@@ -1,0 +1,85 @@
+{
+  "schema_version": 2,
+  "verdict": "FAIL",
+  "reviewer": {
+    "kind": "subagent",
+    "session_id": "session-3d540ca3-825a-40ba-bab5-b8c49e63ef59/l3a-concurrency",
+    "fresh_context": true
+  },
+  "executed_by": "session-3d540ca3-825a-40ba-bab5-b8c49e63ef59/l3a-concurrency",
+  "reviewed_commit": "a4f9766f432aae07e3458c558bfaebad9edffd75",
+  "attestation": {
+    "self_signed": false
+  },
+  "audited_scopes": [
+    "crates/gate-server/src/connect_proxy.rs",
+    "crates/gate-server/src/main.rs",
+    "desktop/src-tauri/src/proxy/engine.rs",
+    "desktop/src-tauri/src/lib.rs"
+  ],
+  "findings": [
+    {
+      "file": "crates/gate-server/src/connect_proxy.rs",
+      "line": 329,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "unshare -r -n bash -s <<'EOS'\nip link set lo up\nH=$(printf tok | sha256sum | cut -d' ' -f1)\nGATE_CONNECT_LISTEN=127.0.0.1:3102 HOST=127.0.0.1 PORT=3999 TUNNEL_TOKEN_HASH=$H /home/dm/pproxy/target/debug/pproxy-gate-server >/dev/null 2>&1 &\nG=$!\ntimeout 15 python3 - <<'PY2' &\nimport socket\ns=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('0.0.0.0',443)); s.listen(4)\nc,_=s.accept(); d=b''\nwhile True:\n    b=c.recv(4096)\n    if not b: break\n    d+=b\nprint('UPSTREAM_GOT', d, flush=True)\nPY2\nE=$!\nsleep 1.5\npython3 - <<'PY3'\nimport socket, base64, time\ns=socket.create_connection(('127.0.0.1',3102), 3)\ns.sendall(b'CONNECT 0.0.0.0:443 HTTP/1.1\\r\\nProxy-Authorization: Basic '+base64.b64encode(b'tok:tok')+b'\\r\\n\\r\\nPING1')\ntime.sleep(0.5); s.sendall(b'PING2'); s.shutdown(socket.SHUT_WR); time.sleep(0.5)\nPY3\nkill $G $E 2>/dev/null\nwait 2>/dev/null\nEOS\n# 现状输出 UPSTREAM_GOT b'PING2'（与首部同包送达的 PING1 被丢弃）；\n# 把 connect_proxy.rs:329 的 buf[..i] 改为整块 buf 后输出 b'PING1PING2'",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/gate-server/src/connect_proxy.rs",
+      "line": 395,
+      "rule": "SECURITY",
+      "counterexample_cmd": "unshare -r -n bash -s <<'EOS'\nip link set lo up\nH=$(printf tok | sha256sum | cut -d' ' -f1)\nGATE_CONNECT_LISTEN=127.0.0.1:3102 HOST=127.0.0.1 PORT=3999 TUNNEL_TOKEN_HASH=$H /home/dm/pproxy/target/debug/pproxy-gate-server >/dev/null 2>&1 &\nG=$!\ntimeout 15 python3 - >/dev/null 2>&1 <<'PY2' &\nimport socket\ns=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('0.0.0.0',443)); s.listen(8)\nwhile True:\n    c,_=s.accept(); c.sendall(b'LOOPBACK-443-REACHED\\n'); c.close()\nPY2\nE=$!\nsleep 1.5\npython3 - <<'PY3'\nimport socket, base64, time\nauth=base64.b64encode(b'tok:tok').decode()\nfor t in ['127.0.0.1:443','2130706433:443','0x7f000001:443','0.0.0.0:443']:\n    s=socket.create_connection(('127.0.0.1',3102), 3); s.settimeout(3)\n    s.sendall(('CONNECT %s HTTP/1.1\\r\\nProxy-Authorization: Basic %s\\r\\n\\r\\n' % (t, auth)).encode())\n    time.sleep(0.3)\n    print(t, '->', s.recv(200).split(b'\\r\\n')[0])\n    s.close()\nPY3\nkill $G $E 2>/dev/null\nwait 2>/dev/null\nEOS\n# 实测：127.0.0.1:443 -> 403 Forbidden；2130706433:443 / 0x7f000001:443 / 0.0.0.0:443 -> 200 Connection Established",
+      "severity": "BLOCKING"
+    },
+    {
+      "file": "crates/gate-server/src/connect_proxy.rs",
+      "line": 112,
+      "rule": "NFR_VIOLATION",
+      "counterexample_cmd": "unshare -r -n bash -s <<'EOS'\nip link set lo up\nH=$(printf tok | sha256sum | cut -d' ' -f1)\nGATE_CONNECT_LISTEN=127.0.0.1:3102 HOST=127.0.0.1 PORT=3999 TUNNEL_TOKEN_HASH=$H /home/dm/pproxy/target/debug/pproxy-gate-server >/dev/null 2>&1 &\nG=$!; export GPID=$G\nsleep 1.5\necho \"fd_before=$(ls /proc/$G/fd | wc -l)\"\npython3 -c \"\nimport socket, time, os\ns=[socket.create_connection(('127.0.0.1',3102), 3) for _ in range(600)]\ntime.sleep(0.6)\nprint('idle_conns', len(s), 'gate_fds_now', len(os.listdir('/proc/%s/fd' % os.environ['GPID'])))\n\"\nkill $G 2>/dev/null\nwait 2>/dev/null\nEOS\n# 实测 fd_before=12 -> idle_conns 600 gate_fds_now 612：accept 无任何 semaphore/连接上限，1 连接 = 1 fd + 1 task",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/gate-server/src/connect_proxy.rs",
+      "line": 296,
+      "rule": "TIMEOUT",
+      "counterexample_cmd": "# 代码反例（connect_proxy.rs:296）：pump 内的 writer.write_all 未包 timeout，且不在 select! 的 IDLE_TIMEOUT 分支内。\n# 复现方式：客户端 CONNECT 成功后停止 read（SO_RCVBUF 打满），上游持续写入 → 该 pump 永久停在 296，\n# read 侧 300 s 空闲超时永不触发，连接只能等 GATE_CONNECT_MAX_LIFETIME_SECS（缺省 86400 s）兜底。\n# 观测：ss -tno state established '( sport = :3102 )' 显示 send-q 持续非零且连接存活 >300 s。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "crates/gate-server/src/connect_proxy.rs",
+      "line": 91,
+      "rule": "CONTRACT_BREAK",
+      "counterexample_cmd": "unshare -r -n bash -s <<'EOS'\nip link set lo up\nnc -l 127.0.0.1 3102 >/dev/null 2>&1 &\nNCPID=$!\nsleep 0.5\nGATE_CONNECT_LISTEN=127.0.0.1:3102 HOST=127.0.0.1 PORT=3999 TUNNEL_TOKEN_HASH=deadbeef /home/dm/pproxy/target/debug/pproxy-gate-server >/dev/null 2>&1 &\nGPID=$!\nsleep 2\nkill -0 $GPID 2>/dev/null && echo \"gate still alive: no fail-fast on CONNECT bind failure\"\nss -tlnp 2>/dev/null | grep 3102\nkill $GPID $NCPID 2>/dev/null\nEOS\n# 实测：gate 进程继续存活（退出码 0 语义），3102 仍由 nc 持有，CONNECT 数据面缺席且仅有一行 error 日志",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "desktop/src-tauri/src/proxy/engine.rs",
+      "line": 553,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "// 代码反例（engine.rs:551-554）：accept() 返回任意 Err 即 break，lan_accept_loop 永久退出且无法自愈；\n// LAN_RUNTIME 仍持有 LanListener（lib.rs:1559），lan_is_listening() 持续为 true → UI 显示“监听中”，0.0.0.0:8899 实际已关闭。\n// 触发面：EMFILE/ECONNABORTED（Windows/macOS 常见）或 ulimit -n 打满；\n// 对照 connect_proxy.rs:116-120 的处理（accept 错误只 warn + sleep 50ms 重试，不退出监听循环）。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "desktop/src-tauri/src/proxy/engine.rs",
+      "line": 545,
+      "rule": "LEAK",
+      "counterexample_cmd": "// 代码反例（engine.rs:518-524 + 545）：LanListener::stop() 只 await accept 循环退出，每连接任务在 545 行 spawn 后无人持有；\n// relay_bidir（engine.rs:405-455）既无 idle 超时也无绝对生命周期上限 → 关闭“允许局域网设备接入”后，\n// 已建立的 LAN 会话继续无限期代理（进程存活期间一直有效），且 abort() 同样无法回收它们。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "desktop/src-tauri/src/proxy/engine.rs",
+      "line": 362,
+      "rule": "CORRECTNESS",
+      "counterexample_cmd": "// 代码反例（engine.rs:234-251 read_head 返回含首部后残字节的整块，358-362 CONNECT 直连分支只写 200 就 relay_bidir）：\n// 首部与后续 payload 同包送达（pipelined CONNECT）时，残字节既没转给上游也没回给客户端，直接丢弃；\n// 且残字节经 String::from_utf8_lossy（250 行）转换，二进制 ClientHello 会被替换字符改写（隧道分支把这些字节当请求头写上游）。\n// 与 gate 侧同一缺陷族：connect_proxy.rs:329。",
+      "severity": "ADVISORY"
+    },
+    {
+      "file": "desktop/src-tauri/src/lib.rs",
+      "line": 1573,
+      "rule": "CONCURRENCY",
+      "counterexample_cmd": "// 代码反例（lib.rs:1570-1588 + 1511-1523）：proxy_lan_toggle 无串行化（无 Mutex/AtomicBool 守卫），\n// start/stop 都是“取旧 → await 停 → bind → 存新”。两次并发调用（IPC 重放/多前端）时，后 bind 者拿到 EADDRINUSE →\n// 其回滚分支只把 allow_lan_clients 写回 false，赢家的 listener 仍在 0.0.0.0:8899 上 accept →\n// 结果：配置/UI 显示“已关闭局域网接入”，监听实际仍在，且下次启动不再恢复（配置 false）。\n// SettingsView 的 :disabled=\"lanSaving\" 只挡住单窗口连点，后端状态机本身不设防。",
+      "severity": "ADVISORY"
+    }
+  ]
+}

@@ -50,12 +50,14 @@ case_G5c() {
   for h in "subscription-userinfo" "profile-update-interval" "content-disposition"; do
     grep -qi "^$h:" "$SUB_HDR" 2>/dev/null || missing="$missing $h"
   done
+  # 2026-10-30 演进：订阅正文含长期令牌 → 必须 no-store，禁中间缓存
+  grep -qi '^cache-control:[[:space:]]*no-store' "$SUB_HDR" 2>/dev/null || missing="$missing cache-control:no-store"
   local size
   size=$(wc -c <"$SUB_BODY" 2>/dev/null || echo 0)
   if [ "$code" = "200" ] && [ -z "$missing" ] && [ "$size" -gt 0 ]; then
-    record G5c 0 "/api/clash?token=<有效> → 200，订阅三头齐全，body=${size}B"
+    record G5c 0 "/api/clash?token=<有效> → 200，订阅三头 + cache-control:no-store 齐全，body=${size}B"
   else
-    record G5c 1 "/api/clash?token=<有效> 期望 200+订阅三头+非空 body，实测 code='${code:-<curl-error>}' size=${size}B missing_headers='${missing:-无}'"
+    record G5c 1 "/api/clash?token=<有效> 期望 200+订阅三头+no-store+非空 body，实测 code='${code:-<curl-error>}' size=${size}B missing_headers='${missing:-无}'"
   fi
 }
 
@@ -98,5 +100,20 @@ case_G7_gate() {
     record G7-gate 0 "C6 分流: $detail"
   else
     record G7-gate 1 "C6 分流不符: $detail"
+  fi
+}
+
+# HEALTH-gate — 组自检 URL 口径（2026-10-30 演进）：https 204 端点、禁明文 cp.cloudflare.com
+case_HEALTH_gate() {
+  if [ ! -s "$SUB_BODY" ]; then
+    record HEALTH-gate 1 "无可用 YAML（依赖 G5c 红相），健康检查 URL 无法验证"
+    return
+  fi
+  local detail rc=0
+  detail=$(run_helper "$HELPERS/yaml_contract.py" health --file "$SUB_BODY") || rc=$?
+  if [ "$rc" = "0" ]; then
+    record HEALTH-gate 0 "gate 生成器组自检: $detail"
+  else
+    record HEALTH-gate 1 "gate 生成器组自检不符: $detail"
   fi
 }

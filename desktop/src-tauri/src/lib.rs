@@ -1402,6 +1402,8 @@ fn proxy_enable_inner(app: tauri::AppHandle) -> Result<(), String> {
                 tunnel: rx_tunnel,
                 upstream: rx_upstream,
                 pool,
+                // 回环 18900 保持无界（会话生命周期零变更）
+                limits: proxy::engine::RelayLimits::default(),
             };
             if let Err(e) = proxy::engine::run(cfg, stats).await { log::warn!("proxy engine exited: {e}"); }
         });
@@ -1474,7 +1476,13 @@ struct LanRuntime {
 static LAN_RUNTIME: std::sync::Mutex<Option<LanRuntime>> = std::sync::Mutex::new(None);
 
 fn lan_is_listening() -> bool {
-    LAN_RUNTIME.lock().unwrap_or_else(|p| p.into_inner()).is_some()
+    // 以监听任务存活为准：accept 循环致命退出后必须报 false，避免 UI 与实况分裂
+    LAN_RUNTIME
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|rt| rt.listener.is_alive())
+        .unwrap_or(false)
 }
 
 fn lan_enabled_from_config() -> bool {
@@ -1549,6 +1557,8 @@ async fn start_lan_listener() -> Result<serde_json::Value, String> {
             tunnel: ensure_tunnel_watch().subscribe(),
             upstream: ensure_upstream_watch().subscribe(),
             pool: proxy::engine_tunnel::TunnelPool::with_size(ensure_tunnel_watch().subscribe(), 0),
+            // LanListener::start 会强制注入 LAN 会话 idle/absolute 有界生命周期
+            limits: proxy::engine::RelayLimits::default(),
         },
         stats: get_or_init_engine_stats(),
     };
@@ -2395,6 +2405,7 @@ fn build_clash_meta_yaml(
         }
     };
 
+    // 组自检必须走 443：CONNECT 数据面只放行 443，明文 80 会让 Clash 面板恒显示超时。
     Ok(format!(
         r#"# ================================================================
 #  Pony Proxy — Clash Meta / Mihomo 移动端与客户端智能代理配置
@@ -2409,7 +2420,7 @@ proxies:
 {proxy_block}proxy-groups:
   - name: "PROXY"
     type: select
-    url: "http://cp.cloudflare.com/generate_204"
+    url: "https://www.gstatic.com/generate_204"
     interval: 300
     proxies:
 {group_members}
@@ -3106,6 +3117,15 @@ mod tests {
 
         // C6：兜底必须走代理（MATCH,PROXY），GEOIP,CN,DIRECT 紧接其前
         for yaml in [&yaml_lan, &yaml_tunnel] {
+            // L3 必修 1：组自检 URL 必须 443（CONNECT 数据面只放行 443，明文 80 恒超时）
+            assert!(
+                yaml.contains("url: \"https://www.gstatic.com/generate_204\""),
+                "组自检 URL 必须是 https 443 端点"
+            );
+            assert!(
+                !yaml.contains("http://cp.cloudflare.com"),
+                "组自检 URL 不得回退明文 80 端点"
+            );
             assert!(yaml.trim_end().ends_with("- MATCH,PROXY"), "C6：末条规则必须为 MATCH,PROXY");
             assert!(
                 yaml.contains("- GEOIP,CN,DIRECT\n  - MATCH,PROXY"),

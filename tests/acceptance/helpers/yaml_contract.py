@@ -200,6 +200,46 @@ def cmd_rules(args):
     return 0
 
 
+def cmd_health(args):
+    """组自检 URL 口径（2026-10-30 演进）：健康检查必须走 https 204 端点。
+
+    - `proxy-groups[].url` 必须为 https://www.gstatic.com/generate_204
+    - 全文不得出现 `http://cp.cloudflare.com`（明文 80 健康检查会恒红）
+    """
+    try:
+        text, doc = _load(args.file)
+    except FileNotFoundError:
+        print(f"FAIL: file not found: {args.file}")
+        return 1
+    except yaml.YAMLError as exc:
+        print(f"FAIL: yaml parse error: {str(exc).splitlines()[0]}")
+        return 1
+    except OSError as exc:
+        print(f"FAIL: read error: {exc}")
+        return 1
+
+    problems = []
+    if "http://cp.cloudflare.com" in text:
+        problems.append("全文仍出现 http://cp.cloudflare.com（明文 80 健康检查）")
+    urls = []
+    groups = doc.get("proxy-groups") if isinstance(doc, dict) else None
+    if isinstance(groups, list):
+        urls = [g.get("url") for g in groups if isinstance(g, dict) and "url" in g]
+    expect = "https://www.gstatic.com/generate_204"
+    if not urls:
+        problems.append("proxy-groups 无 url 字段（健康检查缺失）")
+    else:
+        for url in urls:
+            if str(url).strip() != expect:
+                problems.append(f"health url={url!r}（应 {expect}）")
+    summary = f"group_urls={urls} plaintext_cp_cloudflare={'absent' if 'http://cp.cloudflare.com' not in text else 'present'}"
+    if problems:
+        print("FAIL: " + "; ".join(problems) + f" | {summary}")
+        return 1
+    print("OK: " + summary)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Clash Meta YAML 契约断言器")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -212,6 +252,10 @@ def main():
     p = sub.add_parser("rules")
     p.add_argument("--file", required=True)
     p.set_defaults(fn=cmd_rules)
+
+    p = sub.add_parser("health")
+    p.add_argument("--file", required=True)
+    p.set_defaults(fn=cmd_health)
 
     args = parser.parse_args()
     return args.fn(args)

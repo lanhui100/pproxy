@@ -183,6 +183,37 @@ fn internal_target_returns_403() {
     assert_eq!(status_line(&resp), "HTTP/1.1 403 Forbidden", "{resp}");
 }
 
+/// B2 回归（SSRF）：数字/别名/IPv6 编码变体一律 403，绝不允许放行到 dial。
+#[test]
+fn acl_encoding_bypass_variants_return_403() {
+    let g = GateServer::start(true);
+    let cases = [
+        "127.0.0.1:443",            // 基线：被拒
+        "0.0.0.0:443",              // unspecified
+        "2130706433:443",           // 十进制 IPv4
+        "0x7f000001:443",           // 十六进制 IPv4
+        "0177.0.0.1:443",           // 八进制 IPv4
+        "[::ffff:127.0.0.1]:443",   // IPv4-mapped IPv6
+        "[::]:443",                 // 未指定 IPv6
+        "[0:0:0:0:0:0:0:1]:443",    // ::1 完整写法
+        "[::ffff:169.254.169.254]:443", // 云元数据（link-local 映射）
+        "[::1]:443",
+        "[fe80::1]:443",            // link-local
+        "[fc00::1]:443",            // unique-local
+    ];
+    for authority in cases {
+        let resp = g.request(&connect_head(
+            authority,
+            &format!("Proxy-Authorization: Basic {TOKEN_B64}\r\n"),
+        ));
+        assert_eq!(
+            status_line(&resp),
+            "HTTP/1.1 403 Forbidden",
+            "authority={authority} must be ACL-denied, got: {resp}"
+        );
+    }
+}
+
 /// 凭证只填 pass（Clash 的 username/password 同值）与 `X-Pony-Token` 两条通道均被接受：
 /// 用「合法 443 目标但不可解析」证明其已越过鉴权与 ACL，停在建连阶段（502）。
 #[test]

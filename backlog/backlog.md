@@ -171,3 +171,20 @@
 - 方案（代码已落地，待持凭据部署）：deploy/cf-worker/worker.js 透传响应加 x-proxy-edge 标记头（已提交 59bb523）；`npx wrangler secret put PROXY_SECRET`（值=config.json worker_secret，唯一权威源）→ wrangler versions 版本化上传（禁裸 deploy）→ 部署后验证
 - 验收（重跑条款）：`bash scripts/accept-legacy-items.sh --with-deploy` 三段全 PASS；随后 `POST /api/routes/{anthropic,github}/test` 应 ok:true，pproxy doctor 4 条 worker 路由 fail 消除
 - 主责：持 CF 凭据的运维；状态：**已完成**（2026-10-08 部署：versions 5%→100% canary 上线，PROXY_SECRET 对齐；doctor 10 passed/0 failed，accept --with-deploy 三段全 PASS）
+
+### B016 — CONNECT 数据面 L3 审查遗留（advisory 未清）
+- 现象：2026-10-30 三路 L3 对抗审查（并发/安全/方案）在 a4f9766 上除已修的 3 个 BLOCKING 外，
+  另有若干 ADVISORY 未清，登记在 `.dev-team/review-l3a.json` / `review-l3b.json` / `review-plan.json`
+- 待清项：
+  1. `connect_proxy.rs` accept 无准入/连接上限（实测 600 空闲连接 = 600 fd + 600 task；`/ws` 有
+     `max_conns*4` 而 CONNECT 路径不记 `user_active_conns`）→ 建议接入同一并发熔断 + per-IP 限速
+  2. `connect_proxy.rs` `write_all` 不受 IDLE_TIMEOUT 约束，回压卡死只能等 86400s 绝对上限
+  3. `connect_proxy.rs` bind 失败仅打一行日志、进程照常存活 → 数据面静默缺席；应对齐 fail-fast 或健康端点暴露
+  4. `lib.rs` CONNECT 与订阅两处令牌比较改用 `constant_time_eq`（一致性）
+  5. 仓内已有 **三份** CONNECT 实现（`crates/gate-server` / `crates/engine` / `crates/server`），
+     语义已分叉（gate 版未复用 `core::auth::verify_connect_credentials` 的集群票证分支）→ 收敛为一份
+  6. `crates/server/src/gateway.rs` 的 `/clash` 是**第四处**生成器，仍 `MATCH,DIRECT` + 无凭据 → 未纳入 C3/C6 口径
+  7. 订阅令牌走 `?token=` 会进 nginx access log / journal；建议改 header 或短期 sub-token
+  8. `MATCH,PROXY` 把明文 HTTP(:80) 与 `no-resolve` 未命中的局域网域名送进只能 443 的出口 → 体感为 403/502
+- 验收：上述逐项有终态（修 / 明确否决并写明理由）；第 1 与第 5 项建议优先
+- 关联：`.agents/notes/implemented/bug-fix/2026-10-30-fix-clash-meta-scan-no-proxy.md`

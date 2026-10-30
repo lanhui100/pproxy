@@ -252,6 +252,73 @@ def cmd_concurrent(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_probe(args) -> int:
+    """单发 CONNECT 到指定 authority，解析状态码与耗时（ACL/编码绕过族、有界返回断言用）。
+
+    只观测、不改写：status 与 elapsed 原样输出；是否算通过由 --expect 列表决定。
+    """
+    expected = {c.strip() for c in args.expect.split(",") if c.strip()}
+    try:
+        sock = _connect(args.connect_host, args.connect_port, timeout=min(5.0, args.budget))
+    except OSError as exc:
+        print(f"authority={args.authority} connect_failed={exc.__class__.__name__}")
+        return 1
+
+    req = f"CONNECT {args.authority} HTTP/1.1\r\nHost: {args.authority}\r\n"
+    if args.token:
+        req += f"Proxy-Authorization: {_basic(args.token)}\r\n"
+    req += "\r\n"
+
+    start = time.monotonic()
+    status = None
+    first = "<none>"
+    try:
+        sock.sendall(req.encode())
+        sock.settimeout(args.budget)
+        buf = b""
+        while b"\r\n" not in buf:
+            remaining = args.budget - (time.monotonic() - start)
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            buf += chunk
+        if buf:
+            first = buf.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            parts = first.split()
+            if len(parts) >= 2 and parts[0].startswith("HTTP/"):
+                try:
+                    status = int(parts[1])
+                except ValueError:
+                    status = None
+    except socket.timeout:
+        status = None
+    except OSError as exc:
+        print(f"authority={args.authority} io_error={exc.__class__.__name__} elapsed={time.monotonic() - start:.2f}s")
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return 1
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    elapsed = time.monotonic() - start
+    allowed = (status is not None and str(status) in expected) if expected else (status is not None)
+    ok = allowed and elapsed <= args.budget
+    print(
+        f"authority={args.authority} status={status if status is not None else 'none'} "
+        f"elapsed={elapsed:.2f}s budget={args.budget:.0f}s expect={sorted(expected) or 'any'} "
+        f"first_line={first!r} ok={int(ok)}"
+    )
+    return 0 if ok else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="pproxy CONNECT 数据面协议级探针")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -292,6 +359,15 @@ def main() -> int:
     p.add_argument("--rounds", type=int, default=3)
     p.add_argument("--budget", type=float, default=40.0)
     p.set_defaults(fn=cmd_concurrent)
+
+    p = sub.add_parser("probe")
+    p.add_argument("--connect-host", default=common["connect_host"])
+    p.add_argument("--connect-port", type=int, default=common["connect_port"])
+    p.add_argument("--authority", required=True)
+    p.add_argument("--token", default="")
+    p.add_argument("--expect", default="")
+    p.add_argument("--budget", type=float, default=30.0)
+    p.set_defaults(fn=cmd_probe)
 
     args = parser.parse_args()
     return args.fn(args)
