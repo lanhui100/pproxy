@@ -1,0 +1,39 @@
+name: feed-parity
+
+# 桌面更新 feed「双通道最终对齐」的异步巡检（不是发版闸门）。
+#
+# 为什么单独一个 workflow：access.ponygo.fun 的 feed 由网关主机上的 timer
+# （每 15 分钟扫新 tag → sync-desktop-release.sh）异步同步，发版那一刻它必然可能还是旧版。
+# 把它塞进 desktop-release 会让发版永久红（或被迫 continue-on-error，等于假门禁）。
+# 这里改成「发版后一段时间内必然收敛」的独立判据：每天跑一次，两个通道都必须等于
+# 最新桌面 tag 的版本；不对齐就红，由 GitHub 通知到人。
+#
+# 本地等价命令：bash scripts/check-update-feed.sh "$(git tag --list 'desktop-v*' | sort -V | tail -1 | sed 's/^desktop-v//')"
+
+on:
+  schedule:
+    - cron: "30 2 * * *" # UTC 02:30 = 北京 10:30
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  feed-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Resolve latest desktop tag
+        id: tag
+        run: |
+          set -euo pipefail
+          tag="$(git tag --list 'desktop-v*' | sort -V | tail -1)"
+          [ -n "$tag" ] || { echo "没有 desktop-v* tag，跳过（不算通过，见下一步的显式判断）" >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#desktop-v}" >> "$GITHUB_OUTPUT"
+      - name: Check both feed channels
+        run: bash scripts/check-update-feed.sh "${{ steps.tag.outputs.version }}"

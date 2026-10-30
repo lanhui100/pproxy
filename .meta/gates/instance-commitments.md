@@ -17,6 +17,7 @@
 | 4 | 桌面更新 feed 通道可达且版本匹配（防 CLI 发布抢占 GitHub latest） | `bash scripts/check-update-feed.sh --github-only <version>` | `.github/workflows/desktop-release.yml`、`.github/workflows/cli-release.yml`；本地 `--github-only` 可复现 CI 结论 |
 | 5 | 归档决策一旦封印，内容不得静默改写 | `bash .meta/gates/archive-seal.sh --check` | ①`.github/workflows/ponygo-governance.yml` 一步（**直接**调用）；②`.githooks/pre-push` 经 `tests/governance/run.sh` 的 G14 用例**间接**调用——pre-push 本身不直调本脚本，且当套件缺失、pre-push 走降级路径（`secret-scan`+`verify-note`）时**不含**封印校验。写端：`bash .meta/gates/archive-seal.sh --write`（只在归档动作同一提交执行） |
 | 6 | 治理验收套件在**固定 oracle** 下全绿（G0–G17：ADR 1.10 / 凭据门 / 封印 / 取代链 / 文档家 / 承诺表） | `bash tests/governance/run.sh` | ①`.github/workflows/ponygo-governance.yml`：先按框架仓 commit `7055ced122bec5112bc7a9ac5879784e2eecf989` 安装 `ponygo`（**不跟 main**，防上游漂移），再跑套件；②`.githooks/pre-push` 主判据（约 4s）。AI/人工本机复跑同样有效 |
+| 7 | 桌面更新 feed 双通道最终对齐（GitHub latest + access 分发；异步收敛，不阻断发版） | `bash scripts/check-update-feed.sh <最新 desktop tag 的版本>` | `.github/workflows/feed-parity.yml`（每日 02:30 UTC + `workflow_dispatch`，取最新 `desktop-v*` tag 后校验双通道）；本地等价命令见该 workflow 头 |
 
 **共同纪律**：这些命令都是「非零退出 = 拒绝」语义，且**判定本体只有一份**——pre-commit /
 pre-push / CI 都只**调**脚本，不复制判据（P9：同一判据两份实现必然漂移）。
@@ -33,7 +34,7 @@ pre-push / CI 都只**调**脚本，不复制判据（P9：同一判据两份实
 | 改行为/契约的那次提交同步更新对应文档的家（same-commit） | "文档是否覆盖了这次行为变化"是语义判断，正则判据会被拆词绕过；判据在 `.githooks/pre-commit` 里只有启发式 WARN（不改退出码） | review + `.agents/skills/change-review` |
 | 新增决策与旧决策的取代关系（supersession） | 需要读懂两条 note 的语义重叠；机械侧只能查"字段在不在"（`Supersedes:` 行），查不出"该不该取代" | review + `write-adr` 的 supersession 分支 |
 | 文档分层放置语义（doc-sync） | 内容"放对家"需理解 tier 语义；词数门本仓**未实现**（见 `docs/AGENTS.md` §词数预算） | review |
-| 发版后线上 feed **双通道**校验（`release-gate.sh --feed`） | 脚本有该分支但**任何 workflow 都没接线**：CI 只跑 `check-update-feed.sh --github-only`（access 通道由网关主机手动 `sync-desktop-release.sh` 更新，发布时刻可滞后，不能作硬门禁）。要变成门禁须先解决该通道的时序 | review + 发版人自查；接线时补一条 decision |
+| 发版后线上 feed **双通道**校验（`release-gate.sh --feed`） | 发版那一刻不能作硬门禁：access 通道由网关主机每 15 分钟 timer 异步 sync，必然可能滞后。**已由第 7 条（feed-parity 每日巡检）补偿**：最终对齐有机械判据，并发版流不做假门禁 | `feed-parity` workflow（异步）+ review |
 
 ## 4. 维护方式
 
