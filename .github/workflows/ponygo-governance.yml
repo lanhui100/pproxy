@@ -40,4 +40,8 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           install -m 0755 .ponygo/ponygo "$HOME/.local/bin/ponygo"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # G4 校验「本地层是否接线」，而 core.hooksPath 是**本地 git 配置**（不随仓库分发）。
+      # CI 是干净 checkout，必须显式置成与开发者一致——否则会把「这台机器没设寄存器」
+      # 误判成「门禁没接」。这是环境前置，不是把判据放宽。
+      - run: git config --local core.hooksPath .githooks
       - run: bash tests/governance/run.sh
