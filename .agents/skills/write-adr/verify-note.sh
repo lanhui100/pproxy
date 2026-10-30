@@ -7,8 +7,13 @@
 #   带路径   = 只校验给定文件（如 .agents/notes/proposed/architecture/xxx.md）
 #
 # 退出码：全部通过 exit 0；任一违例 exit 1（逐项打印 FAIL）。
-# 对应判据：ponygo verify_ladder 1.1–1.9（maturity-ladder §5），
+# 对应判据：maturity-ladder §5 的 L1 判据 1.1–1.10，
 # 影子来自 DSH verify-agent-note-format / verify-agent-note-classification。
+# 1.1–1.9 与 ponygo verify_ladder 逐项对齐；1.10（必含 ## Alternatives considered）
+# 于 2026-10-29 新增为硬判据，**只由本脚本判定**——CLI 不重复实现（P9：一份判据一份实现，
+# 两份必然漂移），故 `ponygo status` 的 L1 段仍报 1.1–1.9 并明文声明该范围；
+# 1.10 的看守面由 A1 暂存区门与 A4 全树门承担（两者都经本脚本）。
+# 见 revisions/accepted/2026-10-29-alternatives-criterion-1-10.md。
 #
 # 设计快照（为何是 bash、为何一个脚本）：
 # - 语言：bash 与 ponygo CLI 同源（单文件、零依赖铁律，见 notes/
@@ -22,12 +27,12 @@
 #   未来实例升 L2 建门禁矩阵时再拆分，YAGNI。
 #
 # 语义边界（P6 诚实条款）：本脚本只锁**机械可查的影子**——路径两轴、文件名、
-# 日期合法性、Status 与目录一致、骨架标题与 lifecycle 匹配。
+# 日期合法性、Status 与目录一致、骨架标题与 lifecycle 匹配、必含备选节（1.10）。
 # 不判"implemented 内容是否真的已落地"（真实性）与"多类是否该拆条"
 # （分类）——这两者是语义判断，靠 review + write-adr 校准样例。
 #
-# 对齐契约：本脚本与 CLI 的 verify_ladder 1.1–1.9 逐项对齐；若发现行为不一致，
-# 以 maturity-ladder §5 判据真源为准并回改两者。
+# 对齐契约：本脚本的 1.1–1.9 与 CLI 的 verify_ladder 逐项对齐；若发现行为不一致，
+# 以 maturity-ladder §5 判据真源为准并回改两者。1.10 只在本脚本实现（CLI 不复刻，P9）。
 # ============================================================
 set -u
 
@@ -47,14 +52,16 @@ extra_classes() {
 
 # 1.3 顶层目录 ⊆ 四态封闭集
 while IFS= read -r d; do
+  [ -n "$d" ] || continue
   case " $LIFECYCLES " in *" $d "*) ;; *) fail "1.3 顶层目录越界：$d" ;; esac
-done < <(find "$NOTES_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null)
+done < <(find "$NOTES_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null)
 
 # 1.4 二级目录 ⊆ 六类封闭集 ∪ classes.local
 classes_all=" $CLASSES $(extra_classes | tr '\n' ' ') "
 while IFS= read -r d; do
+  [ -n "$d" ] || continue
   case "$classes_all" in *" $d "*) ;; *) fail "1.4 class 越界：$d" ;; esac
-done < <(find "$NOTES_DIR" -mindepth 2 -maxdepth 2 -type d -printf '%f\n' 2>/dev/null)
+done < <(find "$NOTES_DIR" -mindepth 2 -maxdepth 2 -type d -exec basename {} \; 2>/dev/null)
 
 # DATE_OK：GNU date 可用才机械判日期，否则降级"靠 review"（与 CLI 同款诚实条款）
 DATE_OK=0
@@ -97,6 +104,21 @@ check_one() { # $1 = 决策文件路径
       grep -qE '^## Proposal([[:space:]]|$)' "$f" || fail "1.8 $f：$lc 缺 ## Proposal"
       grep -qE '^## Decision([[:space:]]|$)' "$f" && fail "1.8 $f：$lc 含现在时 ## Decision（提案伪装成决定）" ;;
   esac
+  # 1.10 必含 ## Alternatives considered（2026-10-29 起为硬判据，不是 WARN）
+  # 为何是硬判据：备选与落选理由是"非平凡决策"的实质内容——只写 Decision 的 ADR 会退化为
+  # 事后记录，重新面对同一岔路时答不出"为什么不选另一条"；契约本就在 .agents/notes/README.md
+  # 里，只是此前没有机械看守（覆盖缺口见 implemented/process/2026-10-29-forced-adr-gate-wiring.md）。
+  # 豁免口径：archived/ 冻结豁免（与 1.8 同口径，保持归档时原貌）；README.md / AGENTS.md 在
+  # 函数入口早退；*.zh.md（双语配对）豁免——译文随母语版同批补齐，不独立判。
+  case "$b" in
+    *.zh.md) ;;
+    *)
+      if [ "$lc" != "archived" ]; then
+        grep -qE '^## Alternatives considered([[:space:]]|$)' "$f" \
+          || fail "1.10 $f：缺 ## Alternatives considered（非平凡决策必须写明被否决的备选与理由）"
+      fi
+      ;;
+  esac
   return 0
 }
 
@@ -111,7 +133,7 @@ else
 fi
 
 if [ "$FAIL" = "0" ]; then
-  echo "verify-note: 全部通过（机械影子 1.1–1.9；真实性/分类靠 review）"
+  echo "verify-note: 全部通过（机械影子 1.1–1.10；真实性/分类/备选质量靠 review）"
   exit 0
 fi
 echo "verify-note: 未通过（见上方 FAIL 项；逐项修复后重跑）" >&2

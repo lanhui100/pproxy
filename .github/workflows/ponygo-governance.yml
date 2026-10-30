@@ -1,0 +1,15 @@
+# ponygo 治理门（A5 = 薄适配器）：门禁逻辑本体在 .meta/gates/ci-verify.sh（A4），
+# 换 forge 只换这几行壳；本地等价命令 = bash .meta/gates/ci-verify.sh
+name: ponygo-governance
+permissions:
+  contents: read
+on:
+  push:
+  pull_request:
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: bash .meta/gates/ci-verify.sh

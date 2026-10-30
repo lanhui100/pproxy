@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
+# >>> ponygo-gate: adr-verify v1 >>>
+if [ -f "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" ]; then
+  bash "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" || exit 1
+fi
+# <<< ponygo-gate: adr-verify v1 <<<
 # .githooks/pre-commit - 本地秒级快速门禁
 set -euo pipefail
+
+# 0. 凭据扫描（秒级；扫描面 = 已跟踪文件，`git grep` 一次全树约 0.3s）
+# 位置：哨兵块（A1 ADR 门）之后、ADR 门之前——凭据泄漏比格式违例更贵，先拦。
+# 本仓自写的三段（ADR/ cargo check / doc-freshness）不得因 ponygo init 的哨兵块前置而丢失。
+if [ -f .meta/gates/secret-scan.sh ]; then
+  bash .meta/gates/secret-scan.sh || exit 1
+fi
 
 # 1. 检查 ADR 规范
 if [ -d .agents/notes ]; then
