@@ -53,13 +53,19 @@
 - [ ] 手机 4G 实测 —— **用户裁决（2026-08-22）：非阻塞项，顺延至 M5 Windows 端验收后一并安排**
 **验收**：服务端口径已闭环；真机口径待上述顺延项执行后补录
 
-## M5 Windows 桌面端（Tauri 2）— ✅ 已完成（实现与原计划的偏差见「当前态」表：Vue 3 + shadcn-vue、两页）
-- [ ] 脚手架：Tauri 2 + React + shadcn/ui，管理 API client
-- [ ] Dashboard / Routes / Tokens / Usage / Settings 五页
-- [ ] 用量图表（recharts）+ 限额进度条
-- [ ] 系统通知（告警轮询）
-- [ ] NSIS 安装包
-**验收**：Windows 上安装 → 连接 dev 服务器 → 完成路由/token 管理 → 收到告警通知
+## M5 Windows 桌面端（Tauri 2）— ✅ 已完成（交付形态与原计划不同，以本节为准）
+**实际交付**：Tauri 2 + **Vue 3 + shadcn-vue** 的 Windows 桌面端（`desktop/`），页面收敛为
+**Dashboard / Settings 两页**——接入令牌（授权码）与加速开关、白名单域名管理、服务器配置、
+局域网接入、自更新，全部走 Tauri 命令经 Rust 侧出网（前端 CSP `connect-src 'none'`）。
+契约与限制见 `desktop/README.md`；门禁 `.github/workflows/desktop-gate.yml`（PR 跑前端与 Rust 检查，
+不打包）；打包 `.github/workflows/desktop-release.yml`（`desktop-v*` tag 出 NSIS 安装包，未签名）。
+**原计划（未采用，保留以说明为何页面变少）**：React + shadcn/ui 五页（Dashboard / Routes / Tokens /
+Usage / Settings）、recharts 用量图表 + 限额进度条、系统通知轮询。
+未采用理由：路由/token/用量管理在服务端管理面已完备，桌面端的最短闭环是"粘贴授权码 → 开启 → 能出网"，
+五页方案会把管理面 UI 重做一遍（成本高、与 CLI/Web 三处维护同一份表单）；改为极简两页后，
+把"能出网"的判断做成 Dashboard 的实时连通性面板（见 `desktop/README.md` §配置项）。
+**验收（已达成口径）**：Windows 上安装 → 粘贴授权码 → 开启加速 → 浏览器访问白名单站点正常、
+非白名单直连；关闭开关完整还原（PAC/系统代理快照还原）。
 
 ## M6 系统级白名单代理（桌面隧道）— 进行中（2026-08-22 立项；2026-08-25 v0.3.5 发布，收尾=Windows 实机验收 + B001 回填 ADR-008）
 - [x] CF Worker WS↔TCP 隧道桥（gate.example.com 上线；accept 口径已实证：`server.accept()`+Response 携带 `pair[0]`，ctx.acceptWebSocket 生产边缘抛 500；S1/S2 吞吐并发数据回填挂 backlog B001）

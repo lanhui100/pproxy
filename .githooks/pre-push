@@ -10,15 +10,21 @@
 # 判据选择（P7：每层只抓该层性价比最高的缺陷）：
 #   主判据 = `tests/governance/run.sh`（治理黑盒验收，实测 3.5s，预算内）；
 #   它覆盖凭据、决策记录格式、门禁接线、文档落地、仓库卫生——比"再跑一遍 pre-commit"信息量高得多。
-#   预算内跑得动就上整套；超预算或套件缺失时降级为轻量组合
-#   （`secret-scan.sh` + `verify-note.sh`，实测 0.9s），保证"有闸"永远优先于"闸最全"。
+#
+# 三条 fail-closed 纪律（L3 审查实测过"打印通过并 rc=0"的 fail-open，故写死）：
+#   1) **套件超预算（timeout 124）不降级** → 直接拒 push。没跑完≠通过；
+#      唯一逃生口是 `git push --no-verify`（显式动作，代价：本次 push 无任何本地治理校验）。
+#   2) **套件缺失**时才允许降级到 `secret-scan.sh` + `verify-note.sh`（实测 0.9s），
+#      且**两条轻检查必须都真实存在**；缺任一条 = 本仓此刻没有任何可用门禁 → 拒 push。
+#   3) 显式 `GOV_PREPUSH_MODE=suite` 而套件不存在 → 配置错误，不静默降级。
 #
 # 绕过方式（诚实声明，不假装拦得住）：`git push --no-verify` 可跳过；远端 CI 仍是最终兜底。
 #   本钩子的目标是让"忘跑/懒得跑"变成一次显式动作，而不是让恶意提交无处可去。
 #
 # 环境变量：
-#   GOV_PREPUSH_MODE=auto|suite|light   默认 auto（有套件就跑套件）
-#   GOV_PREPUSH_TIMEOUT=<秒>            套件时间预算，默认 120（实测 3.5s，留冷机/CI 余量）
+#   GOV_PREPUSH_MODE=auto|suite|light   默认 auto（有套件就跑套件；light 强制走降级路径）
+#   GOV_PREPUSH_TIMEOUT=<秒>            套件时间预算，默认 120（实测 3.5s，留冷机/CI 余量）；
+#                                       超预算按拒 push 处理（不降级放行）
 # ============================================================
 set -uo pipefail
 
@@ -41,7 +47,9 @@ blocked() {
   exit 1
 }
 
-# 轻量组合：秒级（凭据 + ADR 格式），套件不可用/超预算时的降级路径
+# 轻量组合：秒级（凭据 + ADR 格式）。仅在**套件不可用**时作为降级路径使用。
+# 前提是两条轻检查**都真实存在**——缺一条就不是"降级"，而是"没闸"（fail-open），
+# 由调用方在这一步之前显式判掉（见 light_available）。
 light_checks() {
   local rc=0
   if [ -f .meta/gates/secret-scan.sh ]; then
@@ -53,10 +61,20 @@ light_checks() {
   return "$rc"
 }
 
-suite_available=0
-[ -f tests/governance/run.sh ] && [ "$MODE" != "light" ] && suite_available=1
+# 降级路径的前置条件：两条轻检查必须在位。缺任何一条 → 本仓此刻**没有任何可用门禁**。
+light_available() {
+  [ -f .meta/gates/secret-scan.sh ] && [ -f .agents/skills/write-adr/verify-note.sh ]
+}
 
-if [ "$suite_available" = "1" ]; then
+suite_present=0
+[ -f tests/governance/run.sh ] && suite_present=1
+
+# 显式要求 suite 模式但套件不存在 → 配置错误，不静默降级
+if [ "$MODE" = "suite" ] && [ "$suite_present" -ne 1 ]; then
+  blocked "GOV_PREPUSH_MODE=suite 但 tests/governance/run.sh 不存在（显式要求的最强门禁不可用）"
+fi
+
+if [ "$suite_present" -eq 1 ] && [ "$MODE" != "light" ]; then
   OUT=""
   if command -v timeout >/dev/null 2>&1; then
     OUT=$(timeout -k 5 "$BUDGET" bash tests/governance/run.sh 2>&1)
@@ -71,14 +89,13 @@ if [ "$suite_available" = "1" ]; then
     exit 0
   fi
 
+  # 超预算**不降级**：套件没跑完 = 没有任何判据成立，放行等于把"未知"当"通过"。
+  # 唯一逃生口是 --no-verify（显式动作），代价提示必须说清。
   if [ "$RC" -eq 124 ]; then
-    # 超预算：不静默放行，降级到秒级组合并把原因说清楚
-    printf '[pre-push] WARN：治理套件超出 %ss 预算（timeout 终止）→ 降级为 secret-scan + verify-note\n' "$BUDGET" >&2
-    if light_checks; then
-      printf '[pre-push] 通过（降级路径）：secret-scan + verify-note\n'
-      exit 0
-    fi
-    blocked "降级路径 secret-scan + verify-note 未通过"
+    printf '[pre-push] 拒 push：治理套件超出 %ss 预算被 timeout 终止（未降级：没跑完≠通过）\n' "$BUDGET" >&2
+    printf '  调大预算：GOV_PREPUSH_TIMEOUT=<秒> git push\n' >&2
+    printf '  紧急逃生口：git push --no-verify（代价：本次 push 完全无本地治理校验，只靠远端 CI 兜底）\n' >&2
+    exit 1
   fi
 
   # 套件真红：把末段输出带给开发者（有界，不倾倒全量）
@@ -86,9 +103,14 @@ if [ "$suite_available" = "1" ]; then
   blocked "tests/governance/run.sh 未通过（rc=$RC）"
 fi
 
-# 无套件（或强制 light 模式）：仍要有一道闸
+# ---- 降级路径（套件缺失或 GOV_PREPUSH_MODE=light）----
+if ! light_available; then
+  # fail-closed：套件与轻检查同时不可用时，绝不能打印"通过"（这是 L3 审查实测到的 fail-open）
+  blocked "无可用门禁：tests/governance/run.sh 不存在，且 .meta/gates/secret-scan.sh / .agents/skills/write-adr/verify-note.sh 至少一项缺失 → 拒绝 push"
+fi
+
 if light_checks; then
-  printf '[pre-push] 通过：secret-scan + verify-note（未跑治理套件）\n'
+  printf '[pre-push] 通过（降级路径）：secret-scan + verify-note（未跑治理套件）\n'
   exit 0
 fi
-blocked "secret-scan 或 verify-note 未通过"
+blocked "降级路径 secret-scan + verify-note 未通过"

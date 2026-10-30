@@ -12,10 +12,10 @@
 | # | 承诺 | 命令（判定本体 = 唯一真源） | 触发点 |
 |---|---|---|---|
 | 1 | 凭据不进版本库（索引 + HEAD 树；含 admin/gateway/tenant 令牌与上游共享密钥） | `bash .meta/gates/secret-scan.sh` | `.githooks/pre-commit` 第 0 段（秒级）；`.github/workflows/ponygo-governance.yml` 一步。负样本自检：`bash .meta/gates/secret-scan.spec.sh` |
-| 2 | 桌面发版前：版本一致 + 类型/单测/构建 + 产物 UI 关键字符串在场 | `bash scripts/release-gate.sh <version> [--feed]` | `.github/workflows/desktop-release.yml`（发版前 `release-gate.sh "$VER"`、发版后 `--feed`）；本地人工发版前自检 |
+| 2 | 桌面发版前：版本三处一致 + 前端类型/单测/构建 + 产物 UI 关键字符串在场 | `bash scripts/release-gate.sh <version>` | `.github/workflows/desktop-release.yml`（发版前：`bash scripts/release-gate.sh "$VER"`）；本地人工发版前自检。**注意**：脚本支持的 `--feed`（发版后线上 feed 双通道校验）**没有任何 workflow 接线**，见 §3「靠 review」 |
 | 3 | 合规出口 host 清单在 Rust 数据面与 CF gate worker 两侧一致（ADR-008） | `bash scripts/check-egress-parity.sh` | `.github/workflows/ponygo-governance.yml` 一步（零网络依赖：纯文本比对两侧常量）；本地可随时手跑 |
 | 4 | 桌面更新 feed 通道可达且版本匹配（防 CLI 发布抢占 GitHub latest） | `bash scripts/check-update-feed.sh --github-only <version>` | `.github/workflows/desktop-release.yml`、`.github/workflows/cli-release.yml`；本地 `--github-only` 可复现 CI 结论 |
-| 5 | 归档决策一旦封印，内容不得静默改写 | `bash .meta/gates/archive-seal.sh --check` | `.github/workflows/ponygo-governance.yml` 一步；`.githooks/pre-push`（秒级）。写端：`bash .meta/gates/archive-seal.sh --write`（只在归档动作同提交执行） |
+| 5 | 归档决策一旦封印，内容不得静默改写 | `bash .meta/gates/archive-seal.sh --check` | ①`.github/workflows/ponygo-governance.yml` 一步（**直接**调用）；②`.githooks/pre-push` 经 `tests/governance/run.sh` 的 G14 用例**间接**调用——pre-push 本身不直调本脚本，且当套件缺失、pre-push 走降级路径（`secret-scan`+`verify-note`）时**不含**封印校验。写端：`bash .meta/gates/archive-seal.sh --write`（只在归档动作同一提交执行） |
 
 **共同纪律**：这些命令都是「非零退出 = 拒绝」语义，且**判定本体只有一份**——pre-commit /
 pre-push / CI 都只**调**脚本，不复制判据（P9：同一判据两份实现必然漂移）。
@@ -32,6 +32,7 @@ pre-push / CI 都只**调**脚本，不复制判据（P9：同一判据两份实
 | 改行为/契约的那次提交同步更新对应文档的家（same-commit） | "文档是否覆盖了这次行为变化"是语义判断，正则判据会被拆词绕过；判据在 `.githooks/pre-commit` 里只有启发式 WARN（不改退出码） | review + `.agents/skills/change-review` |
 | 新增决策与旧决策的取代关系（supersession） | 需要读懂两条 note 的语义重叠；机械侧只能查"字段在不在"（`Supersedes:` 行），查不出"该不该取代" | review + `write-adr` 的 supersession 分支 |
 | 文档分层放置语义（doc-sync） | 内容"放对家"需理解 tier 语义；词数门本仓**未实现**（见 `docs/AGENTS.md` §词数预算） | review |
+| 发版后线上 feed **双通道**校验（`release-gate.sh --feed`） | 脚本有该分支但**任何 workflow 都没接线**：CI 只跑 `check-update-feed.sh --github-only`（access 通道由网关主机手动 `sync-desktop-release.sh` 更新，发布时刻可滞后，不能作硬门禁）。要变成门禁须先解决该通道的时序 | review + 发版人自查；接线时补一条 decision |
 
 ## 4. 维护方式
 

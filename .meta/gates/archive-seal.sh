@@ -26,8 +26,11 @@
 #   - 只证明"内容与封印时一致"，**不证明封印时内容是对的**（那是 review 与归档动作的时点判断）；
 #   - 封印不防恶意改写者（他能同时改清单）——它防的是**无意的漂移**：改了就红，红了就得解释。
 #
-# 依赖：find / sort / sha256sum / awk / sed（POSIX 工具集），不依赖 git、不联网、不写仓库以外的地方。
-# 只读纪律：`--check` 不写任何文件；`--write` 只写 `<root>/.agents/notes/archived/SHA256SUMS`。
+# 依赖：find / sort / sha256sum / awk / sed（POSIX 工具集），不依赖 git、不联网。
+# 只读纪律（准确口径，别写"不写任何文件"——那是假话）：
+#   - `--write` 只写 `<root>/.agents/notes/archived/SHA256SUMS`（唯一产物）；
+#   - `--check` **不改动仓库内任何文件**，但会在 `$TMPDIR` 建临时清单文件（`trap` 清理）。
+#   - 两个模式都不写仓库外除 `$TMPDIR` 之外的位置。
 # ============================================================
 set -u
 
@@ -84,7 +87,15 @@ cd "$ROOT" || die "无法进入 $ROOT"
 # 清单内的相对路径一律相对**仓库根**（形如 .agents/notes/archived/x.md），
 # 这样同一份 manifest 在原仓与镜像副本里都成立。
 list_sealed_files() {
-  find "$ARCHIVED_REL" -type f ! -name "$MANIFEST_NAME" 2>/dev/null | LC_ALL=C sort
+  # 两个细节都是判据的一部分，别"顺手简化"：
+  # ① 只排除**顶层**那份清单（`! -path "$MANIFEST"`）。用 `! -name SHA256SUMS` 会把任意层级
+  #    的同名文件一起剔除 → `archived/sub/SHA256SUMS` 永远不会被判「未封印」（漏判）。
+  # ② `-type l` 一并纳入：符号链接也是归档内容（有人可以用它把"被封印的历史"指向新内容）。
+  #    注意 `sha256sum` 对链接取**目标文件内容**，故"链接指向变了但目标内容没变"不会被判出；
+  #    要覆盖链接文本本身需另立判据（见文件头「边界」）。
+  # 注意用**相对**清单路径比对：find 输出相对路径，与 $MANIFEST（绝对）比会永远不相等。
+  find "$ARCHIVED_REL" \( -type f -o -type l \) ! -path "$ARCHIVED_REL/$MANIFEST_NAME" 2>/dev/null \
+    | LC_ALL=C sort
 }
 
 hash_of() { # <相对路径>
@@ -130,7 +141,7 @@ do_check() {
       ;;
     esac
     n=$((n + 1))
-    if [ ! -f "$path" ]; then
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
       fail "缺失：$path（清单有、磁盘无 → 归档条目被删除或改名）"
       bad=1
       continue
