@@ -136,18 +136,20 @@
    "oracle_pin": "ponygo@7055ced",
    "governance": "17/17",
    "crates_readme": "5 份四段 (47/55/46/56/51 行)",
-   "ci_oracle": "$HOME/.local/bin + GITHUB_PATH"
+   "ci_oracle": "$HOME/.local/bin + GITHUB_PATH",
+   "branch_protection": "contexts=[governance], allow_force_pushes=false",
+   "ponygo_cli": "host 安装版已同步（upgrade --check 零漂移）"
   }
  },
  "known_gaps": [
-  "公共历史（e0acfe3 之前）仍含 5 个已失效 token：需 filter-repo/BFG 专项清理（用户确认凭据已失效）",
-  "GitHub 默认分支无保护、无 required status check：CI 红灯不阻断合并（需仓库管理员设置）",
   "release-gate.sh --feed 分支未接任何 workflow（access 域手动 sync 有时序滞后），接线须先解决时序",
   "observe 四维 ob0→ob1 显式 deferred（决策 note 2026-10-30-observe-dimension-deferred，含重估触发条件）",
   "安装版 ponygo CLI 落后框架仓一版（内嵌 verify-note 1.1–1.9）；用框架仓 CLI 跑 upgrade --check 为零漂移",
   "secret-scan 对象库损坏时 git grep rc=1 与无命中同码（边界 4 已声明；用 git fsck 专项）",
   "pre-commit 哨兵块先于 secret-scan（任一 FAIL 仍阻断提交，属顺序语义）",
-  "上游模板缺陷（不改本地以降 drift）：ci-verify 把 SKIPPED 记 PASS；adr-verify 对非 ASCII 暂存路径的 C-quote 转义漏判（全树 A4 仍覆盖）"
+  "上游模板缺陷（不改本地以降 drift）：ci-verify 把 SKIPPED 记 PASS；adr-verify 对非 ASCII 暂存路径的 C-quote 转义漏判（全树 A4 仍覆盖）",
+  "历史 token：已决策不重写（rejected/process/2026-10-30-history-rewrite-rejected.md，含重估触发条件）",
+  "分支保护：已启用 required check=governance（enforce_admins=false 供管理员应急），2026-10-30"
  ],
  "observability_gate": "not-applicable：本波仅治理/CI/文档资产，无对外接口、网络 IO、后台任务、LLM 调用、UI 交互变更",
  "reviews": {
@@ -158,7 +160,7 @@
   ],
   "l3p": ".dev-team/review-l3p.json"
  },
- "head_commit": "492163f",
+ "head_commit": "pending",
  "closed_at": "2026-10-30",
  "review_verdicts": {
   "plan": "PASS",
