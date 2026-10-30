@@ -29,8 +29,10 @@ ponyllm（K8s，`ponyllm` namespace）的海外链路依赖该网络：
 阈值判定（本测试采用）：p95 延迟劣化 >2x 基线、错误率 >0.5%（网络类，非上游 4xx）、
 测试窗口内出现 ≥2 次 10s+ 超时均记"不稳定"；其余记"稳定"。
 
-产出：`docs/ops/stability-report-2026-09-29.md`（评估报告）+ 原始数据
-`.agents/tests/stability-2026-09-29/{forward,reverse,network,ponyllm}/`。
+产出：`docs/ops/stability-report-2026-09-29.md`（评估报告）+ 脚本与计划
+`.agents/tests/stability-2026-09-29/`。原始数据（各轨 CSV、24h 网关日志）**不随仓库分发**——
+`.agents/tests/**` 的 `*.csv`/`*.txt`/`logs/` 已 ignore 且不再跟踪，复现按该目录的 `PLAN.md`
+与各轨 `measure.sh`/`probe.sh` 重跑生成。
 
 ## Alternatives considered
 

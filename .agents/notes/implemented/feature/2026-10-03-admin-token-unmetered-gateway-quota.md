@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-- 新增 `is_admin_claims` / `quota_limit` 两个判定入口：`role == "admin"`、`name == "admin"` 或 `name` 以 `admin_` 开头视为管理员。
+- 新增 `is_admin_claims` / `quota_limit` 两个判定入口。**现行口径（2026-10-07 起）**：仅 `role == "admin"` 视为管理员（`crates/gate-server/src/lib.rs:502-504`）；`name == "admin"` 与 `name.starts_with("admin_")` 前缀启发式已在 `5511e14` 废除（前缀可被注册流程伪造，属越权面）。
 - 握手阶段、`/api/user/profile` 状态、流式上下的 `quota_up` / `quota_down` 统一经 `quota_limit`：管理员返回 `None`，即不做 402 与 WS 4402 字节熔断；普通用户维持原 `claims.quota_bytes` 限额。
 - 管理员并发限制继续保持现有豁免语义；普通用户并发规则不变。
 

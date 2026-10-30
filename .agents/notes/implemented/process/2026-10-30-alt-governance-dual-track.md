@@ -48,10 +48,15 @@ Status: implemented
   （改一次构建流程就要重验门禁，是反方向耦合）。换 forge（GitLab/Jenkins）时只需重写这 10 行壳。
 - 本地层与远端层**互补不等价**：本地 `adr-verify.sh` 只判暂存区改动的 ADR 子集（秒级、含 R6 字节比对），
   远端 `ci-verify.sh` 判整树（含只在整树模式生效的 1.9）。本地绿不能推远端绿，反之亦然。
-- 凭据扫描（`.meta/gates/secret-scan.sh`）挂在 pre-commit 第 0 段：秒级、扫描面 = `git ls-files`、
-  命中即非零退出。**远端层目前不跑它**——本仓 A5 薄壳保持「单步调 `ci-verify.sh`、不安装 ponygo 二进制」，
-  避免为一条本地秒级判据再引一套远端运行时。代价已知且不掩饰：`git commit --no-verify` 可跳过本地两层，
-  此时凭据扫描不生效（按 L2 退场条件显式记为缺口，不假装已覆盖远端）。
+- 凭据扫描（`.meta/gates/secret-scan.sh`）在两处生效，判定本体只有一份：
+  ①本地 pre-commit 第 0 段（秒级）；②`ponygo-governance.yml` 里追加的一步 `bash .meta/gates/secret-scan.sh`。
+  远端那步是**实例追加**（A5 薄壳不进宇宙表，故不产生 drift），仍不安装 ponygo 二进制。
+  放在远端而不是只靠本地，是因为 `git commit --no-verify` 一次就能跳过本地两层——凭据泄漏比格式违例更贵。
+- 扫描面 = **索引 + HEAD 树**（`git grep --cached` ∪ `git grep HEAD`），不是工作树：pre-commit 的输入是
+  暂存区，"暂存了含凭据的版本、随后把工作区改净"是常见的修订动作，读工作树会把它判成干净并放行
+  （首版真实缺陷，2026-10-30 审查 F1）。HEAD 面的残留默认也 FAIL，但留 `SKIP_HISTORY=1` 逃生口：
+  否则"修历史"那次提交本身会被自己的门挡住（死锁）；降级时如实打 WARN，不静默。
+  边界（二进制不扫、历史提交不扫、只做模式匹配）写在脚本头部，不在本 note 复述。
 
 **三、本仓自写门与框架资产 A1/A4 的分工（同一承诺不许两个实现）。**
 
@@ -61,7 +66,7 @@ Status: implemented
 | `ci-verify.sh`（A4） | 框架资产（进宇宙表，勿改） | 编排：整树 `verify-note.sh` + A2 负样本自检 | 远端层要一次「全而慢」的兜底，且结论可本地复现 |
 | `check-adr.sh` | 本仓自写（L1 时期遗留） | 转调 `verify-note.sh`（带参/无参透传） | 与 A1 不重复判据，只做「本地手工自查」的入口 |
 | `cargo check --tests` / doc-freshness WARN | 本仓自写（pre-commit 第 1–3 段） | Rust 编译面 / 源码改动无（非-notes）文档更新的启发式提醒 | 前者是构建门（框架语料外）；后者是语义判断，只能提醒不能 FAIL（P6） |
-| `secret-scan.sh` | 本仓自写（pre-commit 第 0 段） | 已跟踪文件里的凭据形状 | 框架门禁语料不含凭据扫描，属实例自建；判定真源只此一份 |
+| `secret-scan.sh` | 本仓自写（pre-commit 第 0 段 + governance workflow 一步） | 索引 + HEAD 树里的凭据形状 | 框架门禁语料不含凭据扫描，属实例自建；判定真源只此一份，远端只调一行不复制判据 |
 
 分工原则不变：**格式判据只有 `verify-note.sh` 一处实现**（A1/A4/`check-adr.sh` 都经它），
 A1 只补它做不到的三件事，本仓自写门不得复刻 1.1–1.10（复刻必然漂移）。

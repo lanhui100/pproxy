@@ -1,0 +1,58 @@
+{
+  "session": "governance-remediation-2026-10-30",
+  "tier": "C",
+  "tier_trigger": "跨 5 类资产（凭据/门禁/CI/文档/ADR）+ 安全敏感（凭据泄漏）+ blast-radius union diff 1546+/20518-",
+  "base_commit": "58429ce",
+  "base_after_inflight": "b7f1387",
+  "red_freeze_commit": "e0acfe3",
+  "waves": [
+    {
+      "wave": 1,
+      "name": "P0 in-flight commit",
+      "commit": "b7f1387",
+      "members": ["lead"],
+      "note": "在途批次定向提交（16 文件），关闭 implemented ADR 不可复现"
+    },
+    {
+      "wave": 1,
+      "name": "security",
+      "commit": "3ca5f8b",
+      "members": ["executor"],
+      "write_scopes": [".agents/tests/", ".gitignore", ".meta/gates/"]
+    },
+    {
+      "wave": 2,
+      "name": "governance-wiring",
+      "commit": "c46e52b",
+      "members": ["executor"],
+      "write_scopes": [".meta/", ".githooks/", ".agents/skills/", ".github/workflows/"]
+    },
+    {
+      "wave": 3,
+      "name": "docs-and-adaptation",
+      "commit": "4ddb5ae",
+      "members": ["executor"],
+      "write_scopes": ["docs/", "README.md", "crates/*/README.md", "desktop/README.md", ".agents/notes/"]
+    }
+  ],
+  "gates": {
+    "red_phase": {"commit": "e0acfe3", "result": "PASS=2 FAIL=8 exit=1"},
+    "green_phase": {"head": "4ddb5ae", "result": "PASS=10 FAIL=0 exit=0", "determinism": "3 次连续一致"},
+    "ponygo_status": {"exit": 0, "note": "L0-L2 机械判据全 PASS；2.4 接线、2.5 docs-tier: on"},
+    "verify_note": {"exit": 0, "note": "1.1-1.10 整树"},
+    "acceptance": {"result": "PASS=31 FAIL=0 SKIP=1 exit=0"},
+    "secret_scan": {"exit": 0, "scope": "480 tracked files"}
+  },
+  "known_gaps": [
+    "安装版 ponygo CLI 落后框架仓一版 → upgrade --check 报 6 drift（框架仓 CLI 跑为零漂移）；裁决：不动 host CLI，登记 known drift",
+    "CI 门禁为 A5 单步（ci-verify），--no-verify 仍可绕过本地层；已在 alt-governance note §二 显式声明",
+    ".meta/gates/README.md 未登记 secret-scan 的承诺→命令行（升模板消 drift 的取舍，登记为已知 drift）",
+    "未修（合法 backlog）：supersession/toast 链、rejected/ 目录、ROADMAP 过期、archived 哈希封印、crates README 空壳、release-gate 登记、pre-push 中继层、observe 声明"
+  ],
+  "observability_gate": "not-applicable：本波仅治理/CI/文档资产，无对外接口、网络 IO、后台任务、LLM 调用、UI 交互变更",
+  "reviews": {
+    "plan": ".dev-team/review-plan-governance.json",
+    "join": [".dev-team/review-join-a.json", ".dev-team/review-join-b.json"],
+    "l3p": ".dev-team/review-l3p.json"
+  }
+}

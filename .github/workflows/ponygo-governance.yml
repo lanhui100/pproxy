@@ -12,4 +12,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # 实例追加步（A5 是实例可编辑文件，不进宇宙表，故不产生 drift）：
+      # 「凭据不进版本库」需要远端兜底——本地 pre-commit 可被 `git commit --no-verify` 跳过。
+      # 判定本体仍在 .meta/gates/secret-scan.sh，此处只调一行，不复制判据（P9）。
+      # 扫描面 = 索引 + HEAD（CI 上两者同源），无网络依赖、秒级。
+      - run: bash .meta/gates/secret-scan.sh
       - run: bash .meta/gates/ci-verify.sh

@@ -59,6 +59,12 @@ desktop/releases/
 
 # AI 测试运行产物（2026-10-30 治理修复：gateway-logs/metrics/probe CSV 属运行时采样，
 # 可再生产且曾夹带明文凭据；只保留脚本与 .md 结论。解跟踪用 git rm --cached，勿删磁盘文件）
+# 规则按**产物目录语义**收窄，不做 `.agents/tests/**/*.txt|*.csv` 的全树扩展名封杀——
+# 否则将来放进来的 golden 夹具（如 `golden/expected.txt`）会被迫 `git add -f`，
+# 而"必须要 -f 才能入库"的目录最终会长出绕过门的习惯。故只覆盖：日志目录、抓包原文、
+# 稳定性跑测各轨的采样文件。
 .agents/tests/**/logs/
-.agents/tests/**/*.txt
-.agents/tests/**/*.csv
+.agents/tests/stability-*/*/raw/
+.agents/tests/stability-*/*/*.csv
+.agents/tests/stability-*/*/*.txt
+.agents/tests/stability-*/test-token.txt

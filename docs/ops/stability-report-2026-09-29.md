@@ -5,7 +5,7 @@
 - **目的**：全面验证代理网络稳定性，量化网络波动对 ponyllm 服务的影响
 - **方法**：四路并行探测（agent team 分工）+ 近 24h 历史证据；方法论 ADR：
   `.agents/notes/implemented/testing/2026-09-29-proxy-network-stability-test.md`
-- **测试窗口**：16:45–17:13 CST（约 25–28 分钟）；数据与脚本：`.agents/tests/stability-2026-09-29/`
+- **测试窗口**：16:45–17:13 CST（约 25–28 分钟）；脚本与计划：`.agents/tests/stability-2026-09-29/`
 
 ---
 
@@ -128,4 +128,5 @@
 
 - 专用测试令牌（id=26）于测试完成后 **已吊销**（`DELETE /api/tokens/26`）。
 - 全部 K8s 操作只读（exec/logs/get/cp），未修改任何资源；未改动任何生产配置；测试负载远低于网关 `verify_concurrency=30`。
-- 数据与脚本：`.agents/tests/stability-2026-09-29/`（forward/、reverse/、network/、ponyllm/ 各轨原始 CSV+总结、PLAN.md）。
+- 脚本与结论：`.agents/tests/stability-2026-09-29/`（`PLAN.md`、各轨 `measure.sh`/`probe.sh`、各级 `summary.md`）。
+- 原始数据（CSV/24h 日志）**不随仓库分发**：`.agents/tests/**` 的 `*.csv`/`*.txt`/`logs/` 已 ignore 且不再跟踪（见 `.gitignore`）；需要复现时按 `PLAN.md` 与各轨脚本重跑生成。
