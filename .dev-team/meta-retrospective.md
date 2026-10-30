@@ -29,3 +29,13 @@
 3. **「门禁对象 = 提交对象」应上升为通用判据**：`secret-scan` 扫工作树而非索引，是「门禁输入面与真实输入面不一致」的典型。建议在 references 里沉淀一条通则：*任何 pre-commit 门必须对 `git diff --cached` 的字节生效，而不是编辑器里的工作树*。
 4. **FAIL 后的复审要有单一路径**：本轮由 1 个复审 Subagent 覆盖全部 BLOCKING，并把原 3 路判据逐条回放（含未修复的 ADVISORY 是否被吹成 PASS），比重新派 3 路更省且更聚焦；建议写进 SKILL 的 barrier 回退闭环。
 5. **测试套件的外部 oracle 要 pin**：`tests/governance` 依赖 PATH 上的 `ponygo`，未版本化；建议后续把 oracle 收进 `tests/governance/tools/`（或 CI 安装钉版本），否则套件只在单机可信。
+
+## 5. Wave-2 增量（清 backlog：取代链/索引/中继层/封印/承诺登记）
+
+- **契约演进走了正道**：Wave-2 不新建套件，而是在冻结套件上**尾部追加** G10–G16（G0–G9 逐字节未动、`run.sh` 仅追加 REQUIRED_CASES/CASE_TABLE），由 Lead 重新锚定 `3285846` 后才允许实施。红相 PASS=10/FAIL=7 → 绿 17/17，检测器还做了「参考实现转绿 + 逐条突变转红」双向验证。
+- **中继层真的会拦人**：新增 `.githooks/pre-push`（治理套件 4s，超 120s 预算即拒；降级需两条轻检查都在）。第一轮 L3-A 实测抓到 **BLOCKING：降级路径 fail-open**（脚本全删仍打印「通过」rc=0），修复后 Lead 亲测：删三处门禁再 push → `[pre-push BLOCKED] 无可用门禁 … 拒绝 push` rc=1。这条比任何书面纪律都更能说明「门禁必须自己先被门禁过」。
+- **探针陷阱（值得写进 references）**：复审时 `cp -r src dst` 在目标已存在时会把 `src` 嵌进 `dst/src`，导致旧钩子照旧执行、反例「看起来没修好」。凡是「复制钩子到克隆仓做行为验证」的用例，必须用 `cp -f src/* dst/` 并断言钩子内容哈希，否则测的是上一版。
+- **归档封印**：`archive-seal.sh --write/--check` + `SHA256SUMS`（1 条）+ spec 9/9；L3 复审还抓出「任意层级同名清单被当排除项、符号链接漏扫」两条判据漏洞，均已修（只排除顶层、纳入 `-type l`）。
+- **文档诚实度**：ROADMAP 从「M1–M6 叙事 + M5 五个未采用的 React 勾选项」改成「M1–M7 当前态表 + 证据路径 + 原计划未采用」，承诺表把 `--feed` 未接线、pre-push 为间接调用都直说，不把「写了」当「接了」。
+- **剩余 backlog（未做，已登记）**：公共历史 token 的 `filter-repo` 清理（需用户授权 force-push）、GitHub 分支保护/required check（需仓库管理员）、`crates/*/README.md` 四段扩容、`tests/governance` 的 ponygo oracle pin。Wave-2 未新增 L3-P：本波为文档/钩子/门禁资产，未触碰运行时代码（`git diff --name-only 3285846..HEAD -- 'crates/**/src/**'` 为空），六问在 Wave-1 已逐项映射。
+

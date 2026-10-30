@@ -56,6 +56,24 @@
     "desktop/README.md",
     ".agents/notes/"
    ]
+  },
+  {
+   "wave": 2,
+   "name": "backlog-wave2",
+   "commits": [
+    "c4af964",
+    "be14b98"
+   ],
+   "members": [
+    "executor"
+   ],
+   "write_scopes": [
+    "README.md",
+    "docs/",
+    " .agents/notes/",
+    " .meta/gates/",
+    " .githooks/"
+   ]
   }
  ],
  "gates": {
@@ -82,6 +100,19 @@
   "secret_scan": {
    "exit": 0,
    "scope": "480 tracked files"
+  },
+  "wave2_red": {
+   "commit": "3285846",
+   "result": "PASS=10 FAIL=7 exit=1"
+  },
+  "wave2_green": {
+   "head": "be14b98",
+   "result": "PASS=17 FAIL=0 exit=0"
+  },
+  "wave2_reviews": {
+   "l3a": "FAIL→BLOCKING 已修（pre-push fail-open）",
+   "l3b": "PASS",
+   "rereview": "PASS"
   }
  },
  "known_gaps": [
@@ -103,7 +134,7 @@
   ],
   "l3p": ".dev-team/review-l3p.json"
  },
- "head_commit": "4aa2764",
+ "head_commit": "be14b98",
  "closed_at": "2026-10-30",
  "review_verdicts": {
   "plan": "PASS",
