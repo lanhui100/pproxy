@@ -78,7 +78,10 @@
   {
    "wave": 3,
    "name": "backlog-tier0",
-   "commits": [],
+   "commits": [
+    "54965a2",
+    "492163f"
+   ],
    "members": [
     "lead"
    ],
@@ -130,7 +133,10 @@
   },
   "wave3_receipts": {
    "audit_run_specs": "3 ok + 1 skipped(adr-verify 模板)",
-   "oracle_pin": "ponygo@7055ced"
+   "oracle_pin": "ponygo@7055ced",
+   "governance": "17/17",
+   "crates_readme": "5 份四段 (47/55/46/56/51 行)",
+   "ci_oracle": "$HOME/.local/bin + GITHUB_PATH"
   }
  },
  "known_gaps": [
@@ -138,7 +144,6 @@
   "GitHub 默认分支无保护、无 required status check：CI 红灯不阻断合并（需仓库管理员设置）",
   "release-gate.sh --feed 分支未接任何 workflow（access 域手动 sync 有时序滞后），接线须先解决时序",
   "observe 四维 ob0→ob1 显式 deferred（决策 note 2026-10-30-observe-dimension-deferred，含重估触发条件）",
-  "crates/{cli,core,engine,server,transport}/README.md 仍是 9–15 行空壳（四段扩容未做）",
   "安装版 ponygo CLI 落后框架仓一版（内嵌 verify-note 1.1–1.9）；用框架仓 CLI 跑 upgrade --check 为零漂移",
   "secret-scan 对象库损坏时 git grep rc=1 与无命中同码（边界 4 已声明；用 git fsck 专项）",
   "pre-commit 哨兵块先于 secret-scan（任一 FAIL 仍阻断提交，属顺序语义）",
@@ -153,7 +158,7 @@
   ],
   "l3p": ".dev-team/review-l3p.json"
  },
- "head_commit": "pending",
+ "head_commit": "492163f",
  "closed_at": "2026-10-30",
  "review_verdicts": {
   "plan": "PASS",
