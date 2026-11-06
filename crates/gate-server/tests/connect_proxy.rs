@@ -43,7 +43,16 @@ impl GateServer {
         let connect_port = free_port();
 
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_pproxy-gate-server"));
-        cmd.env("HOST", "127.0.0.1")
+        // 被拉起的真实二进制会按 HOME 落 `~/.pony/gate_usage.json` 用量账本；
+        // 未覆盖 HOME 时测试会污染开发者本机的账本，故每实例给独立临时的 HOME。
+        let it_home = std::env::temp_dir().join(format!(
+            "pproxy-gate-it-{}-{}",
+            std::process::id(),
+            http_port
+        ));
+        std::fs::create_dir_all(&it_home).expect("create isolated HOME for gate-server IT");
+        cmd.env("HOME", &it_home)
+            .env("HOST", "127.0.0.1")
             .env("PORT", http_port.to_string())
             .env("TUNNEL_TOKEN_HASH", sha256_hex(TOKEN))
             .env("PROXY_SECRET", "it-proxy-secret")

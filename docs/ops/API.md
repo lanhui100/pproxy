@@ -62,6 +62,24 @@ CONNECT <host>:443 HTTP/1.1                       # 经 nginx stream :8443 → g
   `X-Pony-Reason: quota_exceeded`。
 - 部署前置（stream 模块 / 顶层 include / `ufw allow 8443`）见 DEPLOY.md §0.1。
 
+### 用户档案与配额口径（公网 Gate）
+
+```
+GET https://<gate域名>/api/user/profile
+Authorization: Bearer <usr_live_ 令牌>
+```
+
+响应体 `{"code":0,"user":{sub,name,status,quota_bytes,used_bytes,expire_at,days_left,max_conns,role,unlimited}}`：
+
+- `used_bytes` 是网关按 `claims.sub` 累计的已用字节，进程重启由 `~/.pony/gate_usage.json` 恢复；
+  到达账单日（`GATE_BILLING_DAY`，默认 1，UTC 00:00 为结算点）时归档上一周期并归零本周期。
+- 普通租户：`unlimited=false`；`quota_bytes` / `expire_at` 取自令牌自包含载荷，
+  `status=quota_exceeded` 表示已达或超出配额（数据面分别回 402 / 403 `quota_exceeded` / WS 4402）。
+- `role=admin`：`unlimited=true`；`quota_bytes` 为整机 VPS 月度基线 `536870912000`（500 GiB），
+  `used_bytes` 为本账单周期全租户聚合水位，`expire_at` / `days_left` 语义切换为**下一次账单周期
+  重置点**与剩余天数，`status` 恒为 `active`（管理员不进配额熔断）。
+- 只计量经本网关的数据面字节；VPS 上不经过网关的出网流量不计入该水位。
+
 ## 管理面（:8900，仅 127.0.0.1，Bearer admin_token）
 
 ```

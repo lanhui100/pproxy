@@ -52,6 +52,7 @@
 | `PPROXY_CLUSTER_KEY` | 集群间通信签名密钥（跨节点转发签发 `X-Pony-Cluster-Ticket` 鉴权） |
 | `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥 Hex（各节点本地无状态验签，只读注入） |
 | `GATE_ADMIN_TOKEN` | 轻量 Gate 服务管理接口 Bearer Token（用于黑名单撤销热推送） |
+| `GATE_BILLING_DAY` | VPS 月度账单结算日（1-28，UTC 00:00 为结算点）：网关按此归档上一周期用量并归零，账本 `~/.pony/gate_usage.json` |
 | `GATE_ADMIN` | 网关管理端点地址（CLI 撤销热推送目标，默认 `http://127.0.0.1:3101`） |
 | `PPROXY_CF_GATE_SCRIPT_NAME` | gate 单独用量来源（B012）：填 gate Worker 名（如 `pony-gate`）后，`/api/quota` 出现 `gate_cf` 来源独立展示隧道请求数并参与阈值告警；**默认留空 = 关闭**（仅保留全账号 cf 来源，行为不变） |
 | `PPROXY_SERVICE_USER` | `m4_test.sh` 断言的服务运行用户（默认 `pproxy`） |

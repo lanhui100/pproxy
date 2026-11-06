@@ -19,6 +19,7 @@
 | `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥（hex）；存在则启用 `usr_live_` 令牌校验 | 未设 = 仅单口令模式 |
 | `GATE_CONNECT_LISTEN` | 公网 CONNECT 数据面监听地址（如 `0.0.0.0:8443`） | **未设/空 = 不监听**（fail-closed，只打一行 info） |
 | `GATE_CONNECT_MAX_LIFETIME_SECS` | 单连接绝对生命周期上限 | `86400`（缺失/非法回落） |
+| `GATE_BILLING_DAY` | VPS 月度账单结算日（1-28，UTC 00:00 为结算点） | `1`（缺失/非法回落，越界 clamp） |
 
 ## 公网 CONNECT 数据面
 
@@ -62,11 +63,22 @@ TLS 密文而非 HTTP 报文，因此该面不走 hyper，直接在 `TcpStream` 
 单连接绝对生命周期 86400 s（`GATE_CONNECT_MAX_LIFETIME_SECS` 可覆盖）。
 
 **计量**：多租户模式下按 `claims.sub` 双向计量字节数并落配额；管理员 `claims` 不受配额熔断
-（与 `lib.rs::quota_limit` 同口径）。传输中越过配额会立即断开中继。
+（与 `lib.rs::quota_limit` 同口径），但流量**照常计量**——否则整机账单周期水位漏计。
+传输中越过配额会立即断开中继。
 
 **部署前置**：公网入口由 nginx `stream` 模块在 `:8443` 上做四层转发到 `GATE_CONNECT_LISTEN`，
 并放行防火墙（`ufw allow 8443`）。步骤见 `docs/ops/DEPLOY.md` §0.1，客户端侧下发形状见
 `docs/ops/API.md`「移动端订阅与 CONNECT 数据面」。
+
+## 用量账本与账单周期
+
+- 账本文件 `~/.pony/gate_usage.json`（随 `HOME` 定位），形状
+  `{"cycle_key":"2026-11","billing_day":1,"users":{"usr_x":123},"updated_at":<unix>}`。
+- 启动即恢复水位；文件缺失或解析失败 → 空账本 + 一行 warn，不阻塞启动。
+- 运行期每 10 s 后台任务落盘（临时文件 + `rename` 原子替换）；账本无变化时跳过写入。
+- 跨周期（`GATE_BILLING_DAY`，clamp 到 1-28）时上一周期归档为 `gate_usage_<cycle_key>.json`，
+  当前水位归零。
+- 水位口径是**经本网关计量的字节**；VPS 上绕过网关的出网流量不计入。
 
 ## 限制（明确不支持）
 

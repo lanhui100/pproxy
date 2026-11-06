@@ -23,3 +23,6 @@ http-body-util = { workspace = true }
 hyper = { workspace = true }
 url = { workspace = true }
 tower = { version = "0.5" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

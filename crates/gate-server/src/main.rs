@@ -48,15 +48,26 @@ async fn main() -> anyhow::Result<()> {
     let revoked_tokens = std::sync::Arc::new(dashmap::DashSet::new());
     pproxy_gate_server::load_revoked_tokens(&revoked_tokens);
 
+    let user_used_bytes = std::sync::Arc::new(dashmap::DashMap::new());
+    // 用量账本：启动恢复 + 每 10s 落盘并检查账单周期滚动（ADR 2026-11-05）
+    let usage_manager = std::sync::Arc::new(pproxy_gate_server::usage::UsageManager::new(
+        pproxy_gate_server::usage::default_usage_path(),
+        pproxy_gate_server::usage::get_billing_day(),
+        user_used_bytes.clone(),
+    ));
+    usage_manager.load_or_init();
+    usage_manager.clone().spawn_periodic_sync();
+
     let state = std::sync::Arc::new(pproxy_gate_server::ServerConfig {
         tunnel_token_hash: token_hash,
         proxy_secret,
         client,
         verifier,
         user_active_conns: std::sync::Arc::new(dashmap::DashMap::new()),
-        user_used_bytes: std::sync::Arc::new(dashmap::DashMap::new()),
+        user_used_bytes,
         revoked_tokens,
         gate_admin_token,
+        usage_manager: Some(usage_manager),
     });
 
     let app = pproxy_gate_server::build_router(state.clone());

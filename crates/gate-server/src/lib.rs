@@ -12,6 +12,7 @@
 //!    - Reports token hash presence & length for alignment check
 
 pub mod connect_proxy;
+pub mod usage;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -45,6 +46,7 @@ pub struct ServerConfig {
     pub user_used_bytes: Arc<dashmap::DashMap<String, std::sync::atomic::AtomicU64>>,
     pub revoked_tokens: Arc<dashmap::DashSet<String>>, // 黑名单撤销表（存储已废止的 jti 或 sub）
     pub gate_admin_token: String, // 管理端点鉴权（POST /api/revoke 等），来源于 ENV GATE_ADMIN_TOKEN
+    pub usage_manager: Option<Arc<usage::UsageManager>>,
 }
 
 /// 从 `~/.pony/revoked_tokens.txt` 加载既有撤销条目（幂等；文件缺失视为空）
@@ -239,22 +241,51 @@ async fn handle_user_profile(
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                let days_left = if claims.exp > now {
-                    (claims.exp - now) / 86400
+
+                let is_admin = is_admin_claims(&claims);
+                let (quota_bytes, used_bytes, expire_at, days_left, unlimited) = if is_admin {
+                    // Admin 账户映射 VPS 整机 500GB 基准与 RN VPS 账单月度周期
+                    let billing_day = cfg
+                        .usage_manager
+                        .as_ref()
+                        .map(|m| m.billing_day())
+                        .unwrap_or_else(usage::get_billing_day);
+                    let (_cycle, next_reset_ts, cycle_days_left) =
+                        usage::compute_billing_cycle(now, billing_day);
+                    let vps_total_used = cfg
+                        .usage_manager
+                        .as_ref()
+                        .map(|m| m.total_used_bytes())
+                        .unwrap_or(used);
+                    (
+                        usage::VPS_TOTAL_QUOTA_BYTES,
+                        vps_total_used,
+                        next_reset_ts,
+                        cycle_days_left,
+                        true,
+                    )
                 } else {
-                    0
+                    let dl = if claims.exp > now {
+                        (claims.exp - now) / 86400
+                    } else {
+                        0
+                    };
+                    (claims.quota_bytes, used, claims.exp, dl, false)
                 };
+
                 let resp = serde_json::json!({
                     "code": 0,
                     "user": {
                         "sub": claims.sub,
                         "name": claims.name,
-                        "status": if quota_limit(&claims).is_some_and(|quota| used >= quota) { "quota_exceeded" } else { "active" },
-                        "quota_bytes": claims.quota_bytes,
-                        "used_bytes": used,
-                        "expire_at": claims.exp,
+                        "status": if is_admin { "active" } else if quota_limit(&claims).is_some_and(|quota| used >= quota) { "quota_exceeded" } else { "active" },
+                        "quota_bytes": quota_bytes,
+                        "used_bytes": used_bytes,
+                        "expire_at": expire_at,
                         "days_left": days_left,
-                        "max_conns": claims.max_conns
+                        "max_conns": claims.max_conns,
+                        "role": claims.role,
+                        "unlimited": unlimited,
                     }
                 });
                 (StatusCode::OK, [("content-type", "application/json")], resp.to_string()).into_response()
@@ -909,15 +940,25 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
     let revoked_tokens = Arc::new(dashmap::DashSet::new());
     load_revoked_tokens(&revoked_tokens);
 
+    let user_used_bytes = Arc::new(dashmap::DashMap::new());
+    let usage_manager = Arc::new(usage::UsageManager::new(
+        usage::default_usage_path(),
+        usage::get_billing_day(),
+        user_used_bytes.clone(),
+    ));
+    usage_manager.load_or_init();
+    usage_manager.clone().spawn_periodic_sync();
+
     let state = Arc::new(ServerConfig {
         tunnel_token_hash: token_hash,
         proxy_secret,
         client,
         verifier,
         user_active_conns: Arc::new(dashmap::DashMap::new()),
-        user_used_bytes: Arc::new(dashmap::DashMap::new()),
+        user_used_bytes,
         revoked_tokens,
         gate_admin_token,
+        usage_manager: Some(usage_manager),
     });
 
     // 契约 C1：标准 HTTP CONNECT 正向代理裸 TCP 监听（env GATE_CONNECT_LISTEN，未设置则不启动）。

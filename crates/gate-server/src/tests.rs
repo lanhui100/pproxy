@@ -24,6 +24,7 @@ mod tests {
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
+            usage_manager: None,
         });
 
         let app = build_router(cfg.clone());
@@ -186,6 +187,7 @@ mod tests {
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
+            usage_manager: None,
         });
 
         let app = build_router(cfg.clone());
@@ -233,6 +235,7 @@ mod tests {
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
+            usage_manager: None,
         });
 
         let app = build_router(cfg.clone());
@@ -261,5 +264,75 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["user"]["status"], "quota_exceeded", "role=user 不得因 name 前缀豁免");
+        assert_eq!(json["user"]["unlimited"], false);
+    }
+
+    /// ADR 2026-11-05：Admin 账户 profile 映射 RN VPS 整机 500GB 配额与账单周期重置点，
+    /// `used_bytes` 为当前账单周期内经持久化账本聚合的全体租户水位（服务端为唯一真相源）。
+    #[tokio::test]
+    async fn test_admin_profile_maps_vps_quota_and_billing_cycle() {
+        let (signer, vk) = TokenSigner::generate();
+        let verifier = Arc::new(pproxy_core::TokenVerifier::new(vk));
+        let used_bytes = Arc::new(dashmap::DashMap::new());
+
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(crate::usage::UsageManager::new(
+            dir.path().join("gate_usage.json"),
+            1,
+            used_bytes.clone(),
+        ));
+        manager.load_or_init();
+        used_bytes.insert("usr_a".into(), std::sync::atomic::AtomicU64::new(1_000));
+        used_bytes.insert("usr_b".into(), std::sync::atomic::AtomicU64::new(2_000));
+        manager.persist();
+
+        let cfg = Arc::new(ServerConfig {
+            tunnel_token_hash: "".into(),
+            proxy_secret: "sec".into(),
+            client: reqwest::Client::new(),
+            verifier: Some(verifier),
+            user_active_conns: Arc::new(dashmap::DashMap::new()),
+            user_used_bytes: used_bytes.clone(),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: "test-admin".into(),
+            usage_manager: Some(manager),
+        });
+
+        let app = build_router(cfg.clone());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let claims = UserTokenClaims {
+            jti: "jti-admin-vps".into(),
+            sub: "usr_admin".into(),
+            name: "admin".into(),
+            quota_bytes: 1,
+            lease_bytes: 1,
+            exp: now + 3600,
+            iat: now,
+            max_conns: 8,
+            role: "admin".into(),
+        };
+        let token = signer.sign_token(&claims).unwrap();
+
+        let req = Request::builder()
+            .uri("/api/user/profile")
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["user"]["status"], "active", "管理员豁免配额熔断");
+        assert_eq!(json["user"]["unlimited"], true);
+        assert_eq!(json["user"]["role"], "admin");
+        assert_eq!(json["user"]["quota_bytes"], crate::usage::VPS_TOTAL_QUOTA_BYTES);
+        assert_eq!(json["user"]["used_bytes"], 3_000, "管理员看到的是整机聚合水位而非自身令牌额度");
+
+        let after = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let (_, reset_ts, days_left) = crate::usage::compute_billing_cycle(after, 1);
+        assert_eq!(json["user"]["expire_at"], reset_ts, "管理员到期时间语义为账单周期重置点");
+        let got = json["user"]["days_left"].as_u64().unwrap();
+        assert!(got == days_left || got + 1 == days_left, "days_left 应等于距账单重置的天数，实际 {got} vs {days_left}");
     }
 }

@@ -219,6 +219,10 @@ interface ServerUserProfile {
   expire_at: number
   days_left: number
   max_conns: number
+  /** 令牌角色；admin 表示网关免除配额熔断（ADR 2026-10-03） */
+  role?: string
+  /** 服务端判定为“不限额”：配额语义切换为整机 VPS 账单周期（ADR 2026-11-05） */
+  unlimited?: boolean
 }
 const serverUserProfile = ref<ServerUserProfile | null>(null)
 
@@ -237,21 +241,34 @@ async function refreshUserProfile(): Promise<void> {
 
 const userQuotaDisplay = computed(() => {
   if (!userClaims.value) return null
-  const quota = userClaims.value.quota_bytes
+  const claims = userClaims.value
+  const profile = serverUserProfile.value
+  // 管理员：配额语义切换为 RN VPS 整机月度账单周期（服务端账本为唯一真相源，ADR 2026-11-05）
+  const unlimited = profile?.unlimited === true || isAdmin.value
+  const quota = unlimited
+    ? (profile && profile.quota_bytes > 0 ? profile.quota_bytes : VPS_MONTHLY_LIMIT_BYTES)
+    : claims.quota_bytes
   // 真相源：优先消费服务端网关实际累计的 used_bytes，未获取到时安全兜底 0，杜绝全机流量污染
-  const used = serverUserProfile.value?.used_bytes ?? 0
+  const used = profile?.used_bytes ?? 0
   const pct = quota > 0 ? Math.min(100, Math.max(0, (used / quota) * 100)) : 0
-  const expDate = new Date(userClaims.value.exp * 1000)
-  const isQuotaExceeded = serverUserProfile.value?.status === 'quota_exceeded' || (quota > 0 && used >= quota)
+  // 管理员“到期时间”语义 = 下一次账单周期重置点（服务端下发 expire_at / days_left）
+  const deadlineTs = unlimited && profile?.expire_at ? profile.expire_at : claims.exp
+  const deadline = new Date(deadlineTs * 1000)
+  const isExpired = !unlimited && Date.now() > claims.exp * 1000
+  const isQuotaExceeded =
+    !unlimited && (profile?.status === 'quota_exceeded' || (quota > 0 && used >= quota))
   return {
-    sub: userClaims.value.sub,
-    name: userClaims.value.name || userClaims.value.sub,
+    sub: claims.sub,
+    name: claims.name || claims.sub,
     usedBytes: used,
     quotaBytes: quota,
-    maxConns: userClaims.value.max_conns,
+    maxConns: claims.max_conns,
     percent: pct.toFixed(1),
-    expStr: expDate.toLocaleDateString(),
-    isExpired: Date.now() > userClaims.value.exp * 1000,
+    unlimited,
+    expStr: deadline.toLocaleDateString(),
+    deadlineLabel: `${deadline.getMonth() + 1}月${deadline.getDate()}日`,
+    daysLeft: unlimited ? (profile?.days_left ?? 0) : 0,
+    isExpired,
     isQuotaExceeded,
   }
 })
@@ -669,8 +686,11 @@ const statusText = computed(() => {
 // 轮询：测速 10 分钟一轮（对齐 2 小时 12 根柱条）；用量与实时速率 1 秒一刷
 const POLL_TEST_MS = 10 * 60 * 1000
 const POLL_TRAFFIC_MS = 1000
+// 网关 profile（权威配额/账单周期水位）30s 一刷，避免每秒打网关
+const POLL_PROFILE_MS = 30 * 1000
 let testTimer: ReturnType<typeof setInterval> | undefined
 let trafficTimer: ReturnType<typeof setInterval> | undefined
+let profileTimer: ReturnType<typeof setInterval> | undefined
 let unlistenStatus: (() => void) | undefined
 let unlistenMode: (() => void) | undefined
 let unlistenReady: (() => void) | undefined
@@ -687,6 +707,7 @@ onMounted(async () => {
   }
   testTimer = setInterval(() => void runAllTests(), POLL_TEST_MS)
   trafficTimer = setInterval(() => void refreshTraffic(), POLL_TRAFFIC_MS)
+  profileTimer = setInterval(() => void refreshUserProfile(), POLL_PROFILE_MS)
 
   if (isTauri()) {
     try {
@@ -717,6 +738,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (testTimer) clearInterval(testTimer)
   if (trafficTimer) clearInterval(trafficTimer)
+  if (profileTimer) clearInterval(profileTimer)
   if (unlistenStatus) unlistenStatus()
   if (unlistenMode) unlistenMode()
   if (unlistenReady) unlistenReady()
@@ -1228,7 +1250,8 @@ async function submitImportOrChained() {
           <div v-if="userQuotaDisplay" class="pt-3.5 space-y-1.5 text-xs">
             <div class="flex items-center justify-between text-[11px] text-muted-foreground">
               <span class="flex items-center gap-1">
-                <span>用户配额 ({{ userQuotaDisplay.name }})</span>
+                <span v-if="userQuotaDisplay.unlimited">VPS 月度用量（管理员 · 整机 500GB）</span>
+                <span v-else>用户配额 ({{ userQuotaDisplay.name }})</span>
                 <span v-if="userQuotaDisplay.isExpired" class="text-rose-500 font-medium">已过期</span>
                 <span v-else-if="userQuotaDisplay.isQuotaExceeded" class="text-rose-500 font-medium">额度已耗尽</span>
               </span>
@@ -1247,7 +1270,10 @@ async function submitImportOrChained() {
               ></div>
             </div>
             <div class="flex items-center justify-between text-[10px] text-muted-foreground/75 pt-0.5">
-              <span>到期时间：{{ userQuotaDisplay.expStr }}</span>
+              <span v-if="userQuotaDisplay.unlimited">
+                账单重置：{{ userQuotaDisplay.deadlineLabel }}（剩 {{ userQuotaDisplay.daysLeft }} 天）
+              </span>
+              <span v-else>到期时间：{{ userQuotaDisplay.expStr }}</span>
               <span>最大并发：{{ userQuotaDisplay.maxConns }}</span>
             </div>
           </div>

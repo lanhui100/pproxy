@@ -286,8 +286,10 @@ impl Meter {
 
     /// 记账并返回是否已耗尽配额（`true` → 调用方应中止双向中继）。
     /// 顺序与 /ws 一致：先交付成功再计费。
+    /// 注意：`quota` 为 `None`（管理员豁免 / 隧道主体）时仍须按 `uid` 记账，
+    /// 否则整机 VPS 账单周期水位会漏计管理员自身流量（ADR 2026-11-05）。
     fn charge(&self, n: u64) -> bool {
-        let (Some(uid), Some(quota)) = (self.uid.as_deref(), self.quota) else {
+        let Some(uid) = self.uid.as_deref() else {
             return false;
         };
         let entry = self
@@ -296,11 +298,12 @@ impl Meter {
             .entry(uid.to_string())
             .or_insert_with(|| std::sync::atomic::AtomicU64::new(0));
         let total = entry.fetch_add(n, Ordering::Relaxed) + n;
-        if total >= quota {
-            tracing::warn!(uid = %uid, used = total, quota, "CONNECT quota exceeded in-flight, aborting relay");
-            true
-        } else {
-            false
+        match self.quota {
+            Some(quota) if total >= quota => {
+                tracing::warn!(uid = %uid, used = total, quota, "CONNECT quota exceeded in-flight, aborting relay");
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -795,5 +798,43 @@ mod tests {
         assert!(matches!(err, Err(TargetError::AclDenied)));
         let err = resolve_target("::ffff:127.0.0.1", 443).await;
         assert!(matches!(err, Err(TargetError::AclDenied)));
+    }
+
+    /// ADR 2026-11-05 回归：`quota = None`（管理员豁免）也必须计费，
+    /// 否则整机 VPS 账单周期水位会漏计管理员自身流量。
+    #[test]
+    fn metering_charges_unlimited_principal() {
+        let cfg = Arc::new(crate::ServerConfig {
+            tunnel_token_hash: String::new(),
+            proxy_secret: String::new(),
+            client: reqwest::Client::new(),
+            verifier: None,
+            user_active_conns: Arc::new(dashmap::DashMap::new()),
+            user_used_bytes: Arc::new(dashmap::DashMap::new()),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: String::new(),
+            usage_manager: None,
+        });
+
+        let admin = Meter::new(Some("usr_admin".into()), None, cfg.clone());
+        assert!(!admin.charge(1024), "免配额主体不得触发熔断");
+        assert_eq!(
+            cfg.user_used_bytes
+                .get("usr_admin")
+                .unwrap()
+                .load(Ordering::Relaxed),
+            1024,
+            "免配额主体仍须累计进账单周期水位"
+        );
+
+        // 隧道主体（无 uid）不记账
+        let tunnel = Meter::new(None, None, cfg.clone());
+        assert!(!tunnel.charge(4096));
+        assert_eq!(cfg.user_used_bytes.len(), 1);
+
+        // 有配额主体仍按超额熔断
+        let limited = Meter::new(Some("usr_bob".into()), Some(1000), cfg.clone());
+        assert!(!limited.charge(500), "未超额不熔断");
+        assert!(limited.charge(600), "超额必须熔断");
     }
 }
