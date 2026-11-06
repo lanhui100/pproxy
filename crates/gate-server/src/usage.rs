@@ -1,9 +1,9 @@
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use dashmap::DashMap;
 
 /// VPS 默认每月总流量基线（500GB）
 pub const VPS_TOTAL_QUOTA_BYTES: u64 = 500 * 1024 * 1024 * 1024; // 536,870,912,000 bytes
@@ -17,10 +17,18 @@ pub fn compute_billing_cycle(now_ts: u64, billing_day: u32) -> (String, u64, u64
 
     // 账单周期的起始年月与结束年月
     let (start_y, start_m, end_y, end_m) = if day >= b_day {
-        let (next_y, next_m) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
+        let (next_y, next_m) = if month == 12 {
+            (year + 1, 1)
+        } else {
+            (year, month + 1)
+        };
         (year, month, next_y, next_m)
     } else {
-        let (prev_y, prev_m) = if month == 1 { (year - 1, 12) } else { (year, month - 1) };
+        let (prev_y, prev_m) = if month == 1 {
+            (year - 1, 12)
+        } else {
+            (year, month - 1)
+        };
         (prev_y, prev_m, year, month)
     };
 
@@ -119,26 +127,24 @@ impl UsageManager {
         }
 
         match std::fs::read_to_string(&self.path) {
-            Ok(content) => {
-                match serde_json::from_str::<UsageRecord>(&content) {
-                    Ok(rec) => {
-                        if rec.cycle_key == expected_cycle {
-                            for (uid, bytes) in rec.users {
-                                self.map.insert(uid, AtomicU64::new(bytes));
-                            }
-                            tracing::info!(path = %self.path.display(), cycle = %expected_cycle, users = self.map.len(), "restored usage from disk");
-                        } else {
-                            tracing::info!(old_cycle = %rec.cycle_key, new_cycle = %expected_cycle, "billing cycle rollover detected, archiving previous usage");
-                            self.archive_old_cycle(&rec);
-                            self.map.clear();
-                            self.persist();
+            Ok(content) => match serde_json::from_str::<UsageRecord>(&content) {
+                Ok(rec) => {
+                    if rec.cycle_key == expected_cycle {
+                        for (uid, bytes) in rec.users {
+                            self.map.insert(uid, AtomicU64::new(bytes));
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to parse gate_usage.json, starting with fresh cycle");
+                        tracing::info!(path = %self.path.display(), cycle = %expected_cycle, users = self.map.len(), "restored usage from disk");
+                    } else {
+                        tracing::info!(old_cycle = %rec.cycle_key, new_cycle = %expected_cycle, "billing cycle rollover detected, archiving previous usage");
+                        self.archive_old_cycle(&rec);
+                        self.map.clear();
+                        self.persist();
                     }
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse gate_usage.json, starting with fresh cycle");
+                }
+            },
             Err(e) => {
                 tracing::warn!(error = %e, "failed to read gate_usage.json");
             }
@@ -165,7 +171,37 @@ impl UsageManager {
         self.archive_old_cycle(&rec);
         *w = expected_cycle;
         drop(w);
-        self.map.clear();
+        self.subtract_archived(&rec.users);
+        self.persist();
+    }
+
+    /// 从现网水位扣除已归档部分：归档快照之后新流入的字节保留到新周期，避免跨周期窗口丢账。
+    /// 扣到 0 的条目随即移除（且仅在仍为 0 时移除），否则账本会随周期数堆积空用户。
+    fn subtract_archived(&self, users: &BTreeMap<String, u64>) {
+        for (uid, archived) in users {
+            let should_prune = match self.map.get(uid) {
+                Some(entry) => {
+                    entry
+                        .value()
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                            Some(cur.saturating_sub(*archived))
+                        })
+                        .is_ok()
+                        && entry.value().load(Ordering::Relaxed) == 0
+                }
+                None => false,
+            };
+            if should_prune {
+                self.map
+                    .remove_if(uid, |_, v| v.load(Ordering::Relaxed) == 0);
+            }
+        }
+    }
+
+    /// 进程退出前调用：先检查账单周期滚动，再强制落盘（跳过 dirty-check）。
+    pub fn flush_now(&self) {
+        self.check_and_rollover();
+        *self.last_persisted.write().unwrap() = String::new();
         self.persist();
     }
 
@@ -209,8 +245,12 @@ impl UsageManager {
             if *self.last_persisted.read().unwrap() == fingerprint {
                 return;
             }
-            let tmp_path = self.path.with_extension(format!("tmp.{}", std::process::id()));
-            if std::fs::write(&tmp_path, &data).is_ok() && std::fs::rename(&tmp_path, &self.path).is_ok() {
+            let tmp_path = self
+                .path
+                .with_extension(format!("tmp.{}", std::process::id()));
+            if std::fs::write(&tmp_path, &data).is_ok()
+                && std::fs::rename(&tmp_path, &self.path).is_ok()
+            {
                 *self.last_persisted.write().unwrap() = fingerprint;
             }
         }
@@ -227,6 +267,22 @@ impl UsageManager {
             }
         });
     }
+}
+
+/// 等待进程退出信号（Ctrl-C 或 SIGTERM），供服务端在主循环退出前落盘用量。
+pub async fn wait_for_exit_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 pub fn default_usage_path() -> PathBuf {
@@ -294,7 +350,10 @@ mod tests {
         let mgr2 = UsageManager::new(path.clone(), 1, map2.clone());
         mgr2.load_or_init();
 
-        assert_eq!(map2.get("usr_admin").unwrap().load(Ordering::Relaxed), 1024 * 1024);
+        assert_eq!(
+            map2.get("usr_admin").unwrap().load(Ordering::Relaxed),
+            1024 * 1024
+        );
         assert_eq!(map2.get("usr_bob").unwrap().load(Ordering::Relaxed), 2048);
     }
 
@@ -323,5 +382,49 @@ mod tests {
         let current: UsageRecord =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_ne!(current.cycle_key, "2000-01", "落盘账本必须切到当前周期");
+    }
+
+    /// 跨周期滚动只扣除已归档水位，归档快照之后涌入的流量保留到新周期。
+    #[test]
+    fn test_rollover_subtraction_keeps_new_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let map = Arc::new(DashMap::new());
+        let mgr = UsageManager::new(dir.path().join("gate_usage.json"), 1, map.clone());
+        mgr.load_or_init();
+
+        map.insert("usr_admin".to_string(), AtomicU64::new(1000));
+        let archived = BTreeMap::from([("usr_admin".to_string(), 1000u64)]);
+        // 快照之后又流入 500 字节
+        map.get("usr_admin")
+            .unwrap()
+            .value()
+            .fetch_add(500, Ordering::Relaxed);
+
+        mgr.subtract_archived(&archived);
+
+        assert_eq!(
+            map.get("usr_admin").unwrap().load(Ordering::Relaxed),
+            500,
+            "新周期必须保留归档后新增流量"
+        );
+    }
+
+    /// 归档后水位归零的用户必须从账本移除，否则每跨一次周期就沉淀一批 0 值条目。
+    #[test]
+    fn test_rollover_prunes_zeroed_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let map = Arc::new(DashMap::new());
+        let mgr = UsageManager::new(dir.path().join("gate_usage.json"), 1, map.clone());
+        mgr.load_or_init();
+
+        map.insert("usr_idle".to_string(), AtomicU64::new(4096));
+
+        mgr.subtract_archived(&BTreeMap::from([("usr_idle".to_string(), 4096u64)]));
+
+        assert!(
+            map.get("usr_idle").is_none(),
+            "归零用户必须从账本清理，落盘才是空用户表"
+        );
+        assert_eq!(mgr.total_used_bytes(), 0);
     }
 }

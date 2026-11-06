@@ -76,9 +76,14 @@ TLS 密文而非 HTTP 报文，因此该面不走 hyper，直接在 `TcpStream` 
   `{"cycle_key":"2026-11","billing_day":1,"users":{"usr_x":123},"updated_at":<unix>}`。
 - 启动即恢复水位；文件缺失或解析失败 → 空账本 + 一行 warn，不阻塞启动。
 - 运行期每 10 s 后台任务落盘（临时文件 + `rename` 原子替换）；账本无变化时跳过写入。
+- 收到 `SIGTERM`/`Ctrl-C` 时优雅停机并在退出前强制落盘（`UsageManager::flush_now`），
+  避免最后一次周期性刷盘之后 ≤10 s 的计量随进程消失。
 - 跨周期（`GATE_BILLING_DAY`，clamp 到 1-28）时上一周期归档为 `gate_usage_<cycle_key>.json`，
-  当前水位归零。
+  当前水位只扣除已归档部分——归档快照之后涌入的字节保留到新周期，不丢账；扣到 0 的用户条目
+  随即清理，`users` 表不随月数膨胀。
 - 水位口径是**经本网关计量的字节**；VPS 上绕过网关的出网流量不计入。
+- 冒烟自检（非零退出即失败）：`bash crates/gate-server/scripts/smoke-usage-ledger.sh`
+  覆盖「退出落盘 / 重启恢复 / 跨周期归档」三件事。
 
 ## 限制（明确不支持）
 

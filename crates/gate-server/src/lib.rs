@@ -958,7 +958,7 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
         user_used_bytes,
         revoked_tokens,
         gate_admin_token,
-        usage_manager: Some(usage_manager),
+        usage_manager: Some(usage_manager.clone()),
     });
 
     // 契约 C1：标准 HTTP CONNECT 正向代理裸 TCP 监听（env GATE_CONNECT_LISTEN，未设置则不启动）。
@@ -970,8 +970,12 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
     tracing::info!("Native Gate Server listening on {}", addr);
 
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .map_err(Into::into)
+        .with_graceful_shutdown(usage::wait_for_exit_signal())
+        .await?;
+    // 退出前强制落盘：否则最后一次周期刷盘之后 <=10s 的计量会随进程消失（ADR 2026-11-05）
+    usage_manager.flush_now();
+    tracing::info!("Gate Server stopped, usage ledger flushed");
+    Ok(())
 }
 
 #[cfg(test)]

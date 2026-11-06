@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
         user_used_bytes,
         revoked_tokens,
         gate_admin_token,
-        usage_manager: Some(usage_manager),
+        usage_manager: Some(usage_manager.clone()),
     });
 
     let app = pproxy_gate_server::build_router(state.clone());
@@ -77,7 +77,14 @@ async fn main() -> anyhow::Result<()> {
     pproxy_gate_server::connect_proxy::spawn_from_env(state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .map_err(Into::into)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(pproxy_gate_server::usage::wait_for_exit_signal())
+    .await?;
+    // 退出前强制落盘：否则最后 ≤10s 的计量会随进程消失（ADR 2026-11-05）
+    usage_manager.flush_now();
+    tracing::info!("Gate Server stopped, usage ledger flushed");
+    Ok(())
 }

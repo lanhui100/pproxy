@@ -20,10 +20,15 @@ Status: implemented
      保证序列化稳定；写入走「临时文件 + `rename`」原子替换，与 `revoked_tokens` 同构。
    - 启动 `load_or_init` 恢复水位；文件缺失/解析失败 → 空账本 + warn，不阻塞启动。
    - 后台任务每 10 s `check_and_rollover` + `persist`；以账本指纹做变更检测，无变化不写盘。
+   - 收到 `SIGTERM`/`Ctrl-C` 时走 `axum` 优雅停机，退出前 `UsageManager::flush_now()`
+     强制落盘（跳过 dirty-check），把最后一次周期刷盘之后 ≤10 s 的计量补写回去。
 2. **账单周期计算**：`compute_billing_cycle(now, billing_day)` 为纯函数（Howard Hinnant 民用历算法，
    无 `chrono` 依赖），返回 `(cycle_key="YYYY-MM", next_reset_ts, days_left)`；
    `GATE_BILLING_DAY` 默认 1，clamp 到 1..=28，结算点固定为 UTC 00:00。
-   跨周期时上一周期归档为 `gate_usage_<cycle_key>.json`，当前水位归零。
+   跨周期时上一周期归档为 `gate_usage_<cycle_key>.json`；当前水位按归档快照**扣减**而不是粗暴
+   `clear()`，归档瞬间之后新流入的字节留在新周期，堵住跨周期窗口丢账。
+   扣减后归零的用户条目立刻从内存账本移除（`remove_if` 二次确认仍为 0），否则每跨一次周期
+   就沉淀一批 0 值用户，`users` 表随月数单调膨胀。
 3. **`/api/user/profile` 身份感知**（`crates/gate-server/src/lib.rs`）：
    - `role=admin`（`is_admin_claims`）：`quota_bytes = 536870912000`（500 GiB 整机基线）、
      `used_bytes = 本周期全租户聚合水位`、`expire_at = 下次账单重置点`、`days_left = 距重置天数`、
@@ -37,6 +42,10 @@ Status: implemented
 
 ## Alternatives considered
 
+- **只靠 10 s 周期刷盘，不做退出落盘**：网关重启/发布滚动时最后 ≤10 s 的流量静默丢失，
+  洽好复现用户报的“重启归零”观感。改为优雅停机 + `flush_now()`。否决。
+- **跨周期直接 `map.clear()`**：归档快照到 `clear()` 之间（同进程内毫秒级窗口）的增量被吞掉，
+  月月漏一点。改为按快照扣减（`saturating_sub`），语义等价归零但不丢账。否决 `clear()`。
 - **只在前端把 admin 写死为 500GB**：网关 profile 仍返回 50GB，移动端/Clash 订阅口径不一致；
   且解决不了重启归零与账单周期缺失。否决。
 - **引入 Redis / SQLite 承载计量**：gate 部署在 1C1G 微型 VPS，外部依赖的运维与内存成本高于收益；
@@ -58,6 +67,9 @@ Status: implemented
 ## 机械验收
 
 - `cargo test -p pproxy-gate-server`：`usage::tests::{compute_billing_cycle_*,
-  usage_manager_persistence_and_restore}`、`tests::tests::test_admin_profile_maps_vps_quota_and_billing_cycle`、
-  `connect_proxy::tests::metering_charges_unlimited_principal` 全绿（15 单元 + 8 集成）。
-- `cd desktop && npm run check`（vue-tsc）与 `npm test`（116 用例）通过。
+  usage_manager_persistence_and_restore, rollover_subtraction_keeps_new_bytes,
+  rollover_prunes_zeroed_users}`、`tests::tests::test_admin_profile_maps_vps_quota_and_billing_cycle`、
+  `connect_proxy::tests::metering_charges_unlimited_principal` 全绿（17 单元 + 8 集成）。
+- `bash crates/gate-server/scripts/smoke-usage-ledger.sh`：真实二进制跑「SIGTERM 退出落盘 /
+  重启恢复 / 跨周期归档归零」，非零退出即失败（2026-11-06 实测 OK）。
+- `cd desktop && npm run check`（vue-tsc）、`npm test`（116 用例）、`npm run lint` 通过。
