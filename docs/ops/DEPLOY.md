@@ -564,15 +564,34 @@ pproxy user add admin_ops --quota 100G --expires 1y --admin
 并直接打印该租户的 **Clash 订阅链接**、`clash://install-config` 一键导入深链与二维码（网关域名取 `tunnel_gate_url`，必须是 443 端口）。
 订阅链接等价于该用户凭据，仅限本人使用。
 
+#### 3.1.1 查询租户本周期用量
+
+```bash
+pproxy user usage            # 全部用户
+pproxy user usage alice      # 单用户
+```
+
+读网关真实账本（`POST /api/admin/usage`，走 3.2 的管理通道），输出
+`quota / used / remaining / usage / expires_at / state` 六列，`state` 取值
+`正常 / 额度耗尽 / 令牌过期 / 未开会员 / disabled`。该值与 `/clash` 的
+`subscription-userinfo: download=` 同源，不存在两套口径。
+
+账本里有、用户表里没有的租户显示为 `<name> (无本机记录)`（历史令牌或删号未清零的残留），
+避免流量在报表里"消失"。管理通道未配置时命令失败退出，而不是打印 0 误导判断。
+
 #### 3.2 撤销令牌 / 封禁租户热生效
 
 凭据失效有三条入口，语义不同但共用同一条管理通道：
 
 | 命令 | 语义 | 是否级联撤销 |
 |---|---|---|
-| `pproxy user rm <name>` | 删号（DB 行删除） | ✅ 自动撤销该用户的令牌 `jti` |
-| `pproxy user disable <name>` | 临时停用（DB 行保留） | ✅ 自动撤销该用户的令牌 `jti` |
+| `pproxy user rm <name>` | 删号（DB 行删除 + 用量账本清零） | ✅ 自动撤销该用户的令牌 `jti` |
+| `pproxy user disable <name>` | 临时停用（DB 行保留，用量保留） | ✅ 自动撤销该用户的令牌 `jti` |
 | `pproxy user revoke <name\|usr_live_...>` | 只撤销凭据 | ✅（本职） |
+
+`rm` 的用量清零走 `POST /api/admin/reset-usage`（同一管理通道），网关侧先落
+`~/.pony/usage_resets.log` 审计行（`ts= uid= before=`）再删除账本条目并立即刷盘。
+任一级联失败（撤销或清零）命令返回非零；未清零的话，同名重建会继承历史用量并首次握手即熔断。
 
 **管理通道（一次性配置）**
 

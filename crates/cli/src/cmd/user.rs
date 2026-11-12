@@ -9,7 +9,7 @@ use pproxy_core::Store;
 
 use crate::cmd::gate_admin;
 use crate::config::{self, load, PonyConfig};
-use crate::render::{fmt_ts, Table};
+use crate::render::{fmt_ts, human_bytes, Table};
 use crate::{EXIT_FAILURE, EXIT_OK};
 
 fn get_user_service() -> Result<UserService, String> {
@@ -487,6 +487,264 @@ pub fn list() -> Result<i32, String> {
     Ok(EXIT_OK)
 }
 
+/// 网关用量账本快照（`POST /api/admin/usage` 响应）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageLedger {
+    pub cycle: String,
+    pub next_reset: u64,
+    pub days_left: u64,
+    /// `(uid, used_bytes)`，按 uid 排序。uid 与令牌 `sub` 同构（`usr_<name>`）。
+    pub users: Vec<(String, u64)>,
+}
+
+impl UsageLedger {
+    /// 某 uid 本周期已用字节（账本无记录 = 0）。
+    pub fn used_of(&self, uid: &str) -> u64 {
+        self.users
+            .iter()
+            .find(|(k, _)| k == uid)
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
+    }
+}
+
+/// 解析网关用量响应。`users` 缺失即报错——结构对不上时宁可失败，
+/// 也不让「查询没接通」伪装成「该用户没用量」。
+pub fn parse_usage_ledger(json: &str) -> Result<UsageLedger, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("用量响应不是合法 JSON: {e}"))?;
+    let users_obj = v
+        .get("users")
+        .and_then(|u| u.as_object())
+        .ok_or_else(|| "用量响应缺少 users 对象".to_string())?;
+    let mut users: Vec<(String, u64)> = users_obj
+        .iter()
+        .map(|(k, val)| (k.clone(), val.as_u64().unwrap_or(0)))
+        .collect();
+    users.sort();
+    Ok(UsageLedger {
+        cycle: v
+            .get("cycle")
+            .and_then(|c| c.as_str())
+            .unwrap_or("-")
+            .to_string(),
+        next_reset: v.get("next_reset").and_then(|t| t.as_u64()).unwrap_or(0),
+        days_left: v.get("days_left").and_then(|d| d.as_u64()).unwrap_or(0),
+        users,
+    })
+}
+
+/// 会员状态判定（顺序即优先级）：停用 > 未开会员 > 令牌过期 > 额度耗尽 > 正常。
+pub fn membership_state(
+    disabled: bool,
+    quota: Option<u64>,
+    used: u64,
+    expires_at: Option<u64>,
+    now: u64,
+) -> &'static str {
+    if disabled {
+        "disabled"
+    } else if quota.is_none() {
+        "未开会员"
+    } else if expires_at.is_some_and(|e| e <= now) {
+        "令牌过期"
+    } else if quota.is_some_and(|q| q > 0 && used >= q) {
+        "额度耗尽"
+    } else {
+        "正常"
+    }
+}
+
+/// 已用 / 配额的百分比（一位小数）。配额缺失或为 0 时返回 `None`。
+pub fn usage_percent(quota: Option<u64>, used: u64) -> Option<String> {
+    let q = quota.filter(|q| *q > 0)?;
+    let pct10 = used.saturating_mul(1000) / q; // 千分比，避免浮点误差
+    Some(format!("{}.{}%", pct10 / 10, pct10 % 10))
+}
+
+/// 一行展示单元：本机用户行（可能缺失）与网关账本行的合并视图。
+struct UsageView {
+    name: String,
+    quota: Option<u64>,
+    used: u64,
+    expires_at: Option<u64>,
+    disabled: bool,
+    orphan: bool,
+}
+
+fn fetch_usage_ledger(username: Option<&str>) -> Result<UsageLedger, String> {
+    let body = match username {
+        Some(name) => serde_json::json!({ "uid": format!("usr_{name}") }).to_string(),
+        None => "{}".to_string(),
+    };
+    let reply = gate_admin::admin_post("/api/admin/usage", &body)?;
+    if reply.status != 200 {
+        return Err(format!(
+            "网关返回 HTTP {}（{}）",
+            reply.status,
+            reply.body.trim()
+        ));
+    }
+    parse_usage_ledger(&reply.body)
+}
+
+/// `pproxy user usage [username]`：把本机用户表（配额/到期/启用态）
+/// 与网关真实用量账本（同一事实源，`subscription-userinfo` 的 download 与之同源）合并展示。
+///
+/// 只读：不触碰令牌、不写账本。管理通道不可用时失败退出，而非打印 0 误导运维。
+pub fn usage(username: Option<&str>) -> Result<i32, String> {
+    let service = get_user_service()?;
+    let rows = service.list_users();
+    let ledger = fetch_usage_ledger(username)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let known: Vec<&UserRow> = match username {
+        Some(name) => rows.iter().filter(|u| u.username == name).collect(),
+        None => rows.iter().collect(),
+    };
+    if let Some(name) = username {
+        if known.is_empty() {
+            println!("⚠ 本机用户表无 '{name}'：仅展示网关账本口径（配额/到期未知）");
+        }
+    }
+
+    let mut views: Vec<UsageView> = known
+        .iter()
+        .map(|u| UsageView {
+            name: u.username.clone(),
+            quota: u.quota_bytes.map(|q| q.max(0) as u64),
+            used: ledger.used_of(&format!("usr_{}", u.username)),
+            expires_at: u.expires_at.map(|v| v.max(0) as u64),
+            disabled: u.disabled,
+            orphan: false,
+        })
+        .collect();
+
+    // 账本里有、用户表里没有的租户（历史令牌/已删但未清零）也要现形，否则流量会「消失」
+    let mut covered: std::collections::HashSet<String> = known
+        .iter()
+        .map(|u| format!("usr_{}", u.username))
+        .collect();
+    if let Some(name) = username {
+        covered.insert(format!("usr_{name}"));
+    }
+    for (uid, used) in &ledger.users {
+        if covered.contains(uid) {
+            continue;
+        }
+        views.push(UsageView {
+            name: uid.strip_prefix("usr_").unwrap_or(uid).to_string(),
+            quota: None,
+            used: *used,
+            expires_at: None,
+            disabled: false,
+            orphan: true,
+        });
+    }
+
+    println!(
+        "账单周期: {}（下次刷新 {}，剩 {} 天） | 通道: {}",
+        ledger.cycle,
+        fmt_ts(Some(ledger.next_reset)),
+        ledger.days_left,
+        gate_admin::channel_label()
+    );
+
+    if views.is_empty() {
+        println!("暂无用户，也无用量记录。");
+        return Ok(EXIT_OK);
+    }
+
+    let mut t = Table::new(&[
+        "username",
+        "quota",
+        "used",
+        "remaining",
+        "usage",
+        "expires_at",
+        "state",
+    ]);
+    let mut exhausted = 0usize;
+    for v in &views {
+        let remaining = v.quota.map(|q| q.saturating_sub(v.used));
+        let state = membership_state(v.disabled, v.quota, v.used, v.expires_at, now);
+        if state == "额度耗尽" {
+            exhausted += 1;
+        }
+        let name = if v.orphan {
+            format!("{} (无本机记录)", v.name)
+        } else {
+            v.name.clone()
+        };
+        t.push(vec![
+            name,
+            fmt_quota(v.quota.map(|q| q as i64)),
+            human_bytes(v.used),
+            remaining.map(human_bytes).unwrap_or_else(|| "-".to_string()),
+            usage_percent(v.quota, v.used).unwrap_or_else(|| "-".to_string()),
+            fmt_ts(v.expires_at),
+            state.to_string(),
+        ]);
+    }
+    print!("{}", t.render());
+
+    if let Some(name) = username {
+        if let Some(v) = views.iter().find(|v| v.name == name) {
+            if let Some(q) = v.quota {
+                println!(
+                    "\n{}: 已用 {} / 配额 {}（剩 {}）",
+                    v.name,
+                    human_bytes(v.used),
+                    human_bytes(q),
+                    human_bytes(q.saturating_sub(v.used))
+                );
+                if v.used >= q {
+                    println!("  额度已耗尽：网关 CONNECT 返回 403 quota_exceeded，待下个周期刷新");
+                }
+            }
+        }
+    } else if exhausted > 0 {
+        println!("\n⚠ {exhausted} 个用户额度已耗尽（网关侧 CONNECT/CONNECT-8443 均已熔断）");
+    }
+    Ok(EXIT_OK)
+}
+
+/// 级联清零用量账本（`user rm` 专用）：删除身份后若留着用量，同名重建会
+/// 继承历史消耗并一创建即超额（B063）。失败必须可观测——返回 `false`。
+fn cascade_reset_usage(username: &str) -> bool {
+    let uid = format!("usr_{username}");
+    let body = serde_json::json!({ "uid": uid }).to_string();
+    match gate_admin::admin_post("/api/admin/reset-usage", &body) {
+        Ok(reply) if reply.status == 200 => {
+            let before = serde_json::from_str::<serde_json::Value>(&reply.body)
+                .ok()
+                .and_then(|v| v.get("before").and_then(|b| b.as_u64()))
+                .unwrap_or(0);
+            println!(
+                "  用量清零: \x1b[1;32m✓\x1b[0m {} → 0（渠道: {}）",
+                human_bytes(before),
+                gate_admin::channel_label()
+            );
+            true
+        }
+        Ok(reply) => {
+            println!(
+                "  \x1b[1;31m✗ 用量清零失败：网关返回 HTTP {}（{}）\x1b[0m",
+                reply.status,
+                reply.body.trim()
+            );
+            false
+        }
+        Err(e) => {
+            println!("  \x1b[1;31m✗ 用量清零失败：{e}\x1b[0m");
+            false
+        }
+    }
+}
+
 /// 级联撤销的标识符选择（B061）：优先 `jti`（精确，不连坐同名重建）；
 /// 缺失 jti 的 legacy 行回落网关 `sub`（`usr_<name>`），返回 `coarse=true` 由调用方告警。
 pub fn revocation_identifiers(user: &UserRow) -> (Vec<String>, bool) {
@@ -564,7 +822,14 @@ pub fn rm(username: &str) -> Result<i32, String> {
     match service.delete_user(username) {
         Ok(true) => {
             println!("✓ 已删除用户: {username}");
-            Ok(cascade_revoke(snapshot.as_ref(), username, "删除用户"))
+            // 两条级联缺一不可：令牌撤销（断网）+ 用量清零（同名重建从 0 起算，B063）
+            let revoked = cascade_revoke(snapshot.as_ref(), username, "删除用户");
+            let cleared = cascade_reset_usage(username);
+            Ok(if revoked == EXIT_OK && cleared {
+                EXIT_OK
+            } else {
+                EXIT_FAILURE
+            })
         }
         Ok(false) => {
             eprintln!("✗ 用户不存在: {username}");
@@ -903,5 +1168,61 @@ mod tests {
             assert_eq!(ids, vec!["usr_bob".to_string()]);
             assert!(coarse, "jti={jti:?} 应回落粗粒度");
         }
+    }
+
+    #[test]
+    fn usage_ledger_parses_gateway_response() {
+        let json = r#"{
+            "ok": true,
+            "cycle": "2026-11",
+            "billing_day": 1,
+            "next_reset": 1796112000,
+            "days_left": 18,
+            "users": { "usr_test123": 5259375, "usr_alice": 0 }
+        }"#;
+        let ledger = parse_usage_ledger(json).unwrap();
+        assert_eq!(ledger.cycle, "2026-11");
+        assert_eq!(ledger.next_reset, 1796112000);
+        assert_eq!(ledger.days_left, 18);
+        assert_eq!(
+            ledger.users,
+            vec![
+                ("usr_alice".to_string(), 0),
+                ("usr_test123".to_string(), 5259375)
+            ]
+        );
+        assert_eq!(ledger.used_of("usr_test123"), 5259375);
+        // 账本无记录 = 0（不是查询失败）
+        assert_eq!(ledger.used_of("usr_nobody"), 0);
+    }
+
+    #[test]
+    fn usage_ledger_rejects_malformed_response() {
+        // 结构对不上必须报错：否则「没接通」会伪装成「没用量」
+        assert!(parse_usage_ledger("not json").is_err());
+        assert!(parse_usage_ledger(r#"{"cycle":"2026-11"}"#).is_err());
+    }
+
+    #[test]
+    fn membership_state_priority_is_stable() {
+        let now = 1_000_000;
+        // 停用优先于一切
+        assert_eq!(membership_state(true, Some(10), 100, Some(now + 1), now), "disabled");
+        // 无配额 = 未开会员
+        assert_eq!(membership_state(false, None, 100, None, now), "未开会员");
+        // 令牌先于额度到期
+        assert_eq!(membership_state(false, Some(100), 100, Some(now), now), "令牌过期");
+        // 用量达到配额即耗尽（含恰好相等）
+        assert_eq!(membership_state(false, Some(100), 100, Some(now + 60), now), "额度耗尽");
+        assert_eq!(membership_state(false, Some(100), 99, Some(now + 60), now), "正常");
+    }
+
+    #[test]
+    fn usage_percent_keeps_one_decimal() {
+        assert_eq!(usage_percent(Some(5_242_880), 5_259_375).as_deref(), Some("100.3%"));
+        assert_eq!(usage_percent(Some(1000), 0).as_deref(), Some("0.0%"));
+        assert_eq!(usage_percent(Some(1000), 1).as_deref(), Some("0.1%"));
+        assert_eq!(usage_percent(Some(0), 5), None);
+        assert_eq!(usage_percent(None, 5), None);
     }
 }

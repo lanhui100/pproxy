@@ -541,4 +541,131 @@ mod tests {
             "历史公钥应验通旧私钥签发的令牌"
         );
     }
+
+    /// 管理端点：用量查询与清零受 `GATE_ADMIN_TOKEN` 保护，且账本与
+    /// `subscription-userinfo` 同源——清零后订阅头立刻回到 0。
+    #[tokio::test]
+    async fn test_admin_usage_query_and_reset() {
+        use std::sync::atomic::AtomicU64;
+
+        let (signer, vk) = TokenSigner::generate();
+        let used = Arc::new(dashmap::DashMap::new());
+        used.insert("usr_alice".to_string(), AtomicU64::new(4_000_000));
+
+        let cfg = Arc::new(ServerConfig {
+            tunnel_token_hash: "".into(),
+            proxy_secret: "sec".into(),
+            client: reqwest::Client::new(),
+            verifier: Some(Arc::new(pproxy_core::TokenVerifier::new(vk))),
+            legacy_verifiers: Vec::new(),
+            user_active_conns: Arc::new(dashmap::DashMap::new()),
+            user_used_bytes: used.clone(),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: "test-admin".into(),
+            usage_manager: None,
+        });
+        let app = build_router(cfg);
+
+        // 1) 无口令 → 401（fail-closed：管理面绝不对匿名请求开口）
+        for uri in ["/api/admin/usage", "/api/admin/reset-usage"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{uri} 应要求管理口令");
+        }
+
+        let admin_req = |uri: &str, body: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Authorization", "Bearer test-admin")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // 2) 全量查询：账本值原样返回，周期字段齐全
+        let resp = app
+            .clone()
+            .oneshot(admin_req("/api/admin/usage", "{}"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["users"]["usr_alice"], 4_000_000u64);
+        assert!(json["cycle"].is_string());
+        assert!(json["next_reset"].as_u64().unwrap() > 0);
+
+        // 3) 单租户查询：账本无记录也回 0（不是查询失败）
+        let resp = app
+            .clone()
+            .oneshot(admin_req("/api/admin/usage", r#"{"uid":"usr_ghost"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["users"]["usr_ghost"], 0u64);
+        assert!(json["users"].get("usr_alice").is_none(), "单租户查询不应泄漏他人用量");
+
+        // 4) 非法 uid 拒绝（纵深防御）
+        let resp = app
+            .clone()
+            .oneshot(admin_req("/api/admin/reset-usage", r#"{"uid":"usr_a;rm -rf /"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 5) 清零：回执带清零前字节数，账本条目随即消失
+        let resp = app
+            .clone()
+            .oneshot(admin_req("/api/admin/reset-usage", r#"{"uid":"usr_alice"}"#))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["before"], 4_000_000u64);
+        assert!(!used.contains_key("usr_alice"), "清零后账本不应留条目");
+
+        // 6) 清零与订阅头同源：Alice 的 download 立即回到 0
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let claims = UserTokenClaims {
+            jti: "jti-reset".into(),
+            sub: "usr_alice".into(),
+            name: "Alice".into(),
+            quota_bytes: 5 * 1024 * 1024,
+            lease_bytes: 1024 * 1024,
+            exp: now + 3600,
+            iat: now,
+            max_conns: 1,
+            role: "user".into(),
+        };
+        let token = signer.sign_token(&claims).unwrap();
+        let req_clash = Request::builder()
+            .uri(format!("/clash?token={token}"))
+            .header("Host", "rn.ponygo.fun")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req_clash).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let userinfo = resp
+            .headers()
+            .get("subscription-userinfo")
+            .and_then(|h| h.to_str().ok())
+            .expect("必须返回 subscription-userinfo 头");
+        assert_eq!(
+            userinfo,
+            format!(
+                "upload=0; download=0; total={}; expire={}",
+                claims.quota_bytes, claims.exp
+            ),
+            "清零后订阅头必须回 0，否则客户端仍显示额度耗尽"
+        );
+    }
 }
