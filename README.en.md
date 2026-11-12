@@ -108,6 +108,7 @@ Designed for commercial proxy operations and team multi-tenancy with decentraliz
 pproxy user keygen
 
 # Issue a self-contained tenant token offline (-q period quota, -d membership term: 30/30d=days, 1m/3m/6m=calendar months, 1y=calendar year)
+# Short-cycle smoke tests / expiry acceptance may use 30s, 5min, 2h (minutes are written `min`; `m` still means calendar month)
 # Issuance also persists the member row and prints the Clash subscription URL, the clash:// install deep link and a QR code
 pproxy user add alice -q 50G -d 3m -c 3
 
