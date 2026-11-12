@@ -75,6 +75,17 @@
   并有 `cargo test -p pproxy-server` 断言；`grep -r '\?token=' 文档` 只剩订阅说明而非第四处生成器
 - **关联**：ADR implemented/feature/2026-11-12-…；B016（CONNECT L3 遗留）；B014（VLESS 入站）
 
+### B020 — pre-push 治理门 G4 长期红（ponygo 骨架漂移，非本次变更引入）🔴 未修
+- **现象**：`bash tests/governance/run.sh` 16/17 PASS，仅 `G4-SENTINEL-LOCAL` FAIL：
+  `ponygo status` rc=1（骨架缺口 4），缺 `.meta/gates/{archive-verify,archive-verify.spec,no-residue,no-residue.spec}.sh`
+- **溯源（已实证）**：`git checkout HEAD~1 && ponygo status` 同样 rc=1；这 4 个路径在本仓**从未被追踪**
+  （`git log -- .meta/gates/archive-verify.sh` 无输出）→ 与会员开通改造无关
+- **影响**：`git push` 被 `.githooks/pre-push` 拦下；本次发布按钩子自身声明的逃生口 `git push --no-verify` 推送，
+  绕过前已手工跑完整套（G1/G2/G3/G5–G16 全绿 + `verify-note.sh` + `cargo test` 全绿），远端 governance CI 仍在
+- **候选修法**：①`ponygo init --repair-skeleton`（补 4 门 + 9 个可选 skill 资产，需评估与本仓 `archive-seal.sh` 命名/职责重复）；
+  ②改造 G4 判据为"骨架缺口仅告警"（Wave-1 断言冻结，须 Lead 明确指令）
+- **验收**：`bash tests/governance/run.sh` 17/17 且 `ponygo status` rc=0，之后 `git push` 恢复免用 `--no-verify`
+
 ### B011 — gate 伪装页 + 反指纹 P0-2（edgetunnel 借鉴）✅ 已完成
 - **动机**：gate 非 `/ws` 路径全裸 404 = 最典型的"可疑 Worker"指纹，防扫号低成本高收益
 - **方案**：非 `/ws` 返回 200 仿 nginx 欢迎页；`/ws`、`/debug` 等特征路径运行时拼装；
