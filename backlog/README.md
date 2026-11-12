@@ -66,6 +66,7 @@ node scripts/backlog.mjs resolve B056 --evidence "cargo test --workspace 全绿�
 node scripts/backlog.mjs lint                 # 记录不变量（非零 = 违规）
 node scripts/backlog.mjs doctor               # 跨归档/高水位/孤儿租约对账
 node scripts/backlog.mjs reap --id B056 --minutes 0   # 只清该任务的锁
+node scripts/backlog.mjs annotate B056 --description "..." --priority P2   # 改注释/优先级（不动状态）
 ```
 
 ## 门禁与接线

@@ -124,4 +124,4 @@
 - 架构决策：`.agents/notes/proposed/architecture/2026-09-25-distributed-commercialization.md`（proposed，尚未迁移 implemented）
 - 规格：`docs/product/specs/distributed-commercialization/README.md`（v1.1.0）
 - 本文（遗留清单）：`docs/product/specs/distributed-commercialization/FOLLOW-UPS.md`
-- 事项层登记：`backlog/backlog.md`（B005~B009，见第二节"登记"）
+- 事项层登记：`backlog/tasks.jsonl`（B005~B009，见第二节"登记"）
