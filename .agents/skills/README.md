@@ -17,6 +17,40 @@
 三者都是**框架交付物，不计入** L3"实例已长出流程资产"的证据——L3 仍要求你的项目
 按 Rule of three 自己长出第一个 skill。
 
+---
+
+## 三层归属：基线 / 模板库 / 实例自有
+
+`.agents/skills/` 下只有一类技能会出现在"已安装"语义里，但技能资产的**来源**有三种，判定口径不同：
+
+| 层 | 位置 | 所有者 | 计入 L3 证据 | 来源 |
+|---|---|---|---|---|
+| **基线** | `.agents/skills/{write-adr,change-review,governance-review}/` | 实例可改，模板逐字节锁 | 否 | `ponygo init` 必播 |
+| **模板库** | `.meta/skills-library/pg-*/` | 仅模板 | 否 | `ponygo init` 播种，**不自动安装** |
+| **实例自有** | 其余 `.agents/skills/*/` | 实例 | **是** | 项目按 Rule of three 自己长 |
+
+库技能名统一带 `pg-` 前缀（本项目命名空间）；基线名不带前缀（既有契约引用遍布 gates/tests/docs，
+改名是破坏性变更且无收益）。
+
+### 安装与三态（库 → 项目）
+
+```bash
+bash .meta/skills-library/install.sh list                    # 每个技能一行：已装/未装 + 三态
+bash .meta/skills-library/install.sh install pg-doc-hygiene  # 复制到 .agents/skills/，已存在则拒绝
+bash .meta/skills-library/install.sh check                   # ok / stale / modified
+```
+
+- `install` 成功后写 `.agents/skills/<name>/.ponygo-installed`（`library_sha256` + `installed_at`），
+  该标记同时是问③ 的**排除依据**——库安装的技能不计入"实例自有"；
+- `stale` = 库已更新；`modified` = 本地改过（**永不覆盖**，本地校准样例是正当改造）；
+- 只读 `check` 不写盘；无 `uninstall`：删除技能是一次决策，走 `.agents/notes/` 记录 + 手删。
+
+### 何时装哪个
+
+`ponygo audit` 在 `能力缺口建议（advisory）` 段按 `.meta/skills-library/catalog.tsv` 的证据规则
+给出候选与安装命令——证据可机械求值（笔记类别计数、归档封印数、文档规模、Web/测试/发布面），
+**是否真的到阈值、值不值得装，靠 review**；该段不计分、不改退出码，不装也不失败。
+
 > **「原理」引用的出处**：本文及实例骨架中的 methodology 引用，均指向 ponygo 框架仓库的
 > `docs/methodology.md`：<https://github.com/lanhui100/ponygo/blob/main/docs/methodology.md>。
 > 原理层唯一真相源在框架仓库，实例不复制——复制即漂移。

@@ -75,7 +75,7 @@
   并有 `cargo test -p pproxy-server` 断言；`grep -r '\?token=' 文档` 只剩订阅说明而非第四处生成器
 - **关联**：ADR implemented/feature/2026-11-12-…；B016（CONNECT L3 遗留）；B014（VLESS 入站）
 
-### B020 — pre-push 治理门 G4 长期红（ponygo 骨架漂移，非本次变更引入）🔴 未修
+### B020 — pre-push 治理门 G4 长期红（ponygo 骨架漂移，非本次变更引入）✅ 已完成（2026-11-12）
 - **现象**：`bash tests/governance/run.sh` 16/17 PASS，仅 `G4-SENTINEL-LOCAL` FAIL：
   `ponygo status` rc=1（骨架缺口 4），缺 `.meta/gates/{archive-verify,archive-verify.spec,no-residue,no-residue.spec}.sh`
 - **溯源（已实证）**：`git checkout HEAD~1 && ponygo status` 同样 rc=1；这 4 个路径在本仓**从未被追踪**
@@ -85,6 +85,11 @@
 - **候选修法**：①`ponygo init --repair-skeleton`（补 4 门 + 9 个可选 skill 资产，需评估与本仓 `archive-seal.sh` 命名/职责重复）；
   ②改造 G4 判据为"骨架缺口仅告警"（Wave-1 断言冻结，须 Lead 明确指令）
 - **验收**：`bash tests/governance/run.sh` 17/17 且 `ponygo status` rc=0，之后 `git push` 恢复免用 `--no-verify`
+- **处置（2026-11-12，采候选①）**：`ponygo init --repair-skeleton` 补 4 门 → `ponygo upgrade apply`
+  对齐 10 个漂移文件（含 A6 归档封印接进 `adr-verify.sh`、`verify-note.sh` 新增 1.11）→
+  `archive-seal.sh --write` 重封归档说明文档。实测 `tests/governance/run.sh` **17/17 PASS
+  （ACCEPT_EXIT=0）**、`ponygo status` rc=0、`ponygo upgrade --check` 零漂移。
+   **此后禁止 `--no-verify` 推送。** 决策记录：`.agents/notes/implemented/process/2026-11-12-governance-gate-assets-upgrade-to-a6-a9.md`
 
 ### B021 — 生产 gate 验签公钥与 dev/preprod 私钥不配对（会员开通在生产落地被阻塞）🔴 阻塞
 - **现象**：dev 签发 `usr_live_` 令牌后 `curl https://rn.ponygo.fun/clash?token=…` → **401**；

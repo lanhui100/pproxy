@@ -1,0 +1,13 @@
+# catalog.tsv —— 库技能必要性元数据（audit B3 唯一数据源）
+# 语法：制表符五列 name<TAB>evidence_kind<TAB>evidence_arg<TAB>min<TAB>hint
+# evidence_kind 封闭集合（spec §3.1）：notes_class | archive_sealed | docs_scale |
+#   web_dirs | test_dirs | release_surface | none；arg 缺省写 -；min 为正整数；
+#   hint 是给人读的一句「何时需要」。证据求值口径与阈值语义见同目录 README.md。
+#
+# 列序：name / evidence_kind / evidence_arg / min / hint（制表符分隔，见 spec §3.1）
+pg-delivery-checks	test_dirs	-	1	存在测试目录与 CI 配置时——推送前要按改动表面选最小充分证据，而不是全量重跑
+pg-find-simplifications	notes_class	simplification	1	已有过简化决策（≥1 条）——删除或收窄变更需要证据链（owner/producer/consumer 三行 + 检索零残留），符号零命中不等于可删
+pg-doc-hygiene	docs_scale	-	20	文档多到会出现同一条规则写在两处时——需要「事实一个家」的一次性清扫口径
+pg-test-reliability	test_dirs	-	1	测试出现偶发失败或在修复后复发时——需要隔离、定位与防回归的固定程序
+pg-upgrade-guide	release_surface	-	1	仓库有发布面（CHANGELOG / tag / bin）时——破版升级要迁移指引，不靠口头约定
+pg-gc-agent-notes	archive_sealed	-	3	归档封印累积到一定量时——过期与重复语料要回收，否则检索面被稀释
