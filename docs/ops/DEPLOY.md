@@ -306,6 +306,27 @@ git checkout <commit> && cargo build --release
 sudo systemctl restart pproxy
 ```
 
+## 合入 master 的通道（服务端强制 PR）
+
+`master` 由仓库规则集 `master-protection-pr`（id `27096701`，`bypass_actors` 为空 →
+`current_user_can_bypass: never`）约束：只能经 PR 合入，required check `governance` 未绿不可合并，
+禁强推禁删分支；经典分支保护同时开着 `enforce_admins`，两层同向生效。
+
+```bash
+git switch -c feat/<topic>            # 1) 分支上提交（pre-commit / pre-push 照旧跑，禁 --no-verify）
+git push -u origin feat/<topic>       # 2) 推分支
+gh pr create --fill --base master     # 3) 开 PR
+gh pr checks --watch                  # 4) 等 governance 绿（ci 与 desktop-gate 会跑但不阻断合并）
+gh pr merge --squash --delete-branch  # 5) 合并
+```
+
+- 直推 `master` 由服务端拒绝：`GH013 … Changes must be made through a pull request`，
+  `git push` 退出码 1——不存在"约定式"绕过。
+- tag 不受该规则约束：`git tag desktop-v0.3.x && git push origin desktop-v0.3.x` 照旧触发发布工作流。
+- 配置取证：`gh api repos/lanhui100/pproxy/rulesets --jq '.[] | {id,name,bypass:.bypass_actors}'`
+  与 `gh api repos/lanhui100/pproxy/branches/master/protection --jq .enforce_admins.enabled`。
+- 理由与备选见 `.agents/notes/implemented/process/2026-11-12-master-pr-only-ruleset.md`。
+
 ## 配置变更
 
 `config.json` 修改后需 `sudo systemctl restart pproxy` 生效。
