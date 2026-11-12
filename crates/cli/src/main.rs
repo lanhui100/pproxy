@@ -296,6 +296,11 @@ enum UserCmd {
     Keygen,
     /// 列出所有用户
     List,
+    /// 查询用户本周期已用流量（真实账本来自网关，含配额/剩余/到期/熔断状态）
+    Usage {
+        /// 只查该用户（省略则列出全部）
+        username: Option<String>,
+    },
     /// 删除指定用户
     Rm { username: String },
     /// 禁用指定用户
@@ -687,6 +692,9 @@ fn run(cli: Cli) -> Result<i32, RunError> {
             }
             UserCmd::Keygen => cmd::user::keygen().map_err(RunError::Msg),
             UserCmd::List => cmd::user::list().map_err(RunError::Msg),
+            UserCmd::Usage { username } => {
+                cmd::user::usage(username.as_deref()).map_err(RunError::Msg)
+            }
             UserCmd::Rm { username } => cmd::user::rm(username).map_err(RunError::Msg),
             UserCmd::Disable { username } => cmd::user::disable(username).map_err(RunError::Msg),
             UserCmd::Enable { username } => cmd::user::enable(username).map_err(RunError::Msg),

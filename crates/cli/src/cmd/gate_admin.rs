@@ -1,4 +1,4 @@
-//! 网关管理通道：撤销黑名单的热推送（口令 + 传输路径）。
+//! 网关管理通道：管理端点调用（口令 + 传输路径）。
 //!
 //! 生产网关只监听 `127.0.0.1:3101`（`HOST=127.0.0.1`），管理机无法直连，因此通道分两个维度：
 //! - **口令**：环境变量 `GATE_ADMIN_TOKEN` → `~/.pony/gate_admin.conf` 的 `token=`
@@ -6,19 +6,46 @@
 //!
 //! 口令只经 stdin 传给远端 `curl -H`，不出现在任何进程命令行里（避免 `ps` / `/proc` 窥屏）。
 //!
-//! 本模块只做「把某标识符塞进网关黑名单」一件事，不判断该撤销谁——语义留给调用方
-//! （`user rm` / `user disable` / `user revoke`），便于单测。
+//! 本模块只做「按路径调用管理端点并回传状态码 + 响应体」一件事，不解释语义——
+//! 撤销（`user rm`/`disable`/`revoke`）与用量查询/清零的语义留给调用方，便于单测。
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// 远端执行体：第一行读口令、其余读 JSON body，最后回显 HTTP 状态码。
-const SSH_REMOTE_CMD: &str = r#"read -r tok; body=$(cat); curl -sS --max-time 5 -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3101/api/user/revoke -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' -d "$body""#;
+/// 远端执行体：第一行读口令、第二行读路径、其余读 JSON body。
+/// 输出 = 响应体 + 末行 HTTP 状态码（`-w '\n%{http_code}'`），便于同时取两者。
+const SSH_REMOTE_CMD: &str = r#"read -r tok; read -r path; body=$(cat); curl -sS --max-time 5 -w '\n%{http_code}' -X POST "http://127.0.0.1:3101$path" -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' --data-binary "$body""#;
 
 /// 默认直连地址（网关与 CLI 同机时的既有约定）。
 const DEFAULT_ADMIN_URL: &str = "http://127.0.0.1:3101";
+
+/// 一次管理端点调用的响应（状态码 + 响应体）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminReply {
+    pub status: u16,
+    pub body: String,
+}
+
+impl AdminReply {
+    /// 解析 `curl -w '\n%{http_code}'` 的输出：末行状态码，其余为响应体。
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let trimmed = raw.trim_end_matches(['\n', '\r']);
+        let (body, code) = match trimmed.rsplit_once('\n') {
+            Some((body, code)) => (body, code),
+            None => ("", trimmed),
+        };
+        let status = code
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("网关响应状态码不可解析: {}", code.trim()))?;
+        Ok(Self {
+            status,
+            body: body.to_string(),
+        })
+    }
+}
 
 /// 管理通道配置（`~/.pony/gate_admin.conf` 的 key=value 口径）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,61 +162,77 @@ impl PushReport {
     }
 }
 
+/// 当前生效的通道描述（`ssh:<host>` 或直连 URL），供失败回执定位。
+pub fn channel_label() -> String {
+    let conf = load_conf();
+    match conf.ssh {
+        Some(host) => format!("ssh:{host}"),
+        None => conf.url,
+    }
+}
+
+/// 调用网关管理端点（POST，JSON body），返回状态码与响应体。
+///
+/// 口令缺失即失败（不静默降级）：管理动作未生效必须是可观测的。
+pub fn admin_post(path: &str, body: &str) -> Result<AdminReply, String> {
+    let conf = load_conf();
+    let Some(token) = conf.token.as_deref() else {
+        return Err("未配置管理口令（GATE_ADMIN_TOKEN 或 ~/.pony/gate_admin.conf 的 token=）".to_string());
+    };
+    match conf.ssh.as_deref() {
+        Some(host) => post_via_ssh(host, token, path, body),
+        None => post_via_http(&conf.url, token, path, body),
+    }
+}
+
 /// 把标识符推送进网关内存黑名单（`POST /api/user/revoke`）。
 ///
 /// 未配置口令时返回 `ok=false`（调用方据此提示「仅本地落盘，需人工收口」），
 /// 而非静默成功——撤销失败必须是可观测的。
 pub fn push_revoke(identifier: &str) -> PushReport {
-    let conf = load_conf();
-    let Some(token) = conf.token.as_deref() else {
-        return PushReport::failed(
-            "none".to_string(),
-            "未配置管理口令（GATE_ADMIN_TOKEN 或 ~/.pony/gate_admin.conf 的 token=）",
-        );
-    };
     if !is_valid_identifier(identifier) {
         return PushReport::failed("none".to_string(), format!("非法撤销标识符: {identifier}"));
     }
 
     let body = serde_json::json!({ "identifier": identifier }).to_string();
-    match conf.ssh.as_deref() {
-        Some(host) => {
-            let channel = format!("ssh:{host}");
-            match push_via_ssh(host, token, &body) {
-                Ok(code) if code == "200" => PushReport::ok(channel, "网关内存黑名单已更新"),
-                Ok(code) => PushReport::failed(channel, format!("网关返回 HTTP {code}")),
-                Err(e) => PushReport::failed(channel, e),
-            }
+    match admin_post("/api/user/revoke", &body) {
+        Ok(reply) if reply.status == 200 => {
+            PushReport::ok(channel_label(), "网关内存黑名单已更新")
         }
-        None => {
-            let channel = conf.url.clone();
-            match push_via_http(&conf.url, token, &body) {
-                Ok(status) if status.is_success() => PushReport::ok(channel, "网关内存黑名单已更新"),
-                Ok(status) => PushReport::failed(channel, format!("网关返回 HTTP {status}")),
-                Err(e) => PushReport::failed(channel, e),
-            }
-        }
+        Ok(reply) => PushReport::failed(channel_label(), format!("网关返回 HTTP {}", reply.status)),
+        Err(e) => PushReport::failed(gate_failure_channel(), e),
     }
 }
 
-/// 直连推送（网关与 CLI 同机）。
-fn push_via_http(url: &str, token: &str, body: &str) -> Result<reqwest::StatusCode, String> {
+/// 失败回执的通道标签：口令缺失时沿用既有 `none` 口径，其余给真实通道。
+fn gate_failure_channel() -> String {
+    if load_conf().token.is_some() {
+        channel_label()
+    } else {
+        "none".to_string()
+    }
+}
+
+/// 直连调用（网关与 CLI 同机）。
+fn post_via_http(url: &str, token: &str, path: &str, body: &str) -> Result<AdminReply, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?;
-    client
-        .post(format!("{url}/api/user/revoke"))
+    let resp = client
+        .post(format!("{url}{path}"))
         .bearer_auth(token)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
-        .map(|r| r.status())
-        .map_err(|e| format!("连接网关失败: {e}"))
+        .map_err(|e| format!("连接网关失败: {e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().unwrap_or_default();
+    Ok(AdminReply { status, body: text })
 }
 
-/// 经 SSH 在网关本机推送：口令与 body 走 stdin，不进命令行。
-fn push_via_ssh(host: &str, token: &str, body: &str) -> Result<String, String> {
+/// 经 SSH 在网关本机调用：口令、路径与 body 走 stdin，不进命令行。
+fn post_via_ssh(host: &str, token: &str, path: &str, body: &str) -> Result<AdminReply, String> {
     let mut child = Command::new("ssh")
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", host])
         .arg(SSH_REMOTE_CMD)
@@ -202,19 +245,22 @@ fn push_via_ssh(host: &str, token: &str, body: &str) -> Result<String, String> {
     {
         let stdin = child.stdin.as_mut().ok_or("ssh stdin 不可用")?;
         stdin
-            .write_all(format!("{token}\n{body}").as_bytes())
+            .write_all(format!("{token}\n{path}\n{body}").as_bytes())
             .map_err(|e| format!("写入 ssh stdin 失败: {e}"))?;
     }
 
     let out = child
         .wait_with_output()
         .map_err(|e| format!("ssh 执行失败: {e}"))?;
-    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if code.is_empty() {
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if stdout.trim().is_empty() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("ssh 无输出（{}）", err.trim().lines().next().unwrap_or("未知错误")));
+        return Err(format!(
+            "ssh 无输出（{}）",
+            err.trim().lines().next().unwrap_or("未知错误")
+        ));
     }
-    Ok(code)
+    AdminReply::parse(&stdout)
 }
 
 #[cfg(test)]
@@ -253,5 +299,24 @@ mod tests {
         assert!(!is_valid_identifier("usr_alice'; rm -rf /"));
         assert!(!is_valid_identifier("usr_alice\nbody"));
         assert!(!is_valid_identifier(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn admin_reply_splits_body_and_status() {
+        let reply = AdminReply::parse("{\"ok\":true}\n200\n").unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body, "{\"ok\":true}");
+
+        // 多行响应体：只把末行当状态码
+        let reply = AdminReply::parse("line1\nline2\n401").unwrap();
+        assert_eq!(reply.status, 401);
+        assert_eq!(reply.body, "line1\nline2");
+
+        // 空响应体（撤销端点只回状态码时同样成立）
+        let reply = AdminReply::parse("200\n").unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body, "");
+
+        assert!(AdminReply::parse("oops").is_err());
     }
 }

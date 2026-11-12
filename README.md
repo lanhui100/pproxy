@@ -126,6 +126,10 @@ pproxy user add admin_ops -q 100G -d 1y --admin
 pproxy user revoke usr_alice
 # 或废止指定具体令牌 ID
 pproxy user revoke tok-9f8e7d6c
+
+# 查询本周期真实用量（省略用户名则列出全部：配额 / 已用 / 剩余 / 占用比 / 到期 / 熔断状态）
+pproxy user usage
+pproxy user usage alice
 ```
 
 - **非对称密钥隔离**：私钥永不上节点，避免单节点失陷导致假令牌伪造；边缘网关持公钥纯本地验签。
@@ -138,6 +142,9 @@ pproxy user revoke tok-9f8e7d6c
   建议只在本人设备保留，怀疑外泄时用 `pproxy user revoke` 回收后重签。
 - **删号/停用即断网**：`pproxy user rm` / `disable` 级联撤销该用户令牌的 `jti`（网关新握手立即 401），
   撤销未生效时命令返回非零；同名重建不受牵连。管理通道一次性配置见部署文档 `~/.pony/gate_admin.conf`。
+- **用量可查、删号即清零**：`pproxy user usage [name]` 读网关真实账本（与 `subscription-userinfo` 同源）；
+  `pproxy user rm` 在撤销令牌之外同时清零该租户本周期用量（网关留 `~/.pony/usage_resets.log` 审计行），
+  同名重建从 0 起算，不会因历史消耗导致"新号一创建即超额"。
 - **全网黑名单与热撤销**：执行 `pproxy user revoke` 实时写入黑名单并热推网关，后续连接与查询秒级 401/403 阻断。
 
 ### 6. 本地 Local HA Forwarder (无感高可用分发桩)

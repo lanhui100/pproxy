@@ -188,6 +188,8 @@ pub fn build_router(cfg: Arc<ServerConfig>) -> Router {
         .route("/api/ws", get(handle_ws))
         .route("/api/user/profile", get(handle_user_profile))
         .route("/api/user/revoke", post(handle_revoke))
+        .route("/api/admin/usage", post(handle_admin_usage))
+        .route("/api/admin/reset-usage", post(handle_admin_reset_usage))
         .route("/api/client/telemetry", post(handle_telemetry))
         .route("/proxy", any(handle_proxy))
         .route("/api/proxy", any(handle_proxy))
@@ -235,16 +237,7 @@ async fn handle_revoke(
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
     // 管理端点鉴权（固定时间比较防时序侧信道）
-    let presented = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or("");
-    let expected = cfg.gate_admin_token.trim();
-    if expected.is_empty()
-        || presented.len() != expected.len()
-        || !pproxy_core::user::constant_time_eq(presented.as_bytes(), expected.as_bytes())
-    {
+    if !admin_authorized(&cfg, &headers) {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
@@ -276,6 +269,177 @@ async fn handle_revoke(
 
     tracing::warn!(identifier = %identifier, "token revoked via admin endpoint");
     (StatusCode::OK, serde_json::json!({ "ok": true, "identifier": identifier }).to_string()).into_response()
+}
+
+/// 管理端点统一鉴权：口令为空一律拒绝（fail-closed），非空时固定时间比较防时序侧信道。
+fn admin_authorized(cfg: &ServerConfig, headers: &HeaderMap) -> bool {
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let expected = cfg.gate_admin_token.trim();
+    !expected.is_empty()
+        && presented.len() == expected.len()
+        && pproxy_core::user::constant_time_eq(presented.as_bytes(), expected.as_bytes())
+}
+
+/// 用量标识符白名单：`usr_<name>` 只由这些字符构成，其余一律拒绝（纵深防御）。
+fn is_valid_usage_uid(uid: &str) -> bool {
+    !uid.is_empty()
+        && uid.len() <= 128
+        && uid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// 管理端点：查询当前账单周期的用户用量账本（`GATE_ADMIN_TOKEN` Bearer 鉴权）。
+///
+/// Body 可省略；`{"uid":"usr_alice"}` 只返回该租户。响应 `users` 以令牌 `sub`
+/// （`usr_<name>`）为键、值为本周期已用字节——与 `subscription-userinfo` 的
+/// `download` 同源，避免同一事实两个口径。
+async fn handle_admin_usage(
+    State(cfg): State<Arc<ServerConfig>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !admin_authorized(&cfg, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    #[derive(serde::Deserialize, Default)]
+    struct UsageReq {
+        uid: Option<String>,
+    }
+    let req: UsageReq = if body.is_empty() {
+        UsageReq::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "bad_request: expect {\"uid\": \"usr_...\"}")
+                    .into_response()
+            }
+        }
+    };
+
+    let filter = req.uid.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(uid) = filter {
+        if !is_valid_usage_uid(uid) {
+            return (StatusCode::BAD_REQUEST, "bad_request: invalid uid").into_response();
+        }
+    }
+
+    let mut users = serde_json::Map::new();
+    for item in cfg.user_used_bytes.iter() {
+        if let Some(uid) = filter {
+            if item.key().as_str() != uid {
+                continue;
+            }
+        }
+        users.insert(
+            item.key().clone(),
+            serde_json::Value::from(item.value().load(std::sync::atomic::Ordering::Relaxed)),
+        );
+    }
+    // 指定查询的租户即使账本无记录也回 0——否则调用方会把「没记录」误读成「查询失败」
+    if let Some(uid) = filter {
+        users
+            .entry(uid.to_string())
+            .or_insert_with(|| serde_json::Value::from(0u64));
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let billing_day = cfg
+        .usage_manager
+        .as_ref()
+        .map(|m| m.billing_day())
+        .unwrap_or_else(usage::get_billing_day);
+    let (cycle, next_reset, days_left) = usage::compute_billing_cycle(now, billing_day);
+
+    let resp = serde_json::json!({
+        "ok": true,
+        "cycle": cycle,
+        "billing_day": billing_day,
+        "next_reset": next_reset,
+        "days_left": days_left,
+        "users": users,
+    });
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        resp.to_string(),
+    )
+        .into_response()
+}
+
+/// 管理端点：清零某租户本周期用量账本（`GATE_ADMIN_TOKEN` Bearer 鉴权）。
+///
+/// `user rm` 级联调用：身份删除后若用量记录留着，同名重建会继承历史消耗并
+/// 一创建即超额（backlog B063）。返回清零前字节数，供 CLI 打印审计回执；
+/// 修改后立即落盘，避免「重启后旧用量回魂」。
+async fn handle_admin_reset_usage(
+    State(cfg): State<Arc<ServerConfig>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !admin_authorized(&cfg, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ResetReq {
+        uid: String,
+    }
+    let req: ResetReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "bad_request: expect {\"uid\": \"usr_...\"}")
+                .into_response()
+        }
+    };
+    let uid = req.uid.trim().to_string();
+    if !is_valid_usage_uid(&uid) {
+        return (StatusCode::BAD_REQUEST, "bad_request: invalid uid").into_response();
+    }
+
+    let before = cfg
+        .user_used_bytes
+        .remove(&uid)
+        .map(|(_, v)| v.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    if let Some(manager) = cfg.usage_manager.as_ref() {
+        manager.persist();
+    }
+
+    // 审计留痕：清零没有回滚路径，先落一行 append-only 记录（清零前字节数 + 时间），
+    // 否则计费数据被静默抹掉，事后无从对账。
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let dir = std::path::Path::new(&home).join(".pony");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("usage_resets.log"))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "ts={now} uid={uid} before={before}");
+    }
+
+    tracing::warn!(uid = %uid, before, "usage ledger reset via admin endpoint");
+    (
+        StatusCode::OK,
+        [("content-type", "application/json")],
+        serde_json::json!({ "ok": true, "uid": uid, "before": before }).to_string(),
+    )
+        .into_response()
 }
 
 async fn handle_user_profile(
