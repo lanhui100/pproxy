@@ -17,7 +17,7 @@
 | 决策记录 | 活动决策（当前态现在时） | 迁移计划/验收清单 | `.agents/notes/{proposed,implemented,rejected,archived}/` ✓（历史存档 `docs/architecture/decisions/` 冻结只读，见 `.agents/notes/implemented/process/2026-10-30-alt-governance-dual-track.md`） |
 | 包/模块契约 | 单模块配置/语义/限制/扩展点 | 逐行注释复述 | `crates/{cli,core,engine,gate-server,server,transport}/README.md` ✓、`desktop/README.md` ✓ |
 | how-to | 带编号验证步的操作指引 | 设计理由（→ 决策记录） | `docs/ops/`（`DEPLOY.md`、`ROLLING-UPGRADE.md`、`TROUBLESHOOTING.md`、`DESKTOP-TROUBLESHOOTING.md`、`MUSE-REMOTE-CONNECT.md`、`CF-RISK-SOP.md`、`API.md`）✓ |
-| 团队评审与任务书 | 评审记录（review JSON/MD）、任务契约（contract/spec）、执行计划 | 决策理由（→ 决策记录）、操作步（→ how-to） | `docs/dev-team/`（`reviews/`、`specs/`、`tasks/`）✓；执行态账本在 `.dev-team/`（非文档，不进本表） |
+| 团队评审与任务书 | 评审记录（review JSON/MD）、任务契约（contract/spec）、执行计划 | 决策理由（→ 决策记录）、操作步（→ how-to） | `docs/dev-team/`（`reviews/`、`specs/`、`tasks/`）✓；执行态账本与门禁收据在 `.dev-team/`（非文档，不进本表；其布局约束见 `.dev-team/README.md`） |
 | 接口契约 | 端点/请求响应形状/错误码 | 设计理由（→ 决策记录） | `docs/ops/API.md` ✓ |
 | 待办与执行账本 | 账本布局/记录模型/状态机/租约/命令 | 决策理由（→ 决策记录）、历史原文 | `backlog/README.md` ✓（判定真源 `scripts/backlog.mjs`；冻结历史 `backlog/legacy/`） |
 | 事故复盘 | 事故年表、证据、因果链、预防 | 教学叙事 | `docs/ops/stability-report-2026-09-29.md` ✓（下一篇按同一命名：`docs/ops/<incident>-report-<date>.md`） |

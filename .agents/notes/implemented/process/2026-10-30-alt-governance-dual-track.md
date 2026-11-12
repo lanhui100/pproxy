@@ -16,7 +16,7 @@ Status: implemented
 2. **远端流水线无门禁**：`.github/workflows/` 已有 5 个 workflow（ci / cli-release / deploy-vercel /
    desktop-gate / desktop-release），全部承载具体构建与发布逻辑，**没有一个是治理门**。
    治理判据只活在本地 `.githooks/pre-commit`（`--no-verify` 可绕过）与人的记忆里，
-   PR 上没有非零退出的兜底——这正是 2026-10-30 治理审查（`.agents/notes/proposed/process/2026-10-30-governance-audit.md`）
+   PR 上没有非零退出的兜底——这正是 2026-10-30 治理审查（`.agents/notes/implemented/process/2026-10-30-governance-audit.md`）
    记的 P1「远端层零治理门」。
 
 两条都属于"框架要的是唯一真源 + 可验台阶，实例已有既成形态"——不处置就会让 `ponygo status`
