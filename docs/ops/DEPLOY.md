@@ -51,9 +51,10 @@
 | `PPROXY_CLUSTER_PEERS` | 远端对等备灾节点地址列表（逗号分隔，如 `100.64.0.2:18899,100.64.0.3:18899`） |
 | `PPROXY_CLUSTER_KEY` | 集群间通信签名密钥（跨节点转发签发 `X-Pony-Cluster-Ticket` 鉴权） |
 | `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥 Hex（各节点本地无状态验签，只读注入）；逗号分隔可配多把，首项为主、其余为轮换窗口内的历史公钥 |
-| `GATE_ADMIN_TOKEN` | 轻量 Gate 服务管理接口 Bearer Token（用于黑名单撤销热推送） |
+| `GATE_ADMIN_TOKEN` | 轻量 Gate 服务管理接口 Bearer Token（用于黑名单撤销热推送）；**留空 = 管理端点恒 401** |
 | `GATE_BILLING_DAY` | VPS 月度账单结算日（1-28，UTC 00:00 为结算点）：网关按此归档上一周期用量并归零，账本 `~/.pony/gate_usage.json` |
-| `GATE_ADMIN` | 网关管理端点地址（CLI 撤销热推送目标，默认 `http://127.0.0.1:3101`） |
+| `GATE_ADMIN` | 网关管理端点地址（CLI 直连时用，默认 `http://127.0.0.1:3101`） |
+| `GATE_ADMIN_SSH` | 网关只监听 `127.0.0.1` 时的运维通道：CLI 经 `ssh <host>` 在网关本机 POST（口令/body 走 stdin）；也可写进 `~/.pony/gate_admin.conf` 的 `ssh=` |
 | `PPROXY_CF_GATE_SCRIPT_NAME` | gate 单独用量来源（B012）：填 gate Worker 名（如 `pony-gate`）后，`/api/quota` 出现 `gate_cf` 来源独立展示隧道请求数并参与阈值告警；**默认留空 = 关闭**（仅保留全账号 cf 来源，行为不变） |
 | `PPROXY_SERVICE_USER` | `m4_test.sh` 断言的服务运行用户（默认 `pproxy`） |
 
@@ -564,33 +565,59 @@ pproxy user add admin_ops --quota 100G --expires 1y --admin
 订阅链接等价于该用户凭据，仅限本人使用。
 
 #### 3.2 撤销令牌 / 封禁租户热生效
-当租户逾期、滥用或凭据泄露时，执行撤销命令。系统支持传入完整令牌（`usr_live_...`）或指定用户名（`username`）：
+
+凭据失效有三条入口，语义不同但共用同一条管理通道：
+
+| 命令 | 语义 | 是否级联撤销 |
+|---|---|---|
+| `pproxy user rm <name>` | 删号（DB 行删除） | ✅ 自动撤销该用户的令牌 `jti` |
+| `pproxy user disable <name>` | 临时停用（DB 行保留） | ✅ 自动撤销该用户的令牌 `jti` |
+| `pproxy user revoke <name\|usr_live_...>` | 只撤销凭据 | ✅（本职） |
+
+**管理通道（一次性配置）**
+
+生产网关默认只监听 `127.0.0.1:3101`，管理机无法直连，因此口令与传输路径分开配置。写在
+`~/.pony/gate_admin.conf`（0600）；环境变量 `GATE_ADMIN_TOKEN` / `GATE_ADMIN_SSH` / `GATE_ADMIN` 优先：
+
+```ini
+token=<与网关 GATE_ADMIN_TOKEN 一致的 32 字节 hex>
+ssh=racknerd     # 经 SSH 在网关本机 curl（口令与 body 走 stdin，不进进程表/命令行）
+# url=http://127.0.0.1:3101   # 网关与 CLI 同机时把 ssh 换成这一行
+```
+
+网关侧对应一行（`/opt/pproxy/.gate-server.env`，0600），改完 `sudo systemctl restart pony-gate-rust`：
 
 ```bash
-# 导出网关管理鉴权口令（与网关部署环境变量 GATE_ADMIN_TOKEN 保持一致）
-export GATE_ADMIN_TOKEN="your_secure_gate_admin_token"
-export GATE_ADMIN="http://127.0.0.1:3101"   # 若网关在远端则配置对端地址
-
-# 执行撤销
-pproxy user revoke usr_live_3fa85f6476104b2f90a9866572e9d81a
-# 或按用户名撤销
-pproxy user revoke alice
+GATE_ADMIN_TOKEN=<32 字节 hex>   # 留空 = 管理端点恒 401，撤销只能人工改文件+重启
 ```
+
+**执行与回显**
+
+```bash
+pproxy user rm alice
+# ✓ 已删除用户: alice
+#   撤销(删除用户): ✓ tok-8e71ef7ef89a9648 → ssh:racknerd
+#   ✓ 已签发令牌在网关立即失效（新握手返回 401）
+```
+
+撤销标识符优先取 `users.jti`（精确，不连坐同名重建）；老库无 `jti` 的行回落 `usr_<name>` 并告警。
+撤销未生效时命令返回**非零**——「删了但没断网」必须能被脚本/CI 捕获。
+边界：撤销只拦新握手，已在传输中的长连接不中断（靠连接超时自然收敛）。
 
 #### 3.3 验证热生效
 1. **CLI 回显核验**：
    ```
-   落盘路径:   /home/user/.pony/revoked_tokens.txt
-   网关热更新: 已生效 ✓ (http://127.0.0.1:3101)
+   撤销(删除用户): ✓ tok-8e71ef7ef89a9648 → ssh:racknerd
+   ✓ 已签发令牌在网关立即失效（新握手返回 401）
    ```
-2. **网关端点直接验证**：
+2. **网关端点直接验证**（在网关本机执行）：
    向网关管理接口发起热撤销推送：
    ```bash
    curl -i -X POST http://127.0.0.1:3101/api/user/revoke \
      -H "Authorization: Bearer ${GATE_ADMIN_TOKEN}" \
      -H "Content-Type: application/json" \
-     -d '{"identifier": "usr_alice"}'
-   # 期望返回: HTTP/1.1 200 OK，{"ok":true,"identifier":"usr_alice"}
+     -d '{"identifier": "tok-8e71ef7ef89a9648"}'
+   # 期望返回: HTTP/1.1 200 OK，{"ok":true,"identifier":"tok-8e71ef7ef89a9648"}
    ```
 3. **数据面拦截验证**：
    持已撤销令牌请求用户 Profile 或建立代理连接：
@@ -599,6 +626,7 @@ pproxy user revoke alice
      -H "Authorization: Bearer usr_live_..."
    # 期望返回: HTTP/1.1 401 Unauthorized
    ```
+   网关日志应同时出现 `subscription: token revoked` 与 `CONNECT: user token revoked`。
 
 ---
 

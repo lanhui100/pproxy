@@ -2,6 +2,7 @@
 
 pub mod deploy;
 pub mod doctor;
+pub mod gate_admin;
 pub mod export_cmd;
 pub mod init_interactive;
 pub mod proxy_env;
