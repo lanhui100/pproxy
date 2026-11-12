@@ -86,6 +86,20 @@
   ②改造 G4 判据为"骨架缺口仅告警"（Wave-1 断言冻结，须 Lead 明确指令）
 - **验收**：`bash tests/governance/run.sh` 17/17 且 `ponygo status` rc=0，之后 `git push` 恢复免用 `--no-verify`
 
+### B021 — 生产 gate 验签公钥与 dev/preprod 私钥不配对（会员开通在生产落地被阻塞）🔴 阻塞
+- **现象**：dev 签发 `usr_live_` 令牌后 `curl https://rn.ponygo.fun/clash?token=…` → **401**；
+  `journalctl -u pony-gate-rust` 记 `user token verification failed: signature error`
+- **实证（三把公钥互不相同）**：dev 私钥派生 `e10ab1ce…`；preprod 私钥派生 `f11d182c…`；
+  VPS `USER_VERIFYING_KEY=9e20e627…`（启动日志同值）。即：**没有任何一台已知机器的私钥与该公钥配对**
+- **影响**：`pproxy user add -q …` 输出的订阅链接/二维码/深链在生产全部不可用（令牌本身有效，网关不认签名）；
+  桌面端多租户令牌同理。订阅头改造（本次部署）不受影响：本地以 dev 公钥起临时实例实测
+  `subscription-userinfo: upload=0; download=0; total=1073741824; expire=1797052223` 正常
+- **处置选项**：① **找回**持有 `9e20e627…` 私钥的管理机并在那台签发（零迁移，推荐）；
+  ② **轮换**为 dev 公钥：更新 `/opt/pproxy/.gate-server.env` 的 `USER_VERIFYING_KEY` + `systemctl restart pony-gate-rust`，
+  代价是在用令牌全部失效需重签（当前 `gate_usage.json` 记 2 个用户）
+- **验收**：dev 签发 → `curl -sD - https://rn.ponygo.fun/clash?token=… | grep subscription-userinfo` 返回 200，
+  且 `total` 等于签发时的 `-q` 额度、`expire` 等于 `-d` 到期日
+
 ### B011 — gate 伪装页 + 反指纹 P0-2（edgetunnel 借鉴）✅ 已完成
 - **动机**：gate 非 `/ws` 路径全裸 404 = 最典型的"可疑 Worker"指纹，防扫号低成本高收益
 - **方案**：非 `/ws` 返回 200 仿 nginx 欢迎页；`/ws`、`/debug` 等特征路径运行时拼装；

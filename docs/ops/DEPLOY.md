@@ -165,6 +165,27 @@ sudo systemctl restart pproxy
 curl -s http://127.0.0.1:8899/ | head -c 100   # 健康检查
 ```
 
+### 更新 gate-server（RackNerd VPS，秒级窗口）
+```bash
+# 1) 本机构建（VPS 与 dev 同为 Ubuntu 24.04 / glibc 2.39，同平台编译即可）
+cargo build --release -p pproxy-gate-server && sha256sum target/release/pproxy-gate-server
+
+# 2) 备份 → 上传 → 校验 → 原子替换 → 重启
+TS=$(date +%Y%m%d-%H%M%S)
+ssh racknerd "cp -a /opt/pproxy/bin/pproxy-gate-server /opt/pproxy/bin/pproxy-gate-server.bak-$TS"
+scp target/release/pproxy-gate-server racknerd:/tmp/pproxy-gate-server.new
+ssh racknerd 'sha256sum /tmp/pproxy-gate-server.new'      # 与本机 hash 逐字比对后再替换
+ssh racknerd 'install -m 755 /tmp/pproxy-gate-server.new /opt/pproxy/bin/pproxy-gate-server \
+  && systemctl restart pony-gate-rust && sleep 3 && systemctl is-active pony-gate-rust'
+
+# 3) 生效自检（三条都要过）
+ssh racknerd 'journalctl -u pony-gate-rust -n 20 --no-pager | grep -E "User Token Verifier enabled|CONNECT proxy listening|restored usage"'
+ssh racknerd 'ss -tlnp | grep -E "3101|3102"'              # 期望 127.0.0.1:3101 + 127.0.0.1:3102
+curl -s -o /dev/null -w '%{http_code}\n' https://rn.ponygo.fun/clash   # 401（缺 token 被拒 = 鉴权在位）
+```
+回滚：`ssh racknerd 'install -m 755 /opt/pproxy/bin/pproxy-gate-server.bak-<TS> /opt/pproxy/bin/pproxy-gate-server && systemctl restart pony-gate-rust'`。
+**窗口**：单机无 HA Forwarder，重启有秒级 CONNECT 断流，靠客户端多出口 failover 吸收（§0 总则口径，不可宣称零下线）。
+
 ### 集群滚动升级（分布式节点，零停机）
 多节点集群的优雅升级流程、签名/分发、升级顺序与回滚见 **[ROLLING-UPGRADE.md](ROLLING-UPGRADE.md)**
 （命令：`pproxy cluster upgrade --local <pkg> --sig <pkg>.sig --target <服务二进制>`；
@@ -466,6 +487,17 @@ ls -l ~/.pony/cluster_signing_key.hex
   # 验证轻量 gate-server 日志回显
   journalctl -u gate-server -n 20 | grep "User Token Verifier enabled"
   ```
+- **签发前配对自检（漏做即 401 signature error，且只有签发侧能发现）**：
+  `pproxy user add` 回显的「公钥校验」必须与节点 `USER_VERIFYING_KEY` 逐字相同；
+  也可从私钥派生核对（私钥不出本机）：
+  ```bash
+  printf '302e020100300506032b657004220420' | xxd -r -p > /tmp/ed.der
+  cat ~/.pony/cluster_signing_key.hex | xxd -r -p >> /tmp/ed.der   # 32 字节种子 → PKCS8 Ed25519
+  openssl pkey -inform DER -in /tmp/ed.der -pubout -outform DER | tail -c 32 | xxd -p -c 32
+  rm -f /tmp/ed.der
+  ```
+  与节点 `grep USER_VERIFYING_KEY /opt/pproxy/.gate-server.env` 比对；不一致说明签发机不是
+  「权威管理机」，此时签出的令牌全部会被网关判 401（见 backlog B021）。
 - **Nginx 反向代理配置（若网关前置 Nginx）**：
   需确保反向代理放行 `/api/user` 路由以允许公网客户端查询 Profile（`/api/user/profile`）与管理端热撤销（`/api/user/revoke`）：
   ```nginx
