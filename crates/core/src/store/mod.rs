@@ -24,6 +24,15 @@ use std::sync::MutexGuard;
 use rusqlite::Connection;
 use rusqlite::Row;
 
+/// users 表商业化会员列（列名, SQL 类型）：SCHEMA_SQL 与老库幂等 ALTER 共用，
+/// 避免新增列时两处遗漏（D3）。
+pub(crate) const USER_MEMBER_COLUMNS: [(&str, &str); 4] = [
+    ("quota_bytes", "INTEGER"),
+    ("jti", "TEXT"),
+    ("max_conns", "INTEGER"),
+    ("role", "TEXT"),
+];
+
 /// WHY upstream 列可空：NULL=自动选择（RouteRow.upstream 为 Option、
 /// 迁移规则"route_upstreams 无映射则 NULL"）。任务 spec §4 DDL 草稿的
 /// NOT NULL 与 §6/§6.1.6 的 Option 语义矛盾，按数据模型语义取可空。
@@ -38,6 +47,8 @@ CREATE TABLE IF NOT EXISTS tokens (
   last_used_at INTEGER
 );
 
+-- 商业化会员列（quota_bytes/jti/max_conns/role）可空：老库由 open() 的
+-- PRAGMA table_info 幂等补齐，语义上 None=未开通会员（普通 Basic 用户）。
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   username      TEXT NOT NULL UNIQUE,
@@ -45,7 +56,11 @@ CREATE TABLE IF NOT EXISTS users (
   created_at    INTEGER NOT NULL,
   disabled      INTEGER NOT NULL DEFAULT 0,
   expires_at    INTEGER,
-  last_used_at  INTEGER
+  last_used_at  INTEGER,
+  quota_bytes   INTEGER,
+  jti           TEXT,
+  max_conns     INTEGER,
+  role          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS routes (
@@ -268,6 +283,17 @@ impl Store {
             .any(|c| c == "backup_upstream");
         if !has_backup {
             conn.execute_batch("ALTER TABLE routes ADD COLUMN backup_upstream TEXT")?;
+        }
+        // 幂等迁移（商业化会员列）：同上模式，老库 users 表缺列时逐列 ALTER 补齐。
+        // 全部可空，缺省 NULL 即"未开通会员"，旧行语义不变。
+        let existing_user_cols = conn
+            .prepare("PRAGMA table_info(users)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<String>, _>>()?;
+        for (col, sql_ty) in USER_MEMBER_COLUMNS {
+            if !existing_user_cols.iter().any(|c| c == col) {
+                conn.execute_batch(&format!("ALTER TABLE users ADD COLUMN {col} {sql_ty}"))?;
+            }
         }
         Ok((
             Store {

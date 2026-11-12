@@ -277,9 +277,11 @@ enum UserCmd {
         /// 自定义密码（若不提供将自动生成高强度密码）
         #[arg(long, short = 'p')]
         password: Option<String>,
-        /// 有效天数（默认 30 天）
-        #[arg(long, short = 'd')]
-        expires_days: Option<u32>,
+        /// 有效期：30 / 30d / 1m / 3m / 6m / 1y（m=自然月，y=12 个自然月）
+        // visible_alias 保留 `--expires-days N` 旧写法（N 仍按天数解释），
+        // 避免既有部署脚本与历史文档命令在同一提交内静默失效。
+        #[arg(long, short = 'd', visible_alias = "expires-days")]
+        expires: Option<String>,
         /// 商业化自包含令牌：周期总配额（如 50G, 100M）
         #[arg(long, short = 'q')]
         quota: Option<String>,
@@ -680,8 +682,8 @@ fn run(cli: Cli) -> Result<i32, RunError> {
     // 2. user 用户管理
     if let Command::User { cmd } = &cli.command {
         return match cmd {
-            UserCmd::Add { username, password, expires_days, quota, max_conns, admin } => {
-                cmd::user::add(username, password.as_deref(), *expires_days, quota.as_deref(), *max_conns, *admin).map_err(RunError::Msg)
+            UserCmd::Add { username, password, expires, quota, max_conns, admin } => {
+                cmd::user::add(username, password.as_deref(), expires.as_deref(), quota.as_deref(), *max_conns, *admin).map_err(RunError::Msg)
             }
             UserCmd::Keygen => cmd::user::keygen().map_err(RunError::Msg),
             UserCmd::List => cmd::user::list().map_err(RunError::Msg),

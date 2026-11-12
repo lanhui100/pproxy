@@ -484,12 +484,18 @@ ls -l ~/.pony/cluster_signing_key.hex
 #### 3.1 签发租户商业化令牌
 在离线管理机执行命令（私钥自动参与签名）：
 ```bash
-# 签发 30 天有效、配额 50GB、最大 3 并发的普通租户令牌
-pproxy user add alice --quota 50G --expires-days 30 --max-conns 3
+# 签发 1 个自然月有效、配额 50GB、最大 3 并发的普通租户令牌
+# -d/--expires 取值：30、30d = 自然日；1m/3m/6m = 自然月；1y = 自然年（月末溢出钳制到当月最后一天）
+# --expires-days N 为兼容别名，N 按天解释
+pproxy user add alice --quota 50G --expires 1m --max-conns 3
 
 # 签发系统管理员令牌（带 --admin 显式参数，豁免流量额度熔断）
-pproxy user add admin_ops --quota 100G --expires-days 365 --admin
+pproxy user add admin_ops --quota 100G --expires 1y --admin
 ```
+
+命令成功即把 `quota_bytes` / `jti` / `max_conns` / `role` / `expires_at` 同源写入 `users` 表（`pproxy user list` 可见），
+并直接打印该租户的 **Clash 订阅链接**、`clash://install-config` 一键导入深链与二维码（网关域名取 `tunnel_gate_url`，必须是 443 端口）。
+订阅链接等价于该用户凭据，仅限本人使用。
 
 #### 3.2 撤销令牌 / 封禁租户热生效
 当租户逾期、滥用或凭据泄露时，执行撤销命令。系统支持传入完整令牌（`usr_live_...`）或指定用户名（`username`）：

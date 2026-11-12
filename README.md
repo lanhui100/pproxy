@@ -115,11 +115,12 @@ pproxy cluster status
 # 生成非对称密钥对（私钥仅留管理机 ~/.pony/cluster_signing_key.hex，公钥分发至网关节点）
 pproxy user keygen
 
-# 离线签发自包含租户令牌（支持 50G/100M，离线验签，客户端直显额度与并发限制）
-pproxy user add alice -q 50G -d 30 -c 3
+# 离线签发自包含租户令牌（-q 周期配额，-d 会员时长：30/30d=天、1m/3m/6m=自然月、1y=自然年）
+# 签发即写用户表，并直接打印 Clash 订阅链接 / clash:// 一键导入深链 / 二维码
+pproxy user add alice -q 50G -d 3m -c 3
 
 # 签发系统管理员令牌（带 --admin 显式参数，豁免流量额度熔断）
-pproxy user add admin_ops -q 100G -d 365 --admin
+pproxy user add admin_ops -q 100G -d 1y --admin
 
 # 一键废止令牌或用户（实时加入黑名单，热推送全网网关拦截）
 pproxy user revoke usr_alice
@@ -129,6 +130,12 @@ pproxy user revoke tok-9f8e7d6c
 
 - **非对称密钥隔离**：私钥永不上节点，避免单节点失陷导致假令牌伪造；边缘网关持公钥纯本地验签。
 - **自包含与直显**：令牌内置 `sub`、`quota_bytes`、`exp`、`max_conns`，桌面端与客户端无需查询中心库即可实时显示配额仪表盘。
+- **会员即开通即可管**：`-q` 路径把 `quota_bytes`/`jti`/`max_conns`/`role`/`expires_at` 同源写入 `users` 表，
+  因此 `pproxy user list` / `rm` / `disable` 对该会员处处生效，不存在"表里没有、令牌有效"的幽灵账号。
+- **额度可感知**：网关 `/clash` 的 `subscription-userinfo` 头返回该租户**真实**已用字节 / 配额 / 到期时间，
+  额度耗尽时客户端直接显示，而不是只表现为连接失败；次月账单周期归零后自动恢复。
+- **订阅链接仅限个人**：`/clash?token=usr_live_...` 等价于该用户的全部凭据，泄露只会消耗**本人**月度额度，
+  建议只在本人设备保留，怀疑外泄时用 `pproxy user revoke` 回收后重签。
 - **全网黑名单与热撤销**：执行 `pproxy user revoke` 实时写入黑名单并热推网关，后续连接与查询秒级 401/403 阻断。
 
 ### 6. 本地 Local HA Forwarder (无感高可用分发桩)

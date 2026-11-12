@@ -211,7 +211,7 @@ fn extract_token_from_existing_file() -> Option<String> {
 /// 从配置提取 gate 隧道端点（B015，对抗审核 P1：保留端口）：
 /// 支持 "wss://host[:port]/ws"、"wss://host[:port]"、"host[:port]" 三种形态，
 /// 返回 (host, port)；端口缺省按 wss 默认 443；多端点取第一个；无配置返回 None。
-fn gate_endpoint_from_config(cfg: &PonyConfig) -> Option<(String, u16)> {
+pub(crate) fn gate_endpoint_from_config(cfg: &PonyConfig) -> Option<(String, u16)> {
     let url = cfg.tunnel_gate_url.as_deref()?.trim();
     let first = url.split(',').next()?.trim();
     if first.is_empty() {

@@ -310,8 +310,13 @@ async fn handle_root() -> impl IntoResponse {
 /// 1. 单口令兼容：`sha256(token) == tunnel_token_hash`（同 `/ws` 回退模式口径）；
 /// 2. 多租户令牌：`usr_live_` 前缀经 `verifier` 验签，并通过撤销表（jti / sub）。
 ///
-/// 返回 `Err("missing token")` / `Err("invalid token")`，由调用方映射为 401。
-fn validate_subscription_token(cfg: &ServerConfig, presented: &str) -> Result<(), &'static str> {
+/// 成功时返回 `Ok(None)`（单口令兼容模式，无租户配额/到期语义）或 `Ok(Some(claims))`
+/// （多租户用户令牌，供订阅头合成真实已用/额度/到期）；失败返回
+/// `Err("missing token")` / `Err("invalid token")`，由调用方映射为 401。
+fn validate_subscription_token(
+    cfg: &ServerConfig,
+    presented: &str,
+) -> Result<Option<pproxy_core::UserTokenClaims>, &'static str> {
     let presented = presented.trim();
     if presented.is_empty() {
         return Err("missing token");
@@ -320,7 +325,7 @@ fn validate_subscription_token(cfg: &ServerConfig, presented: &str) -> Result<()
     // 1. 单口令兼容模式（sha256 比对，与 /ws 一致）
     let expected = cfg.tunnel_token_hash.trim().to_ascii_lowercase();
     if !expected.is_empty() && sha256_hex(presented) == expected {
-        return Ok(());
+        return Ok(None);
     }
 
     // 2. 多租户用户令牌：验签 + 撤销表
@@ -337,7 +342,7 @@ fn validate_subscription_token(cfg: &ServerConfig, presented: &str) -> Result<()
                     tracing::warn!(uid = %claims.sub, jti = %claims.jti, "subscription: token revoked");
                     Err("invalid token")
                 } else {
-                    Ok(())
+                    Ok(Some(claims))
                 }
             }
             Err(e) => {
@@ -371,15 +376,18 @@ async fn handle_clash_subscription(
         });
 
     let presented = token.as_deref().unwrap_or("");
-    if let Err(reason) = validate_subscription_token(&cfg, presented) {
-        tracing::warn!(reason, "subscription request rejected");
-        return (
-            StatusCode::UNAUTHORIZED,
-            [("content-type", "text/plain; charset=utf-8")],
-            format!("Unauthorized: {reason}"),
-        )
-            .into_response();
-    }
+    let claims = match validate_subscription_token(&cfg, presented) {
+        Ok(claims) => claims,
+        Err(reason) => {
+            tracing::warn!(reason, "subscription request rejected");
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("content-type", "text/plain; charset=utf-8")],
+                format!("Unauthorized: {reason}"),
+            )
+                .into_response();
+        }
+    };
 
     let host = headers
         .get(header::HOST)
@@ -403,6 +411,24 @@ async fn handle_clash_subscription(
         }
     };
 
+    // 订阅头按真实值合成：客户端据此展示已用/总额/到期，额度耗尽时用户即可感知，
+    // 而不是只表现为连接失败。
+    let (used, quota, expire) = match claims.as_ref() {
+        // admin：total=0 是 Clash 约定语义（0 = 不限额展示）
+        Some(c) if is_admin_claims(c) => (user_used_bytes_of(&cfg, &c.sub), 0, 0),
+        Some(c) => (user_used_bytes_of(&cfg, &c.sub), c.quota_bytes, c.exp),
+        // 单口令兼容模式无租户语义：展示 VPS 整机基线与该账本周期聚合用量
+        None => (
+            cfg.usage_manager
+                .as_ref()
+                .map(|m| m.total_used_bytes())
+                .unwrap_or(0),
+            usage::VPS_TOTAL_QUOTA_BYTES,
+            0,
+        ),
+    };
+    let userinfo = subscription_userinfo_header(used, quota, expire);
+
     // 补充标准 Clash 订阅响应头，杜绝移动端/Mihomo 在拉取订阅时 EOF
     // 响应体内含长期令牌：必须 no-store，禁止中间缓存/客户端落盘复用
     (
@@ -410,7 +436,7 @@ async fn handle_clash_subscription(
         [
             ("content-type", "application/yaml; charset=utf-8"),
             ("content-disposition", "inline; filename=\"clash.yaml\""),
-            ("subscription-userinfo", "upload=0; download=0; total=107374182400; expire=0"),
+            ("subscription-userinfo", userinfo.as_str()),
             ("profile-update-interval", "24"),
             ("cache-control", "no-store"),
         ],
@@ -525,6 +551,22 @@ async fn handle_debug(State(cfg): State<Arc<ServerConfig>>) -> impl IntoResponse
         [("content-type", "application/json")],
         body.to_string(),
     )
+}
+
+/// 取某租户当前周期累计已用字节（无记录按 0）。
+fn user_used_bytes_of(cfg: &ServerConfig, sub: &str) -> u64 {
+    cfg.user_used_bytes
+        .get(sub)
+        .map(|v| v.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
+/// 合成 Clash 约定的 `subscription-userinfo` 头。
+///
+/// `upload` 恒为 0：现有计量把上行与下行合并记在 download 侧，
+/// 此处不伪造 upload 口径，避免客户端出现与熔断阈值不一致的“已用”总数。
+fn subscription_userinfo_header(used: u64, quota: u64, expire: u64) -> String {
+    format!("upload=0; download={used}; total={quota}; expire={expire}")
 }
 
 /// 管理员判定（ADR 2026-10-03 收紧）：仅凭自包含令牌 `role == "admin"`，

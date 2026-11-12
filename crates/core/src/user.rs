@@ -89,6 +89,14 @@ impl From<StoreError> for UserError {
     }
 }
 
+/// 当前 Unix 秒（负值/系统时钟异常退化为 0，避免 unwrap panic）。
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// 用户服务：缓存 + 校验 + 节流。
 #[derive(Clone)]
 pub struct UserService {
@@ -128,28 +136,52 @@ impl UserService {
         Ok(())
     }
 
-    /// 创建用户。
+    /// 创建用户（薄委托）：expires_days → 绝对过期时刻 now + d*86400。
+    /// 保留签名以兼容既有调用方与测试。
     pub fn create_user(
         &self,
         username: &str,
         password: &str,
         expires_days: Option<u32>,
     ) -> Result<UserRow, UserError> {
+        let now = now_unix();
+        let expires_at = expires_days.map(|days| now + (days as i64) * 86400);
+        self.create_user_ex(username, password, expires_at, None, None, None, None)
+    }
+
+    /// 创建用户（完整会员属性）：过期时刻、周期配额、令牌 jti、并发上限、角色。
+    /// 会员开通必须与令牌签发同源落库，否则会出现两套互不知情的凭据。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_user_ex(
+        &self,
+        username: &str,
+        password: &str,
+        expires_at: Option<i64>,
+        quota_bytes: Option<u64>,
+        jti: Option<&str>,
+        max_conns: Option<u32>,
+        role: Option<&str>,
+    ) -> Result<UserRow, UserError> {
         Self::validate_username(username)?;
         if password.len() < 4 {
             return Err(UserError::InvalidPassword("password must be at least 4 characters"));
         }
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let expires_at = expires_days.map(|days| now + (days as i64) * 86400);
+        let now = now_unix();
         let password_hash = hash_password(password);
 
         let row = self
             .store
-            .insert_user(username, &password_hash, now, expires_at)
+            .insert_user_ex(
+                username,
+                &password_hash,
+                now,
+                expires_at,
+                quota_bytes,
+                jti,
+                max_conns,
+                role,
+            )
             .map_err(|e| match &e {
                 StoreError::Sqlite(sqlite_err) if sqlite_err.to_string().contains("UNIQUE constraint failed") => {
                     UserError::UserAlreadyExists(username.to_string())
@@ -304,5 +336,63 @@ mod tests {
         // 7. 删除用户
         assert!(service.delete_user("alice_dev").unwrap());
         assert!(service.verify_user("alice_dev", "NewPassword456").is_none());
+    }
+
+    #[tokio::test]
+    async fn create_user_ex_persists_member_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _) = Store::open(&temp.path().join("state.db")).unwrap();
+        let service = UserService::new(Arc::new(store)).unwrap();
+
+        let quota: u64 = 50 * 1024 * 1024 * 1024;
+        let user = service
+            .create_user_ex(
+                "member_user",
+                "MemberPass123",
+                Some(1_900_000_000),
+                Some(quota),
+                Some("tok-deadbeef"),
+                Some(3),
+                Some("user"),
+            )
+            .unwrap();
+
+        assert_eq!(user.expires_at, Some(1_900_000_000));
+        assert_eq!(user.quota_bytes, Some(53_687_091_200));
+        assert_eq!(user.jti.as_deref(), Some("tok-deadbeef"));
+        assert_eq!(user.max_conns, Some(3));
+        assert_eq!(user.role.as_deref(), Some("user"));
+
+        // 缓存与库中一致（list_users 走内存缓存）
+        let cached = service
+            .list_users()
+            .into_iter()
+            .find(|u| u.username == "member_user")
+            .expect("缓存应包含新用户");
+        assert_eq!(cached, user);
+
+        // 用户名冲突仍为 UserAlreadyExists（会员分支据此提示先 rm）
+        assert!(matches!(
+            service.create_user_ex(
+                "member_user",
+                "AnotherPass",
+                None,
+                None,
+                None,
+                None,
+                None
+            ),
+            Err(UserError::UserAlreadyExists(_))
+        ));
+
+        // 薄委托：create_user 仍按天数计算到期，会员字段为 None
+        let legacy = service
+            .create_user("legacy_user", "LegacyPass123", Some(30))
+            .unwrap();
+        assert_eq!(legacy.quota_bytes, None);
+        assert_eq!(legacy.jti, None);
+        let now = now_unix();
+        let exp = legacy.expires_at.expect("30 天应有过期时间");
+        assert!((exp - (now + 30 * 86400)).abs() <= 5, "expires_days → now + d*86400");
     }
 }

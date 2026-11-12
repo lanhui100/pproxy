@@ -20,6 +20,61 @@
 
 ## 待办
 
+### B017 — 发布通道命名治理：`desktop-v*` 同时承载桌面包与 CLI 二进制 📋 待决策
+- **动机（2026-11-12 复核）**：`desktop-v0.3.68` 一个 release 里既有 `Pony.Proxy_0.3.68_x64-setup.exe`（桌面 GUI），
+  又有 `pproxy-macos-{arm64,amd64}` 等 CLI 二进制——但 CLI 版本仍是 `crates/cli/Cargo.toml` 的 **0.3.57**，
+  下载物 `pproxy --version` 与 tag/标题不符；`cli-release.yml` 的 trigger 是 `["cli-v*","desktop-v*","v*"]`，
+  前缀并不代表产物边界；两个 workflow 同时被 `desktop-v*` 触发，`gh release edit --notes-file` 会覆盖
+  tauri-action 写入的桌面端 notes（完成顺序竞态）；共享命名空间正是 2026-10-02 "latest 被 CLI 抢占" 事故的根因，
+  现靠 cli-release 末尾复制 `latest.json` 兜底
+- **方案（三选一，需人拍板）**：(a) CLI 版本随桌面同源 bump（保留共享 tag）；(b) `desktop-v*` 从 cli-release
+  trigger 移除，CLI 只发 `cli-v*`；(c) cli-release 对已存在 release 仅 `upload --clobber`，不写 notes
+- **验收**：任选其一后，机械断言"release 内任一 `pproxy-*` 二进制 `--version` == 该 tag 版本"（脚本非零退出）；
+  发 `desktop-v*` 后 `gh release view` 的 notes 只含桌面口径（靠 review + 上述脚本）
+- **落点**：`.github/workflows/cli-release.yml`、`.github/workflows/desktop-release.yml`、`scripts/release-gate.sh`
+- **关联**：ADR implemented/bug-fix/2026-10-02-github-latest-feed-shadowed-by-cli-release；B018（macOS 桌面发版）
+
+### B018 — macOS 桌面版发版评估：当前**不可发**，缺口 6 项（2026-11-12 评估结论）📋 待启动
+- **动机**：`desktop/README.md` 声明"只出 Windows 包"，但 `docs/product/specs/distributed-commercialization/README.md`
+  Phase 5 已把 macOS 系统代理驱动 + DMG 打包列为计划；代码侧 `sysproxy.rs` 已有 `route get default` + `networksetup`
+  实现，需判定离发版还差什么
+- **缺口（均已定位到文件/行）**：
+  1. **凭据不持久（静默降级）**：`desktop/src-tauri/Cargo.toml` 的 `keyring` 只开 `["windows-native"]`；
+     keyring 3.6.3 在 mac 无 `apple-native` 时不报错而是 `pub use mock as default`（src/lib.rs:279）→ 落进程内内存后端；
+     `cred_verify_dual_source`（lib.rs §双源回读校验）在重启后 keyring 侧必失配 → "凭据落盘校验失败"
+  2. **打包/CI 未接**：`tauri.conf.json` `bundle.targets=["nsis"]`（Windows 专有）；`desktop-release.yml` 仅 `windows-latest`
+  3. **代理快照是假的**：mac `enable()` 写入的 `Snapshot` 全为空值、未 readback 原配置；`disable()` 只是把
+     web/secureweb/autoproxy 三态置 off → 会清掉用户原有代理；`rescue_network()` 走 `#[cfg(not(windows))]` 分支只
+     `clear_snapshot()`，崩溃自愈实际不关代理（与 spec Phase 5 宣称不符）
+  4. **权限模型**：`networksetup -setwebproxy` 改系统网络配置需管理员授权（真机验证项，靠 review），
+     现状无 privileged helper / 无授权弹窗设计
+  5. **签名与公证缺失**：workflow 只有 updater 的 `TAURI_SIGNING_*`（minisign），无 Apple Developer ID + 公证 →
+     Gatekeeper 拦截；需付费开发者账号与 `codesign`/`notarytool` 步骤
+  6. **UI/分发细节**：`decorations:false` + `TitleBar.vue` 自绘仅 Windows 语义（mac 无红绿灯）；
+     托盘图标未做 template 适配；`publish-desktop-dist.sh` 硬编码 `platforms['windows-x86_64']` 与 `*_x64-setup.exe`，
+     `latest.json` 需新增 `darwin-aarch64` / `darwin-x86_64` 两个键
+- **结论**：技术底子（系统代理驱动）已在，但按现状发出去会得到"凭据每次重启丢 + 关代理清掉用户设置 + 被 Gatekeeper 拦"的包；
+  **不满足发版条件**。最小可发版路径：缺口 1+2+3 必做，4 需真机定权，5 需账号/证书（外部依赖），6 可随包迭代
+- **验收**：`macos-latest` 产出 dmg（aarch64 + x86_64）且 `hdiutil verify` 通过；实机开关代理、`kill -9` 后网络可用且
+  用户原代理配置被还原；重启后凭据仍在；`latest.json` 含两 darwin 键（靠真机 review + 上述脚本）
+- **落点**：`desktop/src-tauri/{Cargo.toml,tauri.conf.json,src/proxy/sysproxy.rs}`、`.github/workflows/desktop-release.yml`、
+  `scripts/publish-desktop-dist.sh`、`desktop/README.md`
+- **关联**：B017（release 通道治理）；docs/product/specs/distributed-commercialization/README.md Phase 5
+
+### B019 — 会员生命周期运营缺口（改额度/续费）+ 订阅凭据面收尾 📋 待启动
+- **背景**：`pproxy user add alice -q 50G -d 3m` 已一条命令完成"开通 + 落库 + 交付订阅材料/二维码"
+  （ADR implemented/feature/2026-11-12-user-membership-provisioning-and-real-subscription-headers）
+- **待补命令**：`user set-quota <名> -q 100G`（重签 + `revoke` 旧 `jti`）与 `user renew <名> -d 1m`
+  ——现状改额度只能重开账号（`add` 对已存在用户直接失败），续费也必须先 `rm` 再 `add`，会中断在用凭据
+- **凭据面收尾（与 B016 第 6/7 项重叠，此处只留收口条款）**：
+  1. `crates/server/src/gateway.rs` 的 `/clash`、`/clash.yaml` 免鉴权且直接回吐磁盘 `~/.pony/clash.yaml`
+     （含 `username/password: pony_*` 明文共享令牌，本机实测命中）→ 公网可达即无鉴权泄露长期令牌；应删路由或强制鉴权
+  2. `Principal::Tunnel`（共享 `pony_` 令牌）无配额 → 与"单人 50G"口径并存会绕过熔断，应随命令收敛一并关闭
+  3. `?token=` 进 access log/journal；`engine.rs::716` 用 `q == tok` 非常量时间比较
+- **验收**：`user set-quota`/`user renew` 各有单测（旧 `jti` 进撤销表、用量不清零）；`/clash` 未带有效令牌返回 401/404
+  并有 `cargo test -p pproxy-server` 断言；`grep -r '\?token=' 文档` 只剩订阅说明而非第四处生成器
+- **关联**：ADR implemented/feature/2026-11-12-…；B016（CONNECT L3 遗留）；B014（VLESS 入站）
+
 ### B011 — gate 伪装页 + 反指纹 P0-2（edgetunnel 借鉴）✅ 已完成
 - **动机**：gate 非 `/ws` 路径全裸 404 = 最典型的"可疑 Worker"指纹，防扫号低成本高收益
 - **方案**：非 `/ws` 返回 200 仿 nginx 欢迎页；`/ws`、`/debug` 等特征路径运行时拼装；

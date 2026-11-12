@@ -107,11 +107,12 @@ Designed for commercial proxy operations and team multi-tenancy with decentraliz
 # Generate asymmetric keypair (private key stored strictly on management host at ~/.pony/cluster_signing_key.hex)
 pproxy user keygen
 
-# Issue a self-contained tenant token offline (supports 50G/100M, client displays quota and concurrency limits)
-pproxy user add alice -q 50G -d 30 -c 3
+# Issue a self-contained tenant token offline (-q period quota, -d membership term: 30/30d=days, 1m/3m/6m=calendar months, 1y=calendar year)
+# Issuance also persists the member row and prints the Clash subscription URL, the clash:// install deep link and a QR code
+pproxy user add alice -q 50G -d 3m -c 3
 
 # Issue an administrator token (explicit --admin flag exemptions from byte quota limit)
-pproxy user add admin_ops -q 100G -d 365 --admin
+pproxy user add admin_ops -q 100G -d 1y --admin
 
 # Revoke a token or user (added to blacklist with real-time hot-reloading across gateway nodes)
 pproxy user revoke usr_alice
@@ -121,6 +122,8 @@ pproxy user revoke tok-9f8e7d6c
 
 - **Asymmetric Key Isolation**: Private signing keys never leave the administrative workstation, preventing token forging even if an edge node is compromised; edge nodes verify signatures locally via the public key.
 - **Self-Contained & Instant Display**: Tokens embed `sub`, `quota_bytes`, `exp`, and `max_conns`. Desktop and CLI clients display user quotas directly without hitting a central database.
+- **Provisioned and Manageable in One Step**: the `-q` path persists `quota_bytes`/`jti`/`max_conns`/`role`/`expires_at` into the `users` table, so `pproxy user list|rm|disable` act on the same identity instead of leaving a token-only ghost account.
+- **Quota Is Observable**: `/clash` returns real used bytes / quota / expiry in `subscription-userinfo`, so an exhausted tenant sees it in the client instead of only as failing connections.
 - **Real-Time Revocation**: `pproxy user revoke` writes to disk and hot-pushes to the live gateway, instantly blocking subsequent connections and profiles with 401/403.
 
 ### 6. Local HA Forwarder (transparent high-availability proxy stub)

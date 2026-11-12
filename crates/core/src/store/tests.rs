@@ -606,3 +606,104 @@ fn prune_usage_and_quota_by_cutoff() {
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].ts, 2000);
 }
+
+// ---- D3：users 表商业化会员列的迁移与读写 ----
+
+/// 老库（users 表仅 7 列且已有数据）打开后：列被幂等补齐、旧行读出 None、重复 open 不报错。
+#[test]
+fn legacy_users_schema_gets_member_columns() {
+    let (_dir, db) = temp_db("legacy_users");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (
+               id            INTEGER PRIMARY KEY AUTOINCREMENT,
+               username      TEXT NOT NULL UNIQUE,
+               password_hash TEXT NOT NULL,
+               created_at    INTEGER NOT NULL,
+               disabled      INTEGER NOT NULL DEFAULT 0,
+               expires_at    INTEGER,
+               last_used_at  INTEGER
+             );
+             INSERT INTO users (username, password_hash, created_at, disabled, expires_at, last_used_at)
+             VALUES ('legacy', 'salt$hash', 1000, 0, NULL, NULL);",
+        )
+        .unwrap();
+    }
+
+    let (store, fresh) = Store::open(&db).unwrap();
+    assert!(!fresh, "已存在的老库不应判为全新库");
+    // 幂等：列已补齐后再次 open 不能报错
+    drop(store);
+    let (store, _) = Store::open(&db).unwrap();
+
+    let cols: Vec<String> = {
+        let conn = store.lock_conn();
+        let mut stmt = conn.prepare("PRAGMA table_info(users)").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    for expected in ["quota_bytes", "jti", "max_conns", "role"] {
+        assert!(
+            cols.iter().any(|c| c == expected),
+            "老库应补齐列 {expected}，实际: {cols:?}"
+        );
+    }
+
+    let row = store.get_user_by_username("legacy").unwrap().unwrap();
+    assert_eq!(row.username, "legacy");
+    assert_eq!(row.quota_bytes, None, "旧行会员列为 None");
+    assert_eq!(row.jti, None);
+    assert_eq!(row.max_conns, None);
+    assert_eq!(row.role, None);
+}
+
+/// 会员字段写入/读出往返，且旧 insert_user 路径仍写 None。
+#[test]
+fn user_member_columns_roundtrip() {
+    let (_dir, db) = temp_db("member_users");
+    let store = Store::open(&db).unwrap().0;
+    let quota: u64 = 50 * 1024 * 1024 * 1024;
+    let row = store
+        .insert_user_ex(
+            "alice",
+            "salt$hash",
+            1000,
+            Some(9_000_000),
+            Some(quota),
+            Some("tok-abcd"),
+            Some(3),
+            Some("user"),
+        )
+        .unwrap();
+    assert_eq!(row.quota_bytes, Some(53_687_091_200i64));
+    assert_eq!(row.jti.as_deref(), Some("tok-abcd"));
+    assert_eq!(row.max_conns, Some(3));
+    assert_eq!(row.role.as_deref(), Some("user"));
+
+    let listed = store.list_users().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0], row, "list_users 必须带出会员列");
+
+    let by_name = store.get_user_by_username("alice").unwrap().unwrap();
+    assert_eq!(by_name, row, "get_user_by_username 必须带出会员列");
+
+    // 旧路径不携带会员字段
+    let legacy = store.insert_user("bob", "h", 1000, None).unwrap();
+    assert_eq!(legacy.quota_bytes, None);
+    assert_eq!(legacy.jti, None);
+    let by_id = store.get_user_by_id(legacy.id).unwrap().unwrap();
+    assert_eq!(by_id, legacy, "get_user_by_id 必须带出会员列");
+}
+
+/// Deserialize 兼容旧数据（缺字段 → None）。
+#[test]
+fn user_row_deserialize_without_member_fields() {
+    let json = r#"{"id":1,"username":"u","password_hash":"h","created_at":1,
+                   "disabled":false,"expires_at":null,"last_used_at":null}"#;
+    let row: UserRow = serde_json::from_str(json).unwrap();
+    assert_eq!(row.quota_bytes, None);
+    assert_eq!(row.jti, None);
+    assert_eq!(row.max_conns, None);
+    assert_eq!(row.role, None);
+}

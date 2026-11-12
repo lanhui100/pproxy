@@ -67,7 +67,24 @@ mod tests {
 
         let resp_clash = app.clone().oneshot(req_clash).await.unwrap();
         assert_eq!(resp_clash.status(), StatusCode::OK);
-        assert!(resp_clash.headers().contains_key("subscription-userinfo"));
+        // 订阅头必须是真实口径：total/expire 来自令牌 claims，不再是硬编码 100GB/0
+        let userinfo = resp_clash
+            .headers()
+            .get("subscription-userinfo")
+            .and_then(|h| h.to_str().ok())
+            .expect("必须返回 subscription-userinfo 头");
+        assert_eq!(
+            userinfo,
+            format!(
+                "upload=0; download=0; total={}; expire={}",
+                claims.quota_bytes, claims.exp
+            ),
+            "订阅头 total/expire 必须与令牌 claims 一致"
+        );
+        assert!(
+            !userinfo.contains("107374182400"),
+            "严禁硬编码 100GB 配额：{userinfo}"
+        );
         assert_eq!(
             resp_clash.headers().get("profile-update-interval").and_then(|h| h.to_str().ok()),
             Some("24")
@@ -334,5 +351,104 @@ mod tests {
         assert_eq!(json["user"]["expire_at"], reset_ts, "管理员到期时间语义为账单周期重置点");
         let got = json["user"]["days_left"].as_u64().unwrap();
         assert!(got == days_left || got + 1 == days_left, "days_left 应等于距账单重置的天数，实际 {got} vs {days_left}");
+    }
+
+    /// 订阅头必须反映服务端账本里该租户的真实已用量：移动端据此提示额度耗尽，
+    /// 而不是永远显示“0 已用”。`/clash` 与 `/api/clash` 共用 handler，两条端点都要一致。
+    #[tokio::test]
+    async fn test_clash_subscription_userinfo_reflects_real_usage() {
+        let (signer, vk) = TokenSigner::generate();
+        let verifier = Arc::new(pproxy_core::TokenVerifier::new(vk));
+        let used_bytes = Arc::new(dashmap::DashMap::new());
+
+        let cfg = Arc::new(ServerConfig {
+            tunnel_token_hash: "".into(),
+            proxy_secret: "sec".into(),
+            client: reqwest::Client::new(),
+            verifier: Some(verifier),
+            user_active_conns: Arc::new(dashmap::DashMap::new()),
+            user_used_bytes: used_bytes.clone(),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: "test-admin".into(),
+            usage_manager: None,
+        });
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let quota = 50 * 1024 * 1024 * 1024u64; // 50G 月度额度
+        let claims = UserTokenClaims {
+            jti: "jti-usage".into(),
+            sub: "usr_bob".into(),
+            name: "Bob".into(),
+            quota_bytes: quota,
+            lease_bytes: 50 * 1024 * 1024,
+            exp: now + 30 * 86400,
+            iat: now,
+            max_conns: 3,
+            role: "user".into(),
+        };
+        let token = signer.sign_token(&claims).unwrap();
+        used_bytes.insert("usr_bob".into(), std::sync::atomic::AtomicU64::new(42));
+
+        let expected = format!("upload=0; download=42; total={quota}; expire={}", claims.exp);
+        for path in ["/clash", "/api/clash"] {
+            let req = Request::builder()
+                .uri(format!("{path}?token={token}"))
+                .header("Host", "rn.ponygo.fun")
+                .body(Body::empty())
+                .unwrap();
+            let resp = build_router(cfg.clone()).oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path} 应鉴权通过");
+            assert_eq!(
+                resp.headers().get("subscription-userinfo").and_then(|h| h.to_str().ok()),
+                Some(expected.as_str()),
+                "{path} 的 subscription-userinfo 必须反映真实用量与令牌额度/到期"
+            );
+        }
+    }
+
+    /// 单口令兼容模式没有租户语义：订阅头回落 VPS 整机基线与当前周期账本聚合用量。
+    #[tokio::test]
+    async fn test_clash_subscription_single_password_reports_vps_quota() {
+        let used_bytes = Arc::new(dashmap::DashMap::new());
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(crate::usage::UsageManager::new(
+            dir.path().join("gate_usage.json"),
+            1,
+            used_bytes.clone(),
+        ));
+        used_bytes.insert("usr_a".into(), std::sync::atomic::AtomicU64::new(1_000));
+        used_bytes.insert("usr_b".into(), std::sync::atomic::AtomicU64::new(234));
+
+        let password = "single-pass";
+        let cfg = Arc::new(ServerConfig {
+            tunnel_token_hash: crate::sha256_hex(password),
+            proxy_secret: "sec".into(),
+            client: reqwest::Client::new(),
+            verifier: None,
+            user_active_conns: Arc::new(dashmap::DashMap::new()),
+            user_used_bytes: used_bytes.clone(),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: "test-admin".into(),
+            usage_manager: Some(manager),
+        });
+
+        let req = Request::builder()
+            .uri(format!("/clash?token={password}"))
+            .header("Host", "rn.ponygo.fun")
+            .body(Body::empty())
+            .unwrap();
+        let resp = build_router(cfg).oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("subscription-userinfo").and_then(|h| h.to_str().ok()),
+            Some(
+                format!(
+                    "upload=0; download=1234; total={}; expire=0",
+                    crate::usage::VPS_TOTAL_QUOTA_BYTES
+                )
+                .as_str()
+            ),
+            "单口令模式应展示 VPS 整机基线与账本聚合用量"
+        );
     }
 }
