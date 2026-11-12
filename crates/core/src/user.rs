@@ -240,6 +240,12 @@ impl UserService {
         self.cache.iter().map(|r| r.value().clone()).collect()
     }
 
+    /// 按用户名取用户快照（命中内存缓存，未命中 `None`）。
+    /// 供「删除/停用前先取 jti，再级联撤销网关令牌」使用（B061）。
+    pub fn get_user(&self, username: &str) -> Option<UserRow> {
+        self.cache.get(username).map(|r| r.clone())
+    }
+
     pub fn delete_user(&self, username: &str) -> Result<bool, UserError> {
         let deleted = self.store.delete_user(username)?;
         if deleted {

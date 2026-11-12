@@ -124,6 +124,9 @@ pproxy user revoke tok-9f8e7d6c
 - **Self-Contained & Instant Display**: Tokens embed `sub`, `quota_bytes`, `exp`, and `max_conns`. Desktop and CLI clients display user quotas directly without hitting a central database.
 - **Provisioned and Manageable in One Step**: the `-q` path persists `quota_bytes`/`jti`/`max_conns`/`role`/`expires_at` into the `users` table, so `pproxy user list|rm|disable` act on the same identity instead of leaving a token-only ghost account.
 - **Quota Is Observable**: `/clash` returns real used bytes / quota / expiry in `subscription-userinfo`, so an exhausted tenant sees it in the client instead of only as failing connections.
+- **Delete/Disable Means Offline**: `pproxy user rm` / `disable` cascade-revoke that user's token `jti`
+  (new gateway handshakes get 401 immediately) and exit non-zero if revocation did not land; recreating the
+  same username later is unaffected. Admin channel is configured once in `~/.pony/gate_admin.conf` (see ops docs).
 - **Real-Time Revocation**: `pproxy user revoke` writes to disk and hot-pushes to the live gateway, instantly blocking subsequent connections and profiles with 401/403.
 
 ### 6. Local HA Forwarder (transparent high-availability proxy stub)

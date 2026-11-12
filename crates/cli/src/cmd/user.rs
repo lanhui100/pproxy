@@ -1,11 +1,13 @@
 //! `pproxy user ...` — 用户管理（Basic Auth 用户名/密码 CRUD 与一键连接口令生成）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use pproxy_core::store::default_db_path;
+use pproxy_core::store::{default_db_path, UserRow};
 use pproxy_core::user::{UserError, UserService};
 use pproxy_core::Store;
 
+use crate::cmd::gate_admin;
 use crate::config::{self, load, PonyConfig};
 use crate::render::{fmt_ts, Table};
 use crate::{EXIT_FAILURE, EXIT_OK};
@@ -485,12 +487,84 @@ pub fn list() -> Result<i32, String> {
     Ok(EXIT_OK)
 }
 
+/// 级联撤销的标识符选择（B061）：优先 `jti`（精确，不连坐同名重建）；
+/// 缺失 jti 的 legacy 行回落网关 `sub`（`usr_<name>`），返回 `coarse=true` 由调用方告警。
+pub fn revocation_identifiers(user: &UserRow) -> (Vec<String>, bool) {
+    match user.jti.as_deref().map(str::trim) {
+        Some(jti) if !jti.is_empty() => (vec![jti.to_string()], false),
+        _ => (vec![format!("usr_{}", user.username)], true),
+    }
+}
+
+/// 本机撤销表落盘（`~/.pony/revoked_tokens.txt`，本机 gate 启动时加载的兜底真源）。
+fn append_local_revocation(identifier: &str) -> Result<PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "找不到 HOME 目录".to_string())?;
+    let dir = std::path::Path::new(&home).join(".pony");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    let path = dir.join("revoked_tokens.txt");
+
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("打开撤销列表失败: {e}"))?;
+    writeln!(file, "{identifier}").map_err(|e| format!("写入撤销列表失败: {e}"))?;
+    Ok(path)
+}
+
+/// 撤销一组标识符：本机落盘 + 网关热推送，任一环节失败即 `false`。
+/// `reason` 只用于回显（「删除用户」/「禁用用户」/「手动撤销」）。
+fn enforce_revocation(identifiers: &[String], reason: &str) -> bool {
+    let mut all_ok = true;
+    for id in identifiers {
+        let report = gate_admin::push_revoke(id);
+        let mark = if report.ok { "\x1b[1;32m✓\x1b[0m" } else { "\x1b[1;31m✗\x1b[0m" };
+        println!("  撤销({reason}): {mark} {id} → {}", report.channel);
+        if report.ok {
+            if let Err(e) = append_local_revocation(id) {
+                all_ok = false;
+                println!("  \x1b[1;33m⚠ 远端已生效，但本机撤销表落盘失败：{e}\x1b[0m");
+            }
+        } else {
+            all_ok = false;
+            println!("  \x1b[1;33m⚠ 网关未生效：{}\x1b[0m", report.detail);
+        }
+    }
+    all_ok
+}
+
+/// 删除/停用后的级联撤销。返回退出码：撤销未生效时非零，便于脚本与 CI 断言。
+fn cascade_revoke(user: Option<&UserRow>, username: &str, reason: &str) -> i32 {
+    let (identifiers, coarse) = match user {
+        Some(u) => revocation_identifiers(u),
+        None => (vec![format!("usr_{username}")], true),
+    };
+    if coarse {
+        println!(
+            "  \x1b[1;33m⚠ 该用户无令牌 jti 记录，按用户名 {} 撤销；日后同名重建需先从撤销表摘除\x1b[0m",
+            identifiers[0]
+        );
+    }
+    if enforce_revocation(&identifiers, reason) {
+        println!("  \x1b[1;32m✓ 已签发令牌在网关立即失效（新握手返回 401）\x1b[0m");
+        EXIT_OK
+    } else {
+        println!(
+            "  \x1b[1;31m✗ 撤销未完成：令牌可能仍在有效期内可用。修复管理通道后执行 `pproxy user revoke {username}`\x1b[0m"
+        );
+        EXIT_FAILURE
+    }
+}
+
 pub fn rm(username: &str) -> Result<i32, String> {
     let service = get_user_service()?;
+    // 先取快照：删除后 jti 无从查起，撤销就断了线索（B061）
+    let snapshot = service.get_user(username);
     match service.delete_user(username) {
         Ok(true) => {
             println!("✓ 已删除用户: {username}");
-            Ok(EXIT_OK)
+            Ok(cascade_revoke(snapshot.as_ref(), username, "删除用户"))
         }
         Ok(false) => {
             eprintln!("✗ 用户不存在: {username}");
@@ -505,10 +579,11 @@ pub fn rm(username: &str) -> Result<i32, String> {
 
 pub fn disable(username: &str) -> Result<i32, String> {
     let service = get_user_service()?;
+    let snapshot = service.get_user(username);
     match service.set_disabled(username, true) {
         Ok(true) => {
             println!("✓ 已禁用用户: {username}");
-            Ok(EXIT_OK)
+            Ok(cascade_revoke(snapshot.as_ref(), username, "禁用用户"))
         }
         _ => {
             eprintln!("✗ 操作失败：用户不存在或数据库异常");
@@ -522,6 +597,9 @@ pub fn enable(username: &str) -> Result<i32, String> {
     match service.set_disabled(username, false) {
         Ok(true) => {
             println!("✓ 已启用用户: {username}");
+            println!(
+                "  \x1b[1;33m注意：禁用时撤销的令牌不会自动复通，需重新签发（`user rm` 后重建或 `user renew`）\x1b[0m"
+            );
             Ok(EXIT_OK)
         }
         _ => {
@@ -542,50 +620,9 @@ pub fn revoke(target: &str) -> Result<i32, String> {
         (format!("usr_{}", target), format!("用户 [{}]", target))
     };
 
-    // 保存到本地撤销列表 ~/.pony/revoked_tokens.txt
-    let home = std::env::var("HOME").map_err(|_| "找不到 HOME 目录".to_string())?;
-    let dir = std::path::Path::new(&home).join(".pony");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    let path = dir.join("revoked_tokens.txt");
-
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("打开撤销列表失败: {e}"))?;
-
-    writeln!(file, "{}", jti_or_sub).map_err(|e| format!("写入撤销列表失败: {e}"))?;
-
-    // 热更新闭环：向本机/指定 gate-server 的 POST /api/user/revoke 推送，
-    // 使运行中的网关内存黑名单立即生效（无则跳过并提示，仅本地落盘）。
-    let gate_addr = std::env::var("GATE_ADMIN").unwrap_or_else(|_| "http://127.0.0.1:3101".into());
-    let admin_token = std::env::var("GATE_ADMIN_TOKEN").unwrap_or_default();
-    let mut hot_ok = false;
-    if !admin_token.is_empty() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("运行时创建失败: {e}"))?;
-        hot_ok = rt.block_on(async {
-            let client = match reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(2))
-                .build()
-            {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-            matches!(
-                client
-                    .post(format!("{}/api/user/revoke", gate_addr))
-                    .bearer_auth(&admin_token)
-                    .json(&serde_json::json!({ "identifier": jti_or_sub }))
-                    .send()
-                    .await,
-                Ok(r) if r.status().is_success()
-            )
-        });
-    }
+    // 本机落盘 + 网关热推送（通道解析集中在 gate_admin：env 或 ~/.pony/gate_admin.conf）
+    let path = append_local_revocation(&jti_or_sub)?;
+    let report = gate_admin::push_revoke(&jti_or_sub);
 
     println!("\n╔════════════════════════════════════════════════════════════════╗");
     println!("║       ✓ 用户令牌已成功废止撤销 (Revocation Enforced)           ║");
@@ -595,12 +632,18 @@ pub fn revoke(target: &str) -> Result<i32, String> {
     println!("  落盘路径:   {}", path.display());
     println!(
         "  网关热更新: \x1b[1;32m{}\x1b[0m ({})",
-        if hot_ok { "已生效 ✓" } else { "跳过（未配置 GATE_ADMIN_TOKEN）" },
-        gate_addr
+        if report.ok { "已生效 ✓" } else { "未生效 ✗" },
+        report.channel
     );
-    println!("\n  \x1b[1;32m生效说明：\x1b[0m 该令牌后续发起的所有 WS 握手和 Profile 查询将被网关立即返回 401 Unauthorized 阻断。\n");
+    if !report.ok {
+        println!("  失败原因:   \x1b[1;31m{}\x1b[0m", report.detail);
+    }
+    println!(
+        "\n  \x1b[1;32m生效说明：\x1b[0m 该令牌后续发起的 WS 握手、Profile 查询与 CONNECT 将被网关立即返回 401。"
+    );
+    println!("  \x1b[1;33m边界：\x1b[0m 撤销只拦新握手，已在传输中的长连接不中断（靠连接超时自然收敛）。\n");
 
-    Ok(EXIT_OK)
+    Ok(if report.ok { EXIT_OK } else { EXIT_FAILURE })
 }
 
 pub fn passwd(username: &str, new_password: &str) -> Result<i32, String> {
@@ -829,5 +872,36 @@ mod tests {
         assert_eq!(fmt_quota(Some(-1)), "-");
         assert_eq!(fmt_quota(Some(50 * 1024 * 1024 * 1024)), "50.00G");
         assert_eq!(fmt_quota(Some(100 * 1024 * 1024)), "100M");
+    }
+
+    fn row(username: &str, jti: Option<&str>) -> UserRow {
+        UserRow {
+            id: 1,
+            username: username.to_string(),
+            password_hash: String::new(),
+            created_at: 0,
+            disabled: false,
+            expires_at: None,
+            last_used_at: None,
+            quota_bytes: None,
+            jti: jti.map(str::to_string),
+            max_conns: None,
+            role: None,
+        }
+    }
+
+    #[test]
+    fn revocation_prefers_jti_and_falls_back_to_sub() {
+        // 有 jti → 精确撤销，不连坐同名重建（B061 验收口径）
+        let (ids, coarse) = revocation_identifiers(&row("alice", Some("tok-0123456789abcdef")));
+        assert_eq!(ids, vec!["tok-0123456789abcdef".to_string()]);
+        assert!(!coarse);
+
+        // legacy 行（无 jti / 空白 jti）→ 回落 sub，并标记粗粒度
+        for jti in [None, Some(""), Some("   ")] {
+            let (ids, coarse) = revocation_identifiers(&row("bob", jti));
+            assert_eq!(ids, vec!["usr_bob".to_string()]);
+            assert!(coarse, "jti={jti:?} 应回落粗粒度");
+        }
     }
 }
