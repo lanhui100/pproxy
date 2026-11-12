@@ -16,7 +16,7 @@
 | `TUNNEL_TOKEN_HASH` | 单口令模式的隧道口令哈希（`sha256(token)`） | 空 = 该模式全部拒绝 |
 | `PROXY_SECRET` | `/proxy` 反代上游共享密钥（缺失即 fail-closed） | 空 = 拒绝 |
 | `GATE_ADMIN_TOKEN` | 管理端点口令 | 空 = 管理端点不可用 |
-| `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥（hex）；存在则启用 `usr_live_` 令牌校验 | 未设 = 仅单口令模式 |
+| `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥（hex）；**支持逗号分隔多公钥：首项为主公钥，其余为历史轮换公钥**（轮换窗口内新旧令牌并存）；存在则启用 `usr_live_` 令牌校验 | 未设 = 仅单口令模式 |
 | `GATE_CONNECT_LISTEN` | 公网 CONNECT 数据面监听地址（如 `0.0.0.0:8443`） | **未设/空 = 不监听**（fail-closed，只打一行 info） |
 | `GATE_CONNECT_MAX_LIFETIME_SECS` | 单连接绝对生命周期上限 | `86400`（缺失/非法回落） |
 | `GATE_BILLING_DAY` | VPS 月度账单结算日（1-28，UTC 00:00 为结算点） | `1`（缺失/非法回落，越界 clamp） |

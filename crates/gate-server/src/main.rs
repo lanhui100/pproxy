@@ -22,22 +22,8 @@ async fn main() -> anyhow::Result<()> {
     let token_hash = std::env::var("TUNNEL_TOKEN_HASH").unwrap_or_default();
     let proxy_secret = std::env::var("PROXY_SECRET").unwrap_or_default();
     let gate_admin_token = std::env::var("GATE_ADMIN_TOKEN").unwrap_or_default();
-    let verifying_key_hex = std::env::var("USER_VERIFYING_KEY").ok();
-
-    let verifier = if let Some(hex_key) = verifying_key_hex {
-        match pproxy_core::TokenVerifier::from_hex(&hex_key) {
-            Ok(v) => {
-                tracing::info!("User Token Verifier enabled with public key: {}", hex_key);
-                Some(std::sync::Arc::new(v))
-            }
-            Err(e) => {
-                tracing::error!("Failed to parse USER_VERIFYING_KEY: {}", e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // 支持逗号分隔的多公钥：首项主验签，其余为轮换窗口内的历史公钥（B021）
+    let (verifier, legacy_verifiers) = pproxy_gate_server::verifiers_from_env();
 
     tracing::info!("Starting native Rust Gate Server on {}", addr);
     let client = reqwest::Client::builder()
@@ -63,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
         proxy_secret,
         client,
         verifier,
+        legacy_verifiers,
         user_active_conns: std::sync::Arc::new(dashmap::DashMap::new()),
         user_used_bytes,
         revoked_tokens,

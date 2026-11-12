@@ -41,12 +41,81 @@ pub struct ServerConfig {
     pub tunnel_token_hash: String,
     pub proxy_secret: String,
     pub client: reqwest::Client,
+    /// 主公钥：新签发令牌的验签依据（`USER_VERIFYING_KEY` 首项）。
     pub verifier: Option<Arc<pproxy_core::TokenVerifier>>,
+    /// 历史公钥：密钥轮换窗口内的过渡信任（`USER_VERIFYING_KEY` 其余项）。
+    /// 旧私钥丢失时，已下发令牌仍可在该窗口内继续使用，避免一次性全量失效。
+    pub legacy_verifiers: Vec<Arc<pproxy_core::TokenVerifier>>,
     pub user_active_conns: Arc<dashmap::DashMap<String, usize>>,
     pub user_used_bytes: Arc<dashmap::DashMap<String, std::sync::atomic::AtomicU64>>,
     pub revoked_tokens: Arc<dashmap::DashSet<String>>, // 黑名单撤销表（存储已废止的 jti 或 sub）
     pub gate_admin_token: String, // 管理端点鉴权（POST /api/revoke 等），来源于 ENV GATE_ADMIN_TOKEN
     pub usage_manager: Option<Arc<usage::UsageManager>>,
+}
+
+impl ServerConfig {
+    /// 统一用户令牌验签入口：主公钥优先，其后依次尝试历史公钥（轮换双信任）。
+    ///
+    /// 返回 `None` 表示网关未配置任何公钥（调用方按"未启用验签"处理）；
+    /// 返回 `Some(Err(_))` 表示所有已配置公钥均验签失败（调用方应回 401）。
+    pub fn verify_user_token(
+        &self,
+        token: &str,
+    ) -> Option<Result<pproxy_core::UserTokenClaims, String>> {
+        if self.verifier.is_none() && self.legacy_verifiers.is_empty() {
+            return None;
+        }
+        let mut last_err = String::from("no verifier configured");
+        for v in self.verifier.iter().chain(self.legacy_verifiers.iter()) {
+            match v.verify_token(token) {
+                Ok(c) => return Some(Ok(c)),
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        Some(Err(last_err))
+    }
+}
+
+/// 解析 `USER_VERIFYING_KEY`：支持逗号分隔的多公钥，顺序即信任优先级。
+///
+/// **首项为主公钥**（新签发令牌的验签依据），其余进入历史轮换窗口 —— 旧私钥
+/// 丢失或轮换后，已下发令牌仍可继续使用，避免一次性全量失效。非法项跳过并记
+/// 错误日志，不因单个坏项让整台网关失去验签能力。
+pub fn parse_verifying_keys(
+    raw: &str,
+) -> (
+    Option<Arc<pproxy_core::TokenVerifier>>,
+    Vec<Arc<pproxy_core::TokenVerifier>>,
+) {
+    let mut primary = None;
+    let mut legacy = Vec::new();
+    for part in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match pproxy_core::TokenVerifier::from_hex(part) {
+            Ok(v) => {
+                let v = Arc::new(v);
+                if primary.is_none() {
+                    tracing::info!(key = %part, "User Token Verifier enabled with primary public key");
+                    primary = Some(v);
+                } else {
+                    tracing::info!(key = %part, "User Token Verifier enabled with legacy (rotation) public key");
+                    legacy.push(v);
+                }
+            }
+            Err(e) => tracing::error!(key = %part, "Failed to parse USER_VERIFYING_KEY entry: {e}"),
+        }
+    }
+    (primary, legacy)
+}
+
+/// 从环境变量读取验签公钥集合（`USER_VERIFYING_KEY`，逗号分隔）。
+pub fn verifiers_from_env() -> (
+    Option<Arc<pproxy_core::TokenVerifier>>,
+    Vec<Arc<pproxy_core::TokenVerifier>>,
+) {
+    match std::env::var("USER_VERIFYING_KEY") {
+        Ok(raw) => parse_verifying_keys(&raw),
+        Err(_) => (None, Vec::new()),
+    }
 }
 
 /// 从 `~/.pony/revoked_tokens.txt` 加载既有撤销条目（幂等；文件缺失视为空）
@@ -227,8 +296,8 @@ async fn handle_user_profile(
         return (StatusCode::UNAUTHORIZED, "Unauthorized: missing user token").into_response();
     }
 
-    if let Some(ref verifier) = cfg.verifier {
-        match verifier.verify_token(presented) {
+    if let Some(result) = cfg.verify_user_token(presented) {
+        match result {
             Ok(claims) => {
                 if cfg.revoked_tokens.contains(&claims.jti) || cfg.revoked_tokens.contains(&claims.sub) {
                     return (StatusCode::UNAUTHORIZED, "Unauthorized: Token Revoked").into_response();
@@ -330,11 +399,11 @@ fn validate_subscription_token(
 
     // 2. 多租户用户令牌：验签 + 撤销表
     if presented.starts_with("usr_live_") {
-        let Some(ref verifier) = cfg.verifier else {
+        let Some(result) = cfg.verify_user_token(presented) else {
             tracing::warn!("subscription: user token presented but verifier is not configured");
             return Err("invalid token");
         };
-        return match verifier.verify_token(presented) {
+        return match result {
             Ok(claims) => {
                 if cfg.revoked_tokens.contains(&claims.jti)
                     || cfg.revoked_tokens.contains(&claims.sub)
@@ -601,8 +670,8 @@ async fn handle_ws(
 
     // 1. 判断是否为多租户 User Token (以 usr_live_ 开头)
     let claims = if presented.starts_with("usr_live_") {
-        if let Some(ref verifier) = cfg.verifier {
-            match verifier.verify_token(presented) {
+        if let Some(result) = cfg.verify_user_token(presented) {
+            match result {
                 Ok(c) => {
                     // 检查是否已被撤销 (Revocation Check)
                     if cfg.revoked_tokens.contains(&c.jti) || cfg.revoked_tokens.contains(&c.sub) {
@@ -964,19 +1033,8 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
     // 与 crates/gate-server/src/main.rs 独立 binary 同口径：从环境读取多租户
     // Ed25519 验签公钥与管理口令（CLI `pproxy gate-server` 子命令路径同样生效，
     // 否则 systemd 经 CLI 启动的网关永远 verifier=None，多租户 token 全 401）。
-    let verifier = match std::env::var("USER_VERIFYING_KEY").ok() {
-        Some(hex_key) => match pproxy_core::TokenVerifier::from_hex(&hex_key) {
-            Ok(v) => {
-                tracing::info!("User Token Verifier enabled");
-                Some(std::sync::Arc::new(v))
-            }
-            Err(e) => {
-                tracing::error!("Failed to parse USER_VERIFYING_KEY: {}", e);
-                None
-            }
-        },
-        None => None,
-    };
+    // 支持逗号分隔的多公钥：首项主验签，其余为轮换窗口内的历史公钥（B021）
+    let (verifier, legacy_verifiers) = verifiers_from_env();
     let gate_admin_token = std::env::var("GATE_ADMIN_TOKEN").unwrap_or_default();
 
     let revoked_tokens = Arc::new(dashmap::DashSet::new());
@@ -996,6 +1054,7 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
         proxy_secret,
         client,
         verifier,
+        legacy_verifiers,
         user_active_conns: Arc::new(dashmap::DashMap::new()),
         user_used_bytes,
         revoked_tokens,

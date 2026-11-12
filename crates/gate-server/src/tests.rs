@@ -20,6 +20,7 @@ mod tests {
             proxy_secret: "sec".into(),
             client: reqwest::Client::new(),
             verifier: Some(verifier),
+            legacy_verifiers: Vec::new(),
             user_active_conns: active_conns.clone(),
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
@@ -200,6 +201,7 @@ mod tests {
             proxy_secret: "sec".into(),
             client: reqwest::Client::new(),
             verifier: Some(verifier),
+            legacy_verifiers: Vec::new(),
             user_active_conns: active_conns.clone(),
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
@@ -248,6 +250,7 @@ mod tests {
             proxy_secret: "sec".into(),
             client: reqwest::Client::new(),
             verifier: Some(verifier),
+            legacy_verifiers: Vec::new(),
             user_active_conns: Arc::new(dashmap::DashMap::new()),
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
@@ -308,6 +311,7 @@ mod tests {
             proxy_secret: "sec".into(),
             client: reqwest::Client::new(),
             verifier: Some(verifier),
+            legacy_verifiers: Vec::new(),
             user_active_conns: Arc::new(dashmap::DashMap::new()),
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
@@ -366,6 +370,7 @@ mod tests {
             proxy_secret: "sec".into(),
             client: reqwest::Client::new(),
             verifier: Some(verifier),
+            legacy_verifiers: Vec::new(),
             user_active_conns: Arc::new(dashmap::DashMap::new()),
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
@@ -425,6 +430,7 @@ mod tests {
             proxy_secret: "sec".into(),
             client: reqwest::Client::new(),
             verifier: None,
+            legacy_verifiers: Vec::new(),
             user_active_conns: Arc::new(dashmap::DashMap::new()),
             user_used_bytes: used_bytes.clone(),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
@@ -449,6 +455,90 @@ mod tests {
                 .as_str()
             ),
             "单口令模式应展示 VPS 整机基线与账本聚合用量"
+        );
+    }
+
+    /// 密钥轮换双信任：旧私钥签发的令牌在 `legacy_verifiers` 窗口内仍可通过，
+    /// 同时新私钥签发的令牌走主公钥 —— 两者并存，避免轮换时一次性全量失效（B021）。
+    #[tokio::test]
+    async fn test_legacy_verifying_key_still_trusted() {
+        let (legacy_signer, legacy_vk) = TokenSigner::generate();
+        let (_current_signer, current_vk) = TokenSigner::generate();
+
+        let cfg = Arc::new(ServerConfig {
+            tunnel_token_hash: "".into(),
+            proxy_secret: "sec".into(),
+            client: reqwest::Client::new(),
+            verifier: Some(Arc::new(pproxy_core::TokenVerifier::new(current_vk))),
+            legacy_verifiers: vec![Arc::new(pproxy_core::TokenVerifier::new(legacy_vk))],
+            user_active_conns: Arc::new(dashmap::DashMap::new()),
+            user_used_bytes: Arc::new(dashmap::DashMap::new()),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: "test-admin".into(),
+            usage_manager: None,
+        });
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let claims = UserTokenClaims {
+            jti: "jti-legacy".into(),
+            sub: "usr_legacy".into(),
+            name: "Legacy".into(),
+            quota_bytes: 1024 * 1024 * 1024,
+            lease_bytes: 10 * 1024 * 1024,
+            exp: now + 3600,
+            iat: now,
+            max_conns: 1,
+            role: "user".into(),
+        };
+        let token = legacy_signer.sign_token(&claims).unwrap();
+
+        let app = build_router(cfg);
+        let req = Request::builder()
+            .uri("/api/user/profile")
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "历史公钥签发的令牌应仍在轮换窗口内通过"
+        );
+    }
+
+    /// `USER_VERIFYING_KEY` 支持逗号分隔多公钥：首项为主、其余为历史；非法项跳过不致命。
+    #[test]
+    fn test_parse_verifying_keys_multi_and_invalid() {
+        let (a_signer, a_vk) = TokenSigner::generate();
+        let (_b_signer, b_vk) = TokenSigner::generate();
+        let a_hex = hex::encode(a_vk.to_bytes());
+        let b_hex = hex::encode(b_vk.to_bytes());
+        let raw = format!("  {b_hex} , not-a-key , {a_hex} ");
+
+        let (primary, legacy) = crate::parse_verifying_keys(&raw);
+        let primary = primary.expect("首项应作为主公钥");
+        assert_eq!(legacy.len(), 1, "非法项应被跳过，仅剩 1 个历史公钥");
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let claims = UserTokenClaims {
+            jti: "jti-parse".into(),
+            sub: "usr_parse".into(),
+            name: "Parse".into(),
+            quota_bytes: 1024,
+            lease_bytes: 512,
+            exp: now + 60,
+            iat: now,
+            max_conns: 1,
+            role: "user".into(),
+        };
+        let a_token = a_signer.sign_token(&claims).unwrap();
+        assert!(
+            primary.verify_token(&a_token).is_err(),
+            "主公钥不应验通历史密钥签发的令牌"
+        );
+        assert!(
+            legacy[0].verify_token(&a_token).is_ok(),
+            "历史公钥应验通旧私钥签发的令牌"
         );
     }
 }

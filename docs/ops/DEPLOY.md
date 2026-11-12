@@ -50,7 +50,7 @@
 | `PPROXY_LISTEN_ADMIN` | 管理面监听地址（tailnet 重绑，systemd drop-in） |
 | `PPROXY_CLUSTER_PEERS` | 远端对等备灾节点地址列表（逗号分隔，如 `100.64.0.2:18899,100.64.0.3:18899`） |
 | `PPROXY_CLUSTER_KEY` | 集群间通信签名密钥（跨节点转发签发 `X-Pony-Cluster-Ticket` 鉴权） |
-| `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥 Hex（各节点本地无状态验签，只读注入） |
+| `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥 Hex（各节点本地无状态验签，只读注入）；逗号分隔可配多把，首项为主、其余为轮换窗口内的历史公钥 |
 | `GATE_ADMIN_TOKEN` | 轻量 Gate 服务管理接口 Bearer Token（用于黑名单撤销热推送） |
 | `GATE_BILLING_DAY` | VPS 月度账单结算日（1-28，UTC 00:00 为结算点）：网关按此归档上一周期用量并归零，账本 `~/.pony/gate_usage.json` |
 | `GATE_ADMIN` | 网关管理端点地址（CLI 撤销热推送目标，默认 `http://127.0.0.1:3101`） |
@@ -497,7 +497,20 @@ ls -l ~/.pony/cluster_signing_key.hex
   rm -f /tmp/ed.der
   ```
   与节点 `grep USER_VERIFYING_KEY /opt/pproxy/.gate-server.env` 比对；不一致说明签发机不是
-  「权威管理机」，此时签出的令牌全部会被网关判 401（见 backlog B021）。
+  「权威管理机」，此时签出的令牌全部会被网关判 401。
+- **密钥轮换（多公钥双信任，B021 实证）**：
+  `USER_VERIFYING_KEY` 支持**逗号分隔多公钥，首项为主公钥、其余为历史公钥**，验签按顺序尝试，
+  首个通过即放行。因此轮换不再需要「一把钥匙全量切换」：
+  ```bash
+  # 1. 追加新公钥在前、旧公钥在后（窗口内新旧令牌并存，零中断）
+  USER_VERIFYING_KEY=<新公钥HEX>,<旧公钥HEX>
+  systemctl restart pony-gate-rust
+  journalctl -u pony-gate-rust -n 20 | grep "Verifier enabled"   # 期望 primary + legacy 各一行
+  # 2. 用新私钥重签仍需在用的令牌（改额度/续期同理），旧令牌自然过期
+  # 3. 确认 journal 连续无 `signature error` 后，摘掉尾部旧公钥
+  ```
+  **前置自检**：`pproxy user add` 回显的「公钥校验」必须等于 `USER_VERIFYING_KEY` 的首项；
+  否则新签发的会员订阅链接在生产会全部 401。
 - **Nginx 反向代理配置（若网关前置 Nginx）**：
   需确保反向代理放行 `/api/user` 路由以允许公网客户端查询 Profile（`/api/user/profile`）与管理端热撤销（`/api/user/revoke`）：
   ```nginx

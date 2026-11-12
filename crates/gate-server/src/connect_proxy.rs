@@ -643,14 +643,11 @@ fn principal_for_token(cfg: &ServerConfig, token: &str) -> Option<Principal> {
         return None;
     }
     if token.starts_with("usr_live_") {
-        let verifier = match cfg.verifier.as_ref() {
-            Some(v) => v,
-            None => {
-                tracing::warn!("CONNECT: user token presented but USER_VERIFYING_KEY not configured");
-                return None;
-            }
+        let Some(result) = cfg.verify_user_token(token) else {
+            tracing::warn!("CONNECT: user token presented but USER_VERIFYING_KEY not configured");
+            return None;
         };
-        match verifier.verify_token(token) {
+        match result {
             Ok(claims) => {
                 if cfg.revoked_tokens.contains(&claims.jti)
                     || cfg.revoked_tokens.contains(&claims.sub)
@@ -809,6 +806,7 @@ mod tests {
             proxy_secret: String::new(),
             client: reqwest::Client::new(),
             verifier: None,
+            legacy_verifiers: Vec::new(),
             user_active_conns: Arc::new(dashmap::DashMap::new()),
             user_used_bytes: Arc::new(dashmap::DashMap::new()),
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
