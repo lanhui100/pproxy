@@ -59,15 +59,17 @@
 ```bash
 node scripts/backlog.mjs list                 # 看板（状态/优先级排序）
 node scripts/backlog.mjs record --category Defect --title "..." --fingerprint "core::x::y" --priority P1
-node scripts/backlog.mjs start B056 --owner lane-1 --paths "crates/x/src/y.rs"
-node scripts/backlog.mjs heartbeat B056 --owner lane-1
-node scripts/backlog.mjs release B056         # 回退 todo 并清锁
-node scripts/backlog.mjs resolve B056 --evidence "cargo test --workspace 全绿；rc=0"
+node scripts/backlog.mjs start <ID> --owner lane-1 --paths "crates/x/src/y.rs"
+node scripts/backlog.mjs heartbeat <ID> --owner lane-1
+node scripts/backlog.mjs release <ID>         # 回退 todo 并清锁
+node scripts/backlog.mjs resolve <ID> --evidence "cargo test --workspace 全绿；rc=0"
 node scripts/backlog.mjs lint                 # 记录不变量（非零 = 违规）
 node scripts/backlog.mjs doctor               # 跨归档/高水位/孤儿租约对账
-node scripts/backlog.mjs reap --id B056 --minutes 0   # 只清该任务的锁
-node scripts/backlog.mjs annotate B056 --description "..." --priority P2   # 改注释/优先级（不动状态）
+node scripts/backlog.mjs reap --id <ID> --minutes 0   # 只清该任务的锁
+node scripts/backlog.mjs annotate <ID> --description "..." --priority P2   # 改注释/优先级（不动状态）
 ```
+
+`<ID>` 是占位符：真实编号用 `list` 或 `doctor` 的输出（编号不连续，归档号不回收）。
 
 ## 门禁与接线
 
