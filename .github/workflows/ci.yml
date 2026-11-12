@@ -15,3 +15,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test --workspace
         run: cargo test --workspace
+
+  # backlog 账本门（pg-backlog v2）：独立 job，不并入服务端测试矩阵——
+  # 判据真源是 scripts/backlog.mjs（lint + doctor 对账），与 Rust 构建无关，分开跑才不会互相拖累。
+  # 迁移期（backlog/tasks.jsonl 未落盘）门自己打印"跳过"并 exit 0；无 node → fail-closed。
+  backlog-ledger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: backlog-gate（lint + doctor 对账）
+        run: bash .meta/gates/backlog-gate.sh
+      - name: backlog-gate 负样本 spec（门必须会拒绝非法账本）
+        run: bash .meta/gates/backlog-gate.spec.sh

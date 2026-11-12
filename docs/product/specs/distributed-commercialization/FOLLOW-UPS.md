@@ -2,7 +2,7 @@
 
 > 所属规格：`docs/product/specs/distributed-commercialization/README.md`（v1.1.0）
 > 本文记录 Phase 1~5 落地与 2026-09-25 preprod 联调后仍未闭合的差距。
-> 事项层登记见 `backlog/backlog.md`（B 编号引用本文条目标识 `#F-xx`）。
+> 事项层登记见 `backlog/tasks.jsonl`（`node scripts/backlog.mjs list`；B 编号引用本文条目标识 `#F-xx`）。
 > 原则：每一条都含**现象 / 根因 / 影响 / 建议方案 / 验收口径**，杜绝"以后可能用得上"式怀旧——只有明确差距与恢复条件才入册。
 
 ---

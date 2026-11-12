@@ -4,6 +4,17 @@ if [ -f "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" ]; then
   bash "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" || exit 1
 fi
 # <<< ponygo-gate: adr-verify v1 <<<
+# >>> backlog-gate: ledger v1 >>>
+# backlog 账本门（pg-backlog v2 随仓判据）：判定真源是 scripts/backlog.mjs（lint + doctor 跨归档对账），
+# 本块只做接线。迁移期语义由门自己承担：backlog/tasks.jsonl 未落盘 → 门内打印"跳过"并 exit 0。
+# 门缺失 = 判据不在场，无法判定即不冒充通过 → fail-closed 拒绝提交（不许静默放行）。
+if [ -f .meta/gates/backlog-gate.sh ]; then
+  bash .meta/gates/backlog-gate.sh || exit 1
+else
+  echo "GATE BLOCKED: 缺 .meta/gates/backlog-gate.sh（backlog 账本门不在场）→ fail-closed 拒绝提交" >&2
+  exit 1
+fi
+# <<< backlog-gate: ledger v1 <<<
 # .githooks/pre-commit - 本地秒级快速门禁
 set -euo pipefail
 

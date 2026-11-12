@@ -68,3 +68,6 @@ desktop/releases/
 .agents/tests/stability-*/*/*.csv
 .agents/tests/stability-*/*/*.txt
 .agents/tests/stability-*/test-token.txt
+
+# backlog 账本本地运行时租约（pg-backlog v2 的 .locks/，可再生产，不入库）
+backlog/.locks/

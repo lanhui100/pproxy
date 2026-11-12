@@ -19,6 +19,7 @@
 | how-to | 带编号验证步的操作指引 | 设计理由（→ 决策记录） | `docs/ops/`（`DEPLOY.md`、`ROLLING-UPGRADE.md`、`TROUBLESHOOTING.md`、`DESKTOP-TROUBLESHOOTING.md`、`MUSE-REMOTE-CONNECT.md`、`CF-RISK-SOP.md`、`API.md`）✓ |
 | 团队评审与任务书 | 评审记录（review JSON/MD）、任务契约（contract/spec）、执行计划 | 决策理由（→ 决策记录）、操作步（→ how-to） | `docs/dev-team/`（`reviews/`、`specs/`、`tasks/`）✓；执行态账本在 `.dev-team/`（非文档，不进本表） |
 | 接口契约 | 端点/请求响应形状/错误码 | 设计理由（→ 决策记录） | `docs/ops/API.md` ✓ |
+| 待办与执行账本 | 账本布局/记录模型/状态机/租约/命令 | 决策理由（→ 决策记录）、历史原文 | `backlog/README.md` ✓（判定真源 `scripts/backlog.mjs`；冻结历史 `backlog/legacy/`） |
 | 事故复盘 | 事故年表、证据、因果链、预防 | 教学叙事 | `docs/ops/stability-report-2026-09-29.md` ✓（下一篇按同一命名：`docs/ops/<incident>-report-<date>.md`） |
 | 用户文档 | 产品面向指南（安装/使用/配置项） | 贡献流程/决策史 | 根 `README.md` ✓、`README.en.md` ✓、`desktop/README.md` ✓（桌面端用户视角） |
 
