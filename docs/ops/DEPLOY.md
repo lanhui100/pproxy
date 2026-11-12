@@ -553,6 +553,7 @@ ls -l ~/.pony/cluster_signing_key.hex
 ```bash
 # 签发 1 个自然月有效、配额 50GB、最大 3 并发的普通租户令牌
 # -d/--expires 取值：30、30d = 自然日；1m/3m/6m = 自然月；1y = 自然年（月末溢出钳制到当月最后一天）
+# 短周期（联调、到期验收）：30s / 5min / 2h —— 分钟必须写 min，`m` 恒指自然月
 # --expires-days N 为兼容别名，N 按天解释
 pproxy user add alice --quota 50G --expires 1m --max-conns 3
 

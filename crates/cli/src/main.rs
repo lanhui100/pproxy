@@ -277,7 +277,8 @@ enum UserCmd {
         /// 自定义密码（若不提供将自动生成高强度密码）
         #[arg(long, short = 'p')]
         password: Option<String>,
-        /// 有效期：30 / 30d / 1m / 3m / 6m / 1y（m=自然月，y=12 个自然月）
+        /// 有效期：30 / 30d / 1m / 3m / 6m / 1y（m=自然月，y=12 个自然月）；
+        /// 短周期可写 30s / 5min / 2h（分钟用 min，m 仍指自然月）
         // visible_alias 保留 `--expires-days N` 旧写法（N 仍按天数解释），
         // 避免既有部署脚本与历史文档命令在同一提交内静默失效。
         #[arg(long, short = 'd', visible_alias = "expires-days")]

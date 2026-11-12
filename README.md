@@ -116,6 +116,7 @@ pproxy cluster status
 pproxy user keygen
 
 # 离线签发自包含租户令牌（-q 周期配额，-d 会员时长：30/30d=天、1m/3m/6m=自然月、1y=自然年）
+# 短周期联调/到期验收可写 30s、5min、2h（分钟用 min；m 仍指自然月，两者不混用）
 # 签发即写用户表，并直接打印 Clash 订阅链接 / clash:// 一键导入深链 / 二维码
 pproxy user add alice -q 50G -d 3m -c 3
 

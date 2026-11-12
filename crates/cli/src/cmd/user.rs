@@ -33,21 +33,22 @@ pub fn parse_quota_bytes(s: &str) -> Result<u64, String> {
     }
 }
 
-/// 自然月/年时长解析（D1）：`30`、`30d` = N 天；`1m`/`3m`/`6m` = N 个自然月；
-/// `1y` = 12 个自然月。大小写不敏感、允许前后与数字/单位间空白；`0` 与非法输入返回 Err。
+/// 自然月/年/短周期时长解析（D1、D5）：`30`、`30d` = N 天；`1m`/`3m`/`6m` = N 个自然月；
+/// `1y` = 12 个自然月；`30s`/`5min`/`2h` = N 秒/分钟/小时（短周期联调与到期验收用）。
+/// `m` 已被自然月占用，故分钟必须写 `min`/`minute`，避免静默改变既有含义。
+/// 大小写不敏感、允许前后与数字/单位间空白；`0` 与非法输入返回 Err。
 /// 返回绝对 Unix 秒；月运算按 UTC 且月末溢出钳制到目标月最后一天（D2）。
 pub fn parse_expiry_spec(spec: &str, now: u64) -> Result<u64, String> {
+    const UNITS: &str = "30 / 30d / 1m(自然月) / 1y / 30s / 5min / 2h";
     let s = spec.trim().to_lowercase();
     if s.is_empty() {
-        return Err("无效的有效期：内容为空（支持 30 / 30d / 1m / 3m / 6m / 1y）".to_string());
+        return Err(format!("无效的有效期：内容为空（支持 {UNITS}）"));
     }
     let split_at = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let (num_part, unit_part) = s.split_at(split_at);
     let unit = unit_part.trim();
     if num_part.is_empty() {
-        return Err(format!(
-            "无效的有效期: `{spec}`（支持 30 / 30d / 1m / 3m / 6m / 1y）"
-        ));
+        return Err(format!("无效的有效期: `{spec}`（支持 {UNITS}）"));
     }
     let n: u64 = num_part
         .parse()
@@ -57,17 +58,26 @@ pub fn parse_expiry_spec(spec: &str, now: u64) -> Result<u64, String> {
     }
     match unit {
         // 纯数字与 d 同为自然日
-        "" | "d" => {
-            let secs = n.checked_mul(86_400).ok_or("有效期溢出（天数过大）")?;
-            now.checked_add(secs)
-                .ok_or_else(|| "有效期溢出（时间戳超出范围）".to_string())
-        }
+        "" | "d" => add_secs(now, n, 86_400, "天数过大"),
+        "s" | "sec" | "secs" | "second" | "seconds" => add_secs(now, n, 1, "秒数过大"),
+        "min" | "mins" | "minute" | "minutes" => add_secs(now, n, 60, "分钟数过大"),
+        "h" | "hr" | "hrs" | "hour" | "hours" => add_secs(now, n, 3_600, "小时数过大"),
         "m" => add_months_utc(now, n),
         "y" => add_months_utc(now, n.checked_mul(12).ok_or("有效期溢出（年数过大）")?),
         other => Err(format!(
-            "无效的有效期单位: `{other}`（支持 d = 天 / m = 自然月 / y = 自然年）"
+            "无效的有效期单位: `{other}`（支持 d = 天 / m = 自然月 / y = 自然年 / \
+             s = 秒 / min = 分钟 / h = 小时）"
         )),
     }
+}
+
+/// `now + n * unit_secs`，任一乘法或加法溢出即报错（不静默饱和）。
+fn add_secs(now: u64, n: u64, unit_secs: u64, overflow_hint: &str) -> Result<u64, String> {
+    let secs = n
+        .checked_mul(unit_secs)
+        .ok_or_else(|| format!("有效期溢出（{overflow_hint}）"))?;
+    now.checked_add(secs)
+        .ok_or_else(|| "有效期溢出（时间戳超出范围）".to_string())
 }
 
 /// Howard Hinnant `days_from_civil`：公历 (y, m, d) → 距 1970-01-01 的天数。
@@ -1068,6 +1078,22 @@ mod tests {
             parse_expiry_spec("3m", base + 3_661).unwrap(),
             utc(2027, 2, 12) + 3_661
         );
+    }
+
+    #[test]
+    fn expiry_subday_units() {
+        // D5：分钟级到期验收（`1m` 仍是自然月，分钟必须写 min，防止静默改义）
+        let base = utc(2026, 11, 12);
+        assert_eq!(parse_expiry_spec("30s", base).unwrap(), base + 30);
+        assert_eq!(parse_expiry_spec("1min", base).unwrap(), base + 60);
+        assert_eq!(parse_expiry_spec("5 min", base).unwrap(), base + 300);
+        assert_eq!(parse_expiry_spec("2h", base).unwrap(), base + 7_200);
+        assert_eq!(parse_expiry_spec("1Hr", base).unwrap(), base + 3_600);
+        // 分钟不等于自然月：两者相差 2 天以上（30 天/自然月）
+        assert!(parse_expiry_spec("1min", base).unwrap() < parse_expiry_spec("1m", base).unwrap());
+        // 溢出必须报错而不是饱和
+        assert!(parse_expiry_spec(&format!("{}s", u64::MAX), base).is_err());
+        assert!(parse_expiry_spec("0min", base).is_err());
     }
 
     #[test]
