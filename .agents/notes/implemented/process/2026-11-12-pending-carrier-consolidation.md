@@ -10,7 +10,7 @@ Status: implemented
 1. `.dev-team/` 混放「运行账本（state / nfr-baseline / contract）」与「门禁收据（review / 相位记录 / 元复盘）」，
    其中 `state.json`、`review-join-*` 是已完成会话的看板快照，冷启动读它会把已收口的波次当成在飞状态。
 2. `docs/ops/DESKTOP-TROUBLESHOOTING.md` 的「遗留与待决（审核后更新）」表是 2026-08-28 的时点快照，
-   9 行里有 8 行已被同文件后续章节关闭或对象已被删除，只有 S8 仍成立，但没人知道这一点。
+   7 个数据行里 6 个已被同文件后续章节关闭或对象已被删除，只有 S8 仍成立，但没人知道这一点。
 3. `.agents/notes/proposed/process/2026-10-30-governance-audit.md` 的 A1–A8 已全部落地，
    状态却仍写 `proposed`——状态轴失真：读的人会把已兑现的承诺当成待办。
 4. `docs/dev-team/tasks/T004` 与 `specs/S004` 是已交付任务书；`.agents/tests/stability-2026-09-29/`
@@ -61,7 +61,8 @@ Status: implemented
 
 - 新文件：`.dev-team/README.md`（布局约束 + 文件归属表 + 已知断链）、本记录。
 - 状态迁移：`.agents/notes/{proposed→implemented}/process/2026-10-30-governance-audit.md`（内容按 implemented 骨架重写）。
-- 账本：新增 `backlog:B058`（S8 双份实现未收敛）。活跃池 18 条、归档 9 条，`.next-id` 59。
+- 账本：新增 `backlog:B058`（S8 双份实现未收敛）。落地时快照：活跃池 18 条、归档 9 条、`.next-id` 59
+  （此后账本由后续任务继续推进，条数以 `node scripts/backlog.mjs list` 为准）。
 - 文档：`docs/ops/DESKTOP-TROUBLESHOOTING.md` 遗留表加快照声明；`docs/AGENTS.md` 团队评审行补指 `.dev-team/README.md`。
 - 清理：`.agents/tests/stability-2026-09-29/test-token.txt`（未追踪、内容已脱敏）删除。
 - **诚实边界**：
@@ -71,6 +72,11 @@ Status: implemented
      被 4 处（3 个 `.rs` 注释 + `deploy/watchdog/README.md`）引用但从未入库（ADR 2026-10-19 已自述），
      **未修**：补文件还是改注释需要重构归属的结论，与本记录的清理动作无关。
   3. `proposed/process/2026-10-30-governance-audit.md` 的 A9-3（`ponygo upgrade --check` 进 CI）
-     不是"完成"而是"被另一个决定取代"：G5 契约改为传递闭包并明示 ponygo 二进制不进 CI；迁移后的
-     note 如实写明这处口径偏移，不冒充已落地。
+     不是"完成"而是"被另一个决定取代"：G5 契约改为传递闭包（workflow → `ci-verify.sh` → `verify-note.sh`），
+     即 **PR 流不以 `upgrade --check` 作为门禁**——注意 CI 里仍按钉死 commit 安装 ponygo oracle
+     （`.github/workflows/ponygo-governance.yml:32-42`）只为 `tests/governance/run.sh` 的 G4/G6 提供
+     `ponygo status` 文案，不跑漂移检查。迁移后的 note 按这个精确口径写明偏移，不冒充已落地。
   4. 泄漏 token 的**轮换**属外部动作，机器不可验，仍标「靠 review」。
+  5. `.agents/tests/stability-2026-09-29/reverse/probe.sh:6` 仍 `cat` 本次删掉的 `test-token.txt`：
+     该令牌文件从未入库，干净克隆本来就没有它，脚本复现前须自行重建（这不是新引入的依赖，
+     而是把「删了本地残渣」与「脚本的输入前提」两件事显式分开）。

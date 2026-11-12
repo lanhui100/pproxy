@@ -28,10 +28,11 @@
 |---|---|---|
 | `contract.md` | 冻结契约（C1–C6 + 门禁 G1–G8） | `tests/acceptance/{run.sh,lib.sh,helpers/yaml_contract.py,README.md}` 声明的「合同唯一依据」 |
 | `nfr-baseline.json` | NFR 商业基准（accept-loop：超时 3000ms / 重试退避 / 并发锁 / 结构化日志） | `crates/server/tests/saturation_contract.rs` 与 ADR 2026-10-09 以 `nfr-baseline-pproxy-accept-loop.json` 之名引用同一物（文件名不一致，属既存断链） |
-| `governance-state.json` | governance-remediation-2026-10-30 会话账本（5 波） | `.agents/notes/rejected/process/2026-10-30-history-rewrite-rejected.md` 作证据 |
+| `governance-state.json` | governance-remediation-2026-10-30 会话账本（6 条波次记录：wave 1/1/2/3/2/3，含重跑） | `.agents/notes/rejected/process/2026-10-30-history-rewrite-rejected.md` 作证据 |
 | `state.json` | clash-meta-scan-no-proxy 会话账本（5 波全 completed，无在飞波次） | 无（冷启动只读同名文件，此处表示「上次会话已收口」） |
 | `review-l3a.json` / `review-l3b.json` / `review-plan.json` | 该会话的 L3 对抗与方案审查（verdict=FAIL 的 advisory 清单） | `backlog/tasks.jsonl` 的 `B016`（未清 advisory 的登记源，勿移动） |
-| `review-plan-governance.json` / `review-l3p.json` / `review-join-{a,b}.json` / `review-join-wave2-{a,b}.json` | 各阶段 PASS 收据 | `governance-state.json` 的收据注册表 |
+| `review-l3p.json` / `review-join-{a,b}.json` | 各阶段 PASS 收据 | `governance-state.json` 的 `reviews`（登记 `plan` / `join` / `l3p`） |
+| `review-plan-governance.json` / `review-join-wave2-{a,b}.json` | 各阶段 PASS 收据 | **无活引用**（未进 `governance-state.json` 的注册表，该文件 `wave2_reviews` 为空）；保留的意义是 `dev-retro.py` 的 flat 收据扫描输入，勿移出目录 |
 | `red-phase-legacy.md` / `green-phase-legacy.md` / `red-evidence/legacy-items-red.txt` | 2026-10-08 legacy 缺陷红相/绿相机器记录 | 无（对应事项已在账本闭环：B024 等） |
 | `meta-retrospective.md` / `meta-retrospective-2026-10-08-*.md` | 各会话元复盘（Phase 5 产物） | `dev-meta-lint.py` 默认读 `.dev-team/meta-retrospective.md` |
 
