@@ -34,6 +34,10 @@ Status: implemented
    放在二维码之前——这是实测中 `tls handshake timeout` 最常见的客户端成因。
 6. **帮助文案去术语**：`--quota` → 「每月流量额度（如 50G、100M）」；
    `--max-conns` → 「最多几台设备同时在线（默认 3）」；`--admin` → 「开通为管理员（默认普通用户）。
+7. **数值按量级显示，不写死单位**（验收时抓到的回归）：`每月流量` 原先固定两位 GB，
+   5M 额度被格式化成 `0.00 GB`，客户会读成「没给流量」；改为 `render::human_bytes`
+   走 B/KB/MB/GB 自适应。`有效期至` 原先固定 `{} 天`，分钟级试用显示 `0 天`；
+   改为 `duration_label`（天/小时/分钟/秒），并补两条单测锁住这两个口径。
 
 ## Alternatives considered
 
@@ -50,7 +54,7 @@ Status: implemented
 
 ```console
 $ cargo test -p pproxy-cli -p pproxy-core -p pproxy-gate-server
-test result: ok. 138 passed; 0 failed  (pproxy-cli)
+test result: ok. 140 passed; 0 failed  (pproxy-cli)
 test result: ok. 110 passed; 0 failed; 1 ignored  (pproxy-core)
 test result: ok. 22 passed; 0 failed  (pproxy-gate-server)
 # exit code 0
@@ -58,6 +62,8 @@ test result: ok. 22 passed; 0 failed  (pproxy-gate-server)
 
 新增单测 `cmd::user::tests::secret_display_hides_by_default`：断言默认输出含「已遮挡」且
 **不含明文凭据**；`--show-secrets` 时反之。
+另加 `duration_label_covers_subday_and_long_lived` 与 `quota_line_uses_human_bytes_not_always_gigabytes`，
+分别锁住「分钟级试用显示 0 天」和「5M 显示 0.00 GB」两个回归。
 
 人工取证（临时用户验证后已 `user rm` 清理）：
 

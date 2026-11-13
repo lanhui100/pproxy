@@ -273,7 +273,7 @@ enum MigrateCmd {
 
 #[derive(Subcommand)]
 enum UserCmd {
-    /// 添加 Basic Auth 用户或签发商业化多租户令牌
+    /// 添加用户：设置每月流量与有效期，并输出订阅地址与二维码
     Add {
         username: String,
         /// 自定义登录密码（不填则自动生成）
