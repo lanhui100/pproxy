@@ -8,6 +8,8 @@ mod cmd;
 mod config;
 mod export;
 mod render;
+#[cfg(test)]
+mod test_support;
 
 use std::io::Write as _;
 use std::process::ExitCode;
