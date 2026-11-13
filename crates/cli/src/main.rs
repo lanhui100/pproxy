@@ -8,6 +8,8 @@ mod cmd;
 mod config;
 mod export;
 mod render;
+#[cfg(test)]
+mod test_support;
 
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -274,7 +276,7 @@ enum UserCmd {
     /// 添加 Basic Auth 用户或签发商业化多租户令牌
     Add {
         username: String,
-        /// 自定义密码（若不提供将自动生成高强度密码）
+        /// 自定义登录密码（不填则自动生成）
         #[arg(long, short = 'p')]
         password: Option<String>,
         /// 有效期：30 / 30d / 1m / 3m / 6m / 1y（m=自然月，y=12 个自然月）；
@@ -283,15 +285,18 @@ enum UserCmd {
         // 避免既有部署脚本与历史文档命令在同一提交内静默失效。
         #[arg(long, short = 'd', visible_alias = "expires-days")]
         expires: Option<String>,
-        /// 商业化自包含令牌：周期总配额（如 50G, 100M）
+        /// 每月流量额度（如 50G、100M）
         #[arg(long, short = 'q')]
         quota: Option<String>,
-        /// 商业化自包含令牌：最大并发连接数（默认 3）
+        /// 最多几台设备同时在线（默认 3）
         #[arg(long, short = 'c', default_value = "3")]
         max_conns: usize,
-        /// 签发的令牌角色为管理员（默认普通用户；仅凭此标志判定，不按用户名前缀推断）
+        /// 开通为管理员（默认普通用户）
         #[arg(long)]
         admin: bool,
+        /// 显示登录密码与用户令牌（默认遮挡，避免截图或录屏泄露）
+        #[arg(long)]
+        show_secrets: bool,
     },
     /// 生成/初始化集群签名私钥与公钥
     Keygen,
@@ -688,8 +693,8 @@ fn run(cli: Cli) -> Result<i32, RunError> {
     // 2. user 用户管理
     if let Command::User { cmd } = &cli.command {
         return match cmd {
-            UserCmd::Add { username, password, expires, quota, max_conns, admin } => {
-                cmd::user::add(username, password.as_deref(), expires.as_deref(), quota.as_deref(), *max_conns, *admin).map_err(RunError::Msg)
+            UserCmd::Add { username, password, expires, quota, max_conns, admin, show_secrets } => {
+                cmd::user::add(username, password.as_deref(), expires.as_deref(), quota.as_deref(), *max_conns, *admin, *show_secrets).map_err(RunError::Msg)
             }
             UserCmd::Keygen => cmd::user::keygen().map_err(RunError::Msg),
             UserCmd::List => cmd::user::list().map_err(RunError::Msg),

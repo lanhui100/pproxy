@@ -821,21 +821,8 @@ pub fn env_generate_script(output: Option<&Path>) -> Result<i32, String> {
 mod tests {
     use super::*;
 
-    /// 序列化修改 HOME 的测试，避免并行竞争。
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// 在 HOME_LOCK 保护下设置 HOME 并执行闭包，完成后恢复原值。
-    fn with_home<F: FnOnce() -> R, R>(tmp_dir: &Path, f: F) -> R {
-        let _lock = HOME_LOCK.lock().unwrap();
-        let orig = std::env::var("HOME").ok();
-        std::env::set_var("HOME", tmp_dir);
-        let result = f();
-        match orig {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
-        result
-    }
+    /// HOME 改写的串行化与共享锁统一在 `crate::test_support`（见该模块注释）。
+    use crate::test_support::with_home;
 
     #[test]
     fn proxy_env_path_uses_home() {

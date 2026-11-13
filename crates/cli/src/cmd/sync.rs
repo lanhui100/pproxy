@@ -421,13 +421,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let nonces_path = tmp.path().join("test_nonces.json");
 
+        // HOME 指向临时目录并在独占窗口内跑完两次导入：导入会落盘 ~/.pony/config.toml
+        // 与 state.db，既不能被并发测试的 HOME 改写干扰（CI 偶发断言失败的成因），
+        // 也不该污染真实 HOME。
+        let (res1, res2) = crate::test_support::with_temp_home(|_home| {
+            let first = import_internal(&sync_uri, Some(pass), Some(&nonces_path));
+            let second = import_internal(&sync_uri, Some(pass), Some(&nonces_path));
+            (first, second)
+        });
+
         // 第一次导入应该成功
-        let res1 = import_internal(&sync_uri, Some(pass), Some(&nonces_path));
-        assert!(res1.is_ok());
+        assert!(
+            res1.is_ok(),
+            "首次导入应成功，实际错误: {:?}",
+            res1.as_ref().err()
+        );
 
         // 第二次导入相同口令（重放攻击）应该被拒绝！
-        let res2 = import_internal(&sync_uri, Some(pass), Some(&nonces_path));
-        assert!(res2.is_err());
+        assert!(res2.is_err(), "重放未被拒绝：第二次导入返回 Ok");
         assert!(res2.unwrap_err().contains("安全拦截"));
     }
 }
