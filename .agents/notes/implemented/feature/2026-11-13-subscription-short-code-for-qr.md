@@ -74,6 +74,27 @@ qr: long 69x35 = 2415, short 33x17 = 561 (23%)
 `/clash?token=<code>` 与 `/c/<code>` 都回 200，YAML 中 `username` 为**真实长令牌**；
 未知短码 401；`POST /api/user/revoke` 撤销 `jti` 后短码表清空且同一短码 401。
 
+生产验收（`rn.ponygo.fun`，网关 sha256 `0a9fe6c3…`）：
+
+```console
+$ pproxy user add qrcheck -q 100M -d 1h -c 2
+│  订阅地址:  https://rn.ponygo.fun/c/h5dxhrnk
+│  一键导入:  clash://install-config?url=https%3A%2F%2Frn.ponygo.fun%2Fc%2Fh5dxhrnk&name=PonyProxy-qrcheck
+# 二维码实测 33 列 × 17 行（长令牌形态为 69 列 × 35 行）
+
+$ curl -sD - -o /tmp/y.yaml https://rn.ponygo.fun/c/h5dxhrnk | grep -E "^HTTP|subscription-userinfo"
+HTTP/2 200
+subscription-userinfo: upload=0; download=0; total=104857600; expire=1794544277
+$ grep 'username:' /tmp/y.yaml     # YAML 凭据仍是长令牌，短码只做寻址
+    username: "usr_live_eyJqdGkiOiJ0b2stMTQ3OGEwMzFmNWRiMmZiNSIs...
+$ curl -s -o /dev/null -w '%{http_code}' https://rn.ponygo.fun/c/zzzzzzzz
+401
+```
+
+**踩坑**：生产 nginx 的 `location ~ ^/(clash|api/clash|api/user|...)` 未含 `c/`，首轮部署后
+`/c/<code>` 被默认 location 的伪装页接走（HTTP 200 + `text/html`），网关侧零日志。
+已补 `c/` 到该正则并 `nginx -t` + reload；`docs/ops/DEPLOY.md` 同步写入该约束。
+
 文档 same-commit：`README.md` §5 建号输出与「订阅短码与令牌等权」条、`README.en.md` 对应条目、
 `docs/ops/DEPLOY.md` 新增 `GATE_SHORTLINK_FILE` 与「订阅短码（二维码尺寸）」小节。
 
