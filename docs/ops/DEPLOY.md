@@ -510,8 +510,7 @@ ls -l ~/.pony/cluster_signing_key.hex
   journalctl -u gate-server -n 20 | grep "User Token Verifier enabled"
   ```
 - **签发前配对自检（漏做即 401 signature error，且只有签发侧能发现）**：
-  `pproxy user add` 回显的「公钥校验」必须与节点 `USER_VERIFYING_KEY` 逐字相同；
-  也可从私钥派生核对（私钥不出本机）：
+  `pproxy user add` 不回显公钥（租户可见界面不暴露内部选型）；核对从私钥派生（私钥不出本机）：
   ```bash
   printf '302e020100300506032b657004220420' | xxd -r -p > /tmp/ed.der
   cat ~/.pony/cluster_signing_key.hex | xxd -r -p >> /tmp/ed.der   # 32 字节种子 → PKCS8 Ed25519
@@ -531,7 +530,8 @@ ls -l ~/.pony/cluster_signing_key.hex
   # 2. 用新私钥重签仍需在用的令牌（改额度/续期同理），旧令牌自然过期
   # 3. 确认 journal 连续无 `signature error` 后，摘掉尾部旧公钥
   ```
-  **前置自检**：`pproxy user add` 回显的「公钥校验」必须等于 `USER_VERIFYING_KEY` 的首项；
+  **前置自检**：从 `~/.pony/cluster_signing_key.hex` 派生的公钥必须等于 `USER_VERIFYING_KEY` 的首项
+  （命令见上节「签发前配对自检」）；
   否则新签发的会员订阅链接在生产会全部 401。
 - **Nginx 反向代理配置（若网关前置 Nginx）**：
   需确保反向代理放行 `/api/user` 路由以允许公网客户端查询 Profile（`/api/user/profile`）与管理端热撤销（`/api/user/revoke`）：

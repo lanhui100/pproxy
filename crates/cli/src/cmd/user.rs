@@ -155,6 +155,16 @@ pub fn percent_encode_component(s: &str) -> String {
     out
 }
 
+/// 机密展示口径：默认遮挡，`show_secrets` 为真时明文。
+/// 密码、用户令牌都走这里，避免截图/录屏时把凭据带出去。
+fn secret_display(value: &str, show_secrets: bool) -> String {
+    if show_secrets {
+        format!("\x1b[1;32m{value}\x1b[0m")
+    } else {
+        "\x1b[2m已遮挡\x1b[0m（创建时加 --show-secrets 才会显示）".to_string()
+    }
+}
+
 /// 订阅 URL 与 Clash 一键导入深链（纯函数，便于单测）。
 pub fn subscription_links(host: &str, token: &str, username: &str) -> (String, String) {
     let sub_url = format!("https://{host}/clash?token={token}");
@@ -181,30 +191,30 @@ pub fn subscription_host(cfg: &PonyConfig) -> Result<String, String> {
     Ok(host)
 }
 
-/// 打印订阅 URL / 一键导入深链 / 二维码。
-/// 拿不到可用的 gate 主机时只提示原因，不算失败：令牌已签发，退出码仍为 EXIT_OK。
+/// 打印订阅地址、一键导入链接与二维码。
+/// 拿不到可用主机时只说明原因，不算失败：用户已开通，退出码仍为 EXIT_OK。
 fn print_subscription_block(username: &str, token: &str) {
     let host = match config::load().map_err(|e| e.to_string()).and_then(|cfg| subscription_host(&cfg)) {
         Ok(host) => host,
         Err(reason) => {
-            println!("  ⚠ 未生成订阅链接：{reason}");
+            println!("  ⚠ 暂时无法生成订阅地址：{reason}");
             return;
         }
     };
     let (sub_url, deeplink) = subscription_links(&host, token, username);
     println!();
-    println!("┌─ [Clash 订阅（含二维码）] ──────────────────────────────────");
-    println!("│  订阅链接:  \x1b[1;32m{sub_url}\x1b[0m");
+    println!("┌─ Clash 订阅 ────────────────────────────────────────────────");
+    println!("│  订阅地址:  \x1b[1;32m{sub_url}\x1b[0m");
     println!("│  一键导入:  \x1b[1;32m{deeplink}\x1b[0m");
     println!("└─────────────────────────────────────────────────────────────");
     match crate::cmd::clash::render_qr(&sub_url) {
         Ok(qr) => {
-            println!("  手机端 Clash / Shadowrocket 扫码导入：");
+            println!("  手机扫码导入（对准下方二维码）：");
             for line in qr.lines() {
                 println!("  {line}");
             }
         }
-        Err(e) => println!("  ⚠ 二维码渲染失败：{e}"),
+        Err(e) => println!("  ⚠ 二维码生成失败：{e}"),
     }
 }
 
@@ -274,6 +284,7 @@ pub fn add(
     quota_str: Option<&str>,
     max_conns: usize,
     is_admin: bool,
+    show_secrets: bool,
 ) -> Result<i32, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -327,7 +338,7 @@ pub fn add(
 
         let home = std::env::var("HOME").map_err(|_| "找不到 HOME 目录".to_string())?;
         let key_path = std::path::Path::new(&home).join(".pony").join("cluster_signing_key.hex");
-        let (signer, vk_hex) = if key_path.exists() {
+        let (signer, _vk_hex) = if key_path.exists() {
             let hex_str = std::fs::read_to_string(&key_path).map_err(|e| format!("读取私钥失败: {e}"))?;
             let bytes = hex::decode(hex_str.trim()).map_err(|e| format!("私钥格式错误: {e}"))?;
             if bytes.len() != 32 {
@@ -378,30 +389,34 @@ pub fn add(
         let token = signer.sign_token(&claims).map_err(|e| format!("签发令牌失败: {e}"))?;
 
         println!("\n╔════════════════════════════════════════════════════════════════╗");
-        println!("║       ✓ 商业化多租户自包含令牌签发成功 (Ed25519 签名)         ║");
+        println!("║                       ✓ 用户开通成功                           ║");
         println!("╚════════════════════════════════════════════════════════════════╝\n");
-        println!("  用户名称:   \x1b[1;36m{username}\x1b[0m");
+        println!("  用户名:     \x1b[1;36m{username}\x1b[0m");
         println!(
-            "  用户身份:   \x1b[1;35m{}\x1b[0m",
-            if role == "admin" { "系统管理员 (全局大盘权限)" } else { "普通租户用户" }
+            "  身份:       {}",
+            if role == "admin" { "管理员（可查看全局大盘）" } else { "普通用户" }
         );
         println!(
-            "  总配额:     \x1b[1;32m{:.2} GB\x1b[0m ({} 字节)",
-            quota_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
-            quota_bytes
+            "  每月流量:   \x1b[1;32m{:.2} GB\x1b[0m",
+            quota_bytes as f64 / 1024.0 / 1024.0 / 1024.0
         );
         println!(
-            "  有效期至:   {} (约 {} 天)",
+            "  有效期至:   {}（{} 天）",
             fmt_ts(Some(exp)),
             exp.saturating_sub(now) / 86_400
         );
-        println!("  最大并发:   {} 个同时在线长连接", user.max_conns.unwrap_or_default());
-        println!("  登录密码:   \x1b[1;32m{pass}\x1b[0m  (局域网 Basic / 订阅客户端校验用)");
-        println!("  公钥校验:   {}", vk_hex);
-        println!("  用户令牌:   \x1b[1;33m{}\x1b[0m\n", token);
-        println!("  \x1b[1;32m使用指引：\x1b[0m 客户端(Win/Mac/CLI)直接粘贴此令牌即可显示额度并激活代理。");
+        println!("  同时在线:   最多 {} 台设备", user.max_conns.unwrap_or_default());
+        println!("  登录密码:   {}", secret_display(&pass, show_secrets));
+        println!("  用户令牌:   {}", secret_display(&token, show_secrets));
+        println!();
+        println!("  \x1b[1;32m三步上手\x1b[0m");
+        println!("    1. 手机安装 Clash（Android）或 Shadowrocket（iOS）");
+        println!("    2. 打开 App，扫描下方二维码导入订阅");
+        println!("    3. 打开「代理」开关，即可正常上网");
+        println!();
+        println!("  \x1b[1;33m扫码前请先关闭手机上正在运行的其他 VPN / 代理\x1b[0m，否则订阅下载会失败。");
         print_subscription_block(username, &token);
-        println!("  \x1b[1;33m⚠ 订阅链接仅限个人使用，请勿外传；泄露即可能被他人消耗你的月度额度\x1b[0m\n");
+        println!("  \x1b[1;33m⚠ 下方订阅地址内含上面的用户令牌，等同账号凭据；请勿转发他人，泄露会被人消耗你的每月流量\x1b[0m\n");
 
         return Ok(EXIT_OK);
     }
@@ -429,23 +444,27 @@ pub fn add(
             let http_uri = format!("http://{}:{pass}@{host_port}", user.username);
 
             println!("\n╔════════════════════════════════════════════════════════════════╗");
-            println!("║              ✓ 代理用户创建成功                                 ║");
+            println!("║                       ✓ 用户开通成功                           ║");
             println!("╚════════════════════════════════════════════════════════════════╝\n");
-            println!("  用户 ID:    {}", user.id);
             println!("  用户名:     \x1b[1;36m{}\x1b[0m", user.username);
-            println!("  认证密码:   \x1b[1;32m{pass}\x1b[0m");
             if let Some(exp) = user.expires_at {
                 println!("  有效期至:   {}", fmt_ts(Some(exp as u64)));
             }
+            println!("  登录密码:   {}", secret_display(&pass, show_secrets));
             println!();
-            println!("┌─ [一键连接口令 (Windows 桌面端 / 小火箭 / Shadowrocket)] ────");
-            println!("│  \x1b[1;32m{pproxy_uri}\x1b[0m");
-            println!("│  \x1b[1;32m{http_uri}\x1b[0m");
-            println!("└─────────────────────────────────────────────────────────────\n");
-            println!("👉 手动配置参数（如手机 Wi-Fi 代理设置）：");
-            println!("   服务器: {}  (端口由上述地址指定)", host_port);
-            println!("   用户名: {}", user.username);
-            println!("   密码:   {pass}\n");
+            if show_secrets {
+                println!("┌─ 一键连接地址 ─────────────────────────────────────────────");
+                println!("│  \x1b[1;32m{pproxy_uri}\x1b[0m");
+                println!("│  \x1b[1;32m{http_uri}\x1b[0m");
+                println!("└─────────────────────────────────────────────────────────────");
+            }
+            println!("  手动填写（手机 Wi-Fi 代理设置）：");
+            println!("    服务器: {host_port}");
+            println!("    用户名: {}", user.username);
+            if show_secrets {
+                println!("    密码:   {pass}");
+            }
+            println!();
             Ok(EXIT_OK)
         }
         Err(e) => {
@@ -1136,6 +1155,17 @@ mod tests {
         );
         // 深链必须可被客户端解析：url/name 两个参数都在
         assert!(deep.contains("&name="));
+    }
+
+    #[test]
+    fn secret_display_hides_by_default() {
+        let hidden = secret_display("s3cret-token", false);
+        assert!(hidden.contains("已遮挡"));
+        assert!(!hidden.contains("s3cret-token"), "默认不得在屏幕上出现明文凭据");
+
+        let shown = secret_display("s3cret-token", true);
+        assert!(shown.contains("s3cret-token"));
+        assert!(!shown.contains("已遮挡"));
     }
 
     #[test]
