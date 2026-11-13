@@ -233,6 +233,19 @@ pub fn fmt_quota(bytes: Option<i64>) -> String {
     }
 }
 
+/// 有效期剩余时长的人类可读标签：秒级起算，避免短周期显示成「0 天」。
+fn duration_label(secs: u64) -> String {
+    if secs >= 86_400 {
+        format!("{} 天", secs / 86_400)
+    } else if secs >= 3_600 {
+        format!("{} 小时", secs / 3_600)
+    } else if secs >= 60 {
+        format!("{} 分钟", secs / 60)
+    } else {
+        format!("{secs} 秒")
+    }
+}
+
 pub fn keygen() -> Result<i32, String> {
     let (signer, vk) = pproxy_core::TokenSigner::generate();
     let sk_bytes = signer.to_bytes();
@@ -397,13 +410,13 @@ pub fn add(
             if role == "admin" { "管理员（可查看全局大盘）" } else { "普通用户" }
         );
         println!(
-            "  每月流量:   \x1b[1;32m{:.2} GB\x1b[0m",
-            quota_bytes as f64 / 1024.0 / 1024.0 / 1024.0
+            "  每月流量:   \x1b[1;32m{}\x1b[0m",
+            crate::render::human_bytes(quota_bytes)
         );
         println!(
-            "  有效期至:   {}（{} 天）",
+            "  有效期至:   {}（{}）",
             fmt_ts(Some(exp)),
-            exp.saturating_sub(now) / 86_400
+            duration_label(exp.saturating_sub(now))
         );
         println!("  同时在线:   最多 {} 台设备", user.max_conns.unwrap_or_default());
         println!("  登录密码:   {}", secret_display(&pass, show_secrets));
@@ -1271,6 +1284,23 @@ mod tests {
         // 用量达到配额即耗尽（含恰好相等）
         assert_eq!(membership_state(false, Some(100), 100, Some(now + 60), now), "额度耗尽");
         assert_eq!(membership_state(false, Some(100), 99, Some(now + 60), now), "正常");
+    }
+
+    #[test]
+    fn duration_label_covers_subday_and_long_lived() {
+        assert_eq!(duration_label(59), "59 秒");
+        assert_eq!(duration_label(60), "1 分钟");
+        assert_eq!(duration_label(3_600), "1 小时");
+        assert_eq!(duration_label(86_400), "1 天");
+        assert_eq!(duration_label(30 * 86_400), "30 天");
+    }
+
+    #[test]
+    fn quota_line_uses_human_bytes_not_always_gigabytes() {
+        // 回归：5M 额度曾在面向用户输出里被格式化成「0.00 GB」，用户以为是零额度
+        assert_eq!(crate::render::human_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(crate::render::human_bytes(50 * 1024 * 1024), "50.0 MB");
+        assert_eq!(crate::render::human_bytes(50 * 1024 * 1024 * 1024), "50.0 GB");
     }
 
     #[test]
