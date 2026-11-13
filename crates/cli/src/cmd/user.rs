@@ -169,6 +169,20 @@ pub fn secret_lines(pass: &str, token: Option<&str>, show_secrets: bool) -> Vec<
     lines
 }
 
+/// 短码订阅 URL（`https://<host>/c/<code>`，32 字节）与一键导入深链。
+///
+/// 比 `/clash?token=<code>` 少 10 字节，二维码因此从版本 3（37 列）落到版本 2（33 列）。
+pub fn subscription_links_short(host: &str, code: &str, username: &str) -> (String, String) {
+    let sub_url = format!("https://{host}/c/{code}");
+    let name = format!("PonyProxy-{username}");
+    let deeplink = format!(
+        "clash://install-config?url={}&name={}",
+        percent_encode_component(&sub_url),
+        percent_encode_component(&name)
+    );
+    (sub_url, deeplink)
+}
+
 /// 订阅 URL 与 Clash 一键导入深链（纯函数，便于单测）。
 pub fn subscription_links(host: &str, token: &str, username: &str) -> (String, String) {
     let sub_url = format!("https://{host}/clash?token={token}");
@@ -205,7 +219,16 @@ fn print_subscription_block(username: &str, token: &str) {
             return;
         }
     };
-    let (sub_url, deeplink) = subscription_links(&host, token, username);
+    // 二维码宽度只由负载长度决定（终端 Unicode 二维码 = 1 字符 1 模块）：
+    // 订阅 URL 里的 `usr_live_` 令牌约 390 字节 → 版本 13 二维码（71 列 × 35 行）；
+    // 换成网关签发的 8 字符订阅短码后仅 42 字节 → 版本 3（37 列 × 19 行），约四分之一面积。
+    let (sub_url, deeplink) = match crate::cmd::gate_admin::request_short_code(token) {
+        Ok(code) => subscription_links_short(&host, &code, username),
+        Err(reason) => {
+            eprintln!("  ⚠ 未取得订阅短码（{reason}），下面使用长链接，二维码会偏大");
+            subscription_links(&host, token, username)
+        }
+    };
     println!();
     println!("┌─ Clash 订阅 ────────────────────────────────────────────────");
     println!("│  订阅地址:  \x1b[1;32m{sub_url}\x1b[0m");

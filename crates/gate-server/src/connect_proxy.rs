@@ -812,6 +812,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: String::new(),
             usage_manager: None,
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
 
         let admin = Meter::new(Some("usr_admin".into()), None, cfg.clone());

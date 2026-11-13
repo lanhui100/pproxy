@@ -110,6 +110,7 @@ pproxy user keygen
 # Issue a self-contained tenant token offline (-q period quota, -d membership term: 30/30d=days, 1m/3m/6m=calendar months, 1y=calendar year)
 # Short-cycle smoke tests / expiry acceptance may use 30s, 5min, 2h (minutes are written `min`; `m` still means calendar month)
 # Issuance also persists the member row and prints the Clash subscription URL, the clash:// install deep link and a QR code
+# The subscription URL is swapped for a gateway-issued 8-char short code (/c/<code>), so the QR renders at 33x17
 pproxy user add alice -q 50G -d 3m -c 3
 
 # Issue an administrator token (explicit --admin flag exemptions from byte quota limit)
@@ -125,11 +126,12 @@ pproxy user revoke tok-9f8e7d6c
 - **Self-Contained & Instant Display**: Tokens embed `sub`, `quota_bytes`, `exp`, and `max_conns`. Desktop and CLI clients display user quotas directly without hitting a central database.
 - **Provisioned and Manageable in One Step**: the `-q` path persists `quota_bytes`/`jti`/`max_conns`/`role`/`expires_at` into the `users` table, so `pproxy user list|rm|disable` act on the same identity instead of leaving a token-only ghost account.
 - **Quota Is Observable**: `/clash` returns real used bytes / quota / expiry in `subscription-userinfo`, so an exhausted tenant sees it in the client instead of only as failing connections.
+- **Short Codes Carry the Same Authority as Tokens**: codes are issued by `POST /api/admin/shortlink` and stored in `~/.pony/short_links.json`; resolution still goes through the same signature/revocation/expiry/quota checks, and `user rm|disable|revoke` cascade-deletes them so a code can never revive a revoked token.
 - **Delete/Disable Means Offline**: `pproxy user rm` / `disable` cascade-revoke that user's token `jti`
   (new gateway handshakes get 401 immediately) and exit non-zero if revocation did not land; recreating the
   same username later is unaffected. Admin channel is configured once in `~/.pony/gate_admin.conf` (see ops docs).
 - **Real-Time Revocation**: `pproxy user revoke` writes to disk and hot-pushes to the live gateway, instantly blocking subsequent connections and profiles with 401/403.
-- **Customer-Facing Provisioning Output, Credentials Not Shown by Default**: `user add` prints `User provisioned` without public keys or internal IDs; the login password and user token are **omitted entirely** (no "hidden" placeholder line) unless you pass `--show-secrets`. Traffic is rendered per magnitude (`5.0 MB` / `50.0 GB`) and validity in days/hours/minutes, so short trials never read `0 days`; the terminal QR code fits within 71×35 so an 80-column terminal never wraps it.
+- **Customer-Facing Provisioning Output, Credentials Not Shown by Default**: `user add` prints `User provisioned` without public keys or internal IDs; the login password and user token are **omitted entirely** (no "hidden" placeholder line) unless you pass `--show-secrets`. Traffic is rendered per magnitude (`5.0 MB` / `50.0 GB`) and validity in days/hours/minutes, so short trials never read `0 days`; the subscription URL uses a gateway-issued 8-character **short code** (`https://<host>/c/<code>`), shrinking the QR from 69×35 (long token) to 33×17 — about a quarter of the area — which is far easier to focus a phone camera on. If the admin channel is unavailable it falls back to the long URL with a stderr note.
 
 ### 6. Local HA Forwarder (transparent high-availability proxy stub)
 

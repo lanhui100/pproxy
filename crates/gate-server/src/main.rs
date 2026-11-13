@@ -55,6 +55,9 @@ async fn main() -> anyhow::Result<()> {
         revoked_tokens,
         gate_admin_token,
         usage_manager: Some(usage_manager.clone()),
+        short_links: std::sync::Arc::new(pproxy_gate_server::shortlink::ShortLinkStore::open(
+            pproxy_gate_server::shortlink::ShortLinkStore::default_path(),
+        )),
     });
 
     let app = pproxy_gate_server::build_router(state.clone());

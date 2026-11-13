@@ -26,6 +26,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
             usage_manager: None,
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
 
         let app = build_router(cfg.clone());
@@ -207,6 +208,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
             usage_manager: None,
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
 
         let app = build_router(cfg.clone());
@@ -256,6 +258,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
             usage_manager: None,
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
 
         let app = build_router(cfg.clone());
@@ -317,6 +320,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
             usage_manager: Some(manager),
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
 
         let app = build_router(cfg.clone());
@@ -376,6 +380,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
             usage_manager: None,
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -436,6 +441,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
             usage_manager: Some(manager),
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
 
         let req = Request::builder()
@@ -476,6 +482,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
             usage_manager: None,
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
@@ -563,6 +570,7 @@ mod tests {
             revoked_tokens: Arc::new(dashmap::DashSet::new()),
             gate_admin_token: "test-admin".into(),
             usage_manager: None,
+            short_links: std::sync::Arc::new(crate::shortlink::ShortLinkStore::in_memory()),
         });
         let app = build_router(cfg);
 
@@ -667,5 +675,142 @@ mod tests {
             ),
             "清零后订阅头必须回 0，否则客户端仍显示额度耗尽"
         );
+    }
+
+    /// 订阅短码：`/clash?token=<8 字符短码>` 必须还原成真实令牌后走同一套校验，
+    /// 因此 YAML 里的凭据仍是长令牌、订阅头仍是真实额度（不存在第二套鉴权口径）。
+    #[tokio::test]
+    async fn test_short_code_resolves_to_real_token() {
+        let (signer, vk) = TokenSigner::generate();
+        let short_links = Arc::new(crate::shortlink::ShortLinkStore::in_memory());
+        let cfg = Arc::new(ServerConfig {
+            tunnel_token_hash: "".into(),
+            proxy_secret: "sec".into(),
+            client: reqwest::Client::new(),
+            verifier: Some(Arc::new(pproxy_core::TokenVerifier::new(vk))),
+            legacy_verifiers: Vec::new(),
+            user_active_conns: Arc::new(dashmap::DashMap::new()),
+            user_used_bytes: Arc::new(dashmap::DashMap::new()),
+            revoked_tokens: Arc::new(dashmap::DashSet::new()),
+            gate_admin_token: "test-admin".into(),
+            usage_manager: None,
+            short_links: short_links.clone(),
+        });
+        let app = build_router(cfg.clone());
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let claims = UserTokenClaims {
+            jti: "jti-short-1".into(),
+            sub: "usr_short".into(),
+            name: "Short".into(),
+            quota_bytes: 50 * 1024 * 1024,
+            lease_bytes: 10 * 1024 * 1024,
+            exp: now + 3600,
+            iat: now,
+            max_conns: 3,
+            role: "user".into(),
+        };
+        let token = signer.sign_token(&claims).unwrap();
+        let code = short_links
+            .issue(&token, &claims.sub, &claims.jti, claims.exp)
+            .unwrap();
+        assert_eq!(code.len(), crate::shortlink::CODE_LEN);
+
+        // 1. 短码可用，且 YAML 里落的是真实长令牌
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/clash?token={code}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let userinfo = resp
+            .headers()
+            .get("subscription-userinfo")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(
+            userinfo.contains(&format!("total={}", 50 * 1024 * 1024)),
+            "短码订阅头的额度必须来自令牌 claims: {userinfo}"
+        );
+        let yaml = String::from_utf8(
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            yaml.contains(&format!("username: \"{token}\"")),
+            "短码必须还原成真实令牌作为 CONNECT 凭据"
+        );
+
+        // 1b. 最短路径 `/c/<code>` 与 query 形态等价，且同样还原成真实令牌
+        let resp_path = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/c/{code}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp_path.status(), StatusCode::OK);
+        let yaml_path = String::from_utf8(
+            axum::body::to_bytes(resp_path.into_body(), 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(yaml_path.contains(&format!("username: \"{token}\"")));
+
+        // 2. 未知短码 = 无效凭据
+        let resp_bad = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/clash?token=zzzzzzzz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp_bad.status(), StatusCode::UNAUTHORIZED);
+
+        // 3. 撤销 jti 必须级联删除短码：短码不得成为令牌的复活通道
+        let resp_revoke = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/user/revoke")
+                    .header("Authorization", "Bearer test-admin")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "identifier": claims.jti }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp_revoke.status(), StatusCode::OK);
+        assert!(short_links.is_empty(), "撤销后短码表必须清空该条目");
+        let resp_after = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/clash?token={code}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp_after.status(), StatusCode::UNAUTHORIZED);
     }
 }
