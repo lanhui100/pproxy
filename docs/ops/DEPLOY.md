@@ -535,9 +535,11 @@ ls -l ~/.pony/cluster_signing_key.hex
   （命令见上节「签发前配对自检」）；
   否则新签发的会员订阅链接在生产会全部 401。
 - **Nginx 反向代理配置（若网关前置 Nginx）**：
-  需确保反向代理放行 `/api/user` 路由以允许公网客户端查询 Profile（`/api/user/profile`）与管理端热撤销（`/api/user/revoke`）：
+  需确保反向代理放行 `/api/user` 路由以允许公网客户端查询 Profile（`/api/user/profile`）与管理端热撤销（`/api/user/revoke`），
+  以及 **`/c/`（订阅短码）** —— 短码路径放行的漏配会静默落进默认 location 的伪装页（HTTP 200 + text/html），
+  表现为「扫码/导入后拿不到配置」，而网关日志里一条请求都看不到（2026-11-13 实测踩到）：
   ```nginx
-  location ~ ^/(api/user|api/client/telemetry|api/proxy|proxy) {
+  location ~ ^/(clash|api/clash|api/user|api/client/telemetry|api/proxy|proxy|c/) {
       proxy_pass http://127.0.0.1:3101;
       proxy_http_version 1.1;
       proxy_set_header Host $host;
