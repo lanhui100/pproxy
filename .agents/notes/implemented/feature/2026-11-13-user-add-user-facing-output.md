@@ -25,6 +25,8 @@ Status: implemented
 2. **新增 `--show-secrets`（默认关闭）**：登录密码与用户令牌默认打印
    `已遮挡（创建时加 --show-secrets 才会显示）`。遮挡口径收敛到单一纯函数
    `secret_display(value, show_secrets)`，两个分支（令牌模式 / Basic 模式）共用，便于单测。
+   → **后续收敛**：`implemented/feature/2026-11-13-user-add-silent-secrets-and-qr-fit.md`
+   改为「默认整行不出现」（不再打印遮挡提示），`secret_display` 由 `secret_lines` 取代。
 3. **公钥永不显示**：`add` 里签名器的验签公钥绑定改为 `_vk_hex`，不再出现在任何用户可见路径。
    （`user keygen` 是唯一例外——公钥就是它的产出物，没有公钥该命令无意义。）
 4. **订阅地址与二维码保持默认显示**，并在其后标注「订阅地址内含上面的用户令牌，等同账号凭据」。

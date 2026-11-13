@@ -129,7 +129,7 @@ pproxy user revoke tok-9f8e7d6c
   (new gateway handshakes get 401 immediately) and exit non-zero if revocation did not land; recreating the
   same username later is unaffected. Admin channel is configured once in `~/.pony/gate_admin.conf` (see ops docs).
 - **Real-Time Revocation**: `pproxy user revoke` writes to disk and hot-pushes to the live gateway, instantly blocking subsequent connections and profiles with 401/403.
-- **Customer-Facing Provisioning Output, Credentials Masked by Default**: `user add` prints `User provisioned` without public keys or internal IDs; the login password and user token show as `hidden` unless you pass `--show-secrets`. Traffic is rendered per magnitude (`5.0 MB` / `50.0 GB`) and validity in days/hours/minutes, so short trials never read `0 days`.
+- **Customer-Facing Provisioning Output, Credentials Not Shown by Default**: `user add` prints `User provisioned` without public keys or internal IDs; the login password and user token are **omitted entirely** (no "hidden" placeholder line) unless you pass `--show-secrets`. Traffic is rendered per magnitude (`5.0 MB` / `50.0 GB`) and validity in days/hours/minutes, so short trials never read `0 days`; the terminal QR code fits within 71×35 so an 80-column terminal never wraps it.
 
 ### 6. Local HA Forwarder (transparent high-availability proxy stub)
 

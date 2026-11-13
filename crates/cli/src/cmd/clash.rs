@@ -175,14 +175,29 @@ rules:
     )
 }
 
-/// 将文本内容渲染为终端 Unicode 字符二维码
+/// 终端二维码最大列宽：80 列终端留 4 列余量（含调用处的缩进）
+pub const QR_MAX_COLS: usize = 76;
+
+/// 将文本内容渲染为终端 Unicode 字符二维码。
+///
+/// 尺寸口径（决策 `user-add-silent-secrets-and-qr-fit`）：长负载（订阅 URL 内含
+/// `usr_live_` 令牌，约 340 字节）用最低纠错级别 `EcLevel::L` 把二维码版本压到最小；
+/// `Dense1x2` 折半行高；再按 [`QR_MAX_COLS`] 自适应决定是否保留静默区——优先保住扫描可靠性，
+/// 只有超宽时才牺牲白边，杜绝 80 列终端里整屏折行。
 pub fn render_qr(content: &str) -> Result<String, String> {
-    let code = qrcode::QrCode::new(content.as_bytes()).map_err(|e| format!("生成二维码失败: {e}"))?;
-    let qr = code
-        .render::<qrcode::render::unicode::Dense1x2>()
-        .dark_color(qrcode::render::unicode::Dense1x2::Dark)
-        .light_color(qrcode::render::unicode::Dense1x2::Light)
-        .build();
+    let code = qrcode::QrCode::with_error_correction_level(content.as_bytes(), qrcode::EcLevel::L)
+        .map_err(|e| format!("生成二维码失败: {e}"))?;
+    let build = |quiet: bool| {
+        code.render::<qrcode::render::unicode::Dense1x2>()
+            .quiet_zone(quiet)
+            .dark_color(qrcode::render::unicode::Dense1x2::Dark)
+            .light_color(qrcode::render::unicode::Dense1x2::Light)
+            .build()
+    };
+    let qr = build(true);
+    if qr.lines().map(|l| l.chars().count()).max().unwrap_or(0) > QR_MAX_COLS {
+        return Ok(build(false));
+    }
     Ok(qr)
 }
 
@@ -432,6 +447,19 @@ mod tests {
         assert!(res.is_ok());
         let s = res.unwrap();
         assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn test_render_qr_fits_80_cols_for_subscription_url() {
+        // 决策 user-add-silent-secrets-and-qr-fit：真实订阅 URL（usr_live_ 令牌 ~380 字节）必须落在 QR_MAX_COLS 内，
+        // 否则 80 列终端会折行，二维码糊成一片扫不出来
+        let url = format!("https://rn.ponygo.fun/clash?token=usr_live_{}", "A".repeat(330));
+        let qr = render_qr(&url).unwrap();
+        let width = qr.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+        let height = qr.lines().count();
+        assert!(width <= QR_MAX_COLS, "二维码宽 {width} 列，超过上限 {QR_MAX_COLS}");
+        assert!(width >= 41, "二维码本身仍须可扫（width={width}）");
+        assert!(height <= 45, "二维码高 {height} 行，占屏过多");
     }
 
     #[test]
