@@ -155,14 +155,18 @@ pub fn percent_encode_component(s: &str) -> String {
     out
 }
 
-/// 机密展示口径：默认遮挡，`show_secrets` 为真时明文。
-/// 密码、用户令牌都走这里，避免截图/录屏时把凭据带出去。
-fn secret_display(value: &str, show_secrets: bool) -> String {
-    if show_secrets {
-        format!("\x1b[1;32m{value}\x1b[0m")
-    } else {
-        "\x1b[2m已遮挡\x1b[0m（创建时加 --show-secrets 才会显示）".to_string()
+/// 凭据展示口径（决策 `user-add-silent-secrets-and-qr-fit`）：默认**整行不出现**——既不打印明文，也不打印「已遮挡」提示，
+/// 避免把内部行话塞进用户视野；只有显式 `--show-secrets` 才列出密码与用户令牌。
+/// 返回已带缩进的整行文本，空表示这一屏压根不提凭据。
+pub fn secret_lines(pass: &str, token: Option<&str>, show_secrets: bool) -> Vec<String> {
+    if !show_secrets {
+        return Vec::new();
     }
+    let mut lines = vec![format!("  登录密码:   \x1b[1;32m{pass}\x1b[0m")];
+    if let Some(token) = token {
+        lines.push(format!("  用户令牌:   \x1b[1;32m{token}\x1b[0m"));
+    }
+    lines
 }
 
 /// 订阅 URL 与 Clash 一键导入深链（纯函数，便于单测）。
@@ -419,8 +423,9 @@ pub fn add(
             duration_label(exp.saturating_sub(now))
         );
         println!("  同时在线:   最多 {} 台设备", user.max_conns.unwrap_or_default());
-        println!("  登录密码:   {}", secret_display(&pass, show_secrets));
-        println!("  用户令牌:   {}", secret_display(&token, show_secrets));
+        for line in secret_lines(&pass, Some(&token), show_secrets) {
+            println!("{line}");
+        }
         println!();
         println!("  \x1b[1;32m三步上手\x1b[0m");
         println!("    1. 手机安装 Clash（Android）或 Shadowrocket（iOS）");
@@ -429,7 +434,7 @@ pub fn add(
         println!();
         println!("  \x1b[1;33m扫码前请先关闭手机上正在运行的其他 VPN / 代理\x1b[0m，否则订阅下载会失败。");
         print_subscription_block(username, &token);
-        println!("  \x1b[1;33m⚠ 下方订阅地址内含上面的用户令牌，等同账号凭据；请勿转发他人，泄露会被人消耗你的每月流量\x1b[0m\n");
+        println!("  \x1b[1;33m⚠ 下方订阅地址内含你的用户令牌，等同账号凭据；请勿转发他人，泄露会被人消耗你的每月流量\x1b[0m\n");
 
         return Ok(EXIT_OK);
     }
@@ -463,7 +468,9 @@ pub fn add(
             if let Some(exp) = user.expires_at {
                 println!("  有效期至:   {}", fmt_ts(Some(exp as u64)));
             }
-            println!("  登录密码:   {}", secret_display(&pass, show_secrets));
+            for line in secret_lines(&pass, None, show_secrets) {
+                println!("{line}");
+            }
             println!();
             if show_secrets {
                 println!("┌─ 一键连接地址 ─────────────────────────────────────────────");
@@ -1171,14 +1178,20 @@ mod tests {
     }
 
     #[test]
-    fn secret_display_hides_by_default() {
-        let hidden = secret_display("s3cret-token", false);
-        assert!(hidden.contains("已遮挡"));
-        assert!(!hidden.contains("s3cret-token"), "默认不得在屏幕上出现明文凭据");
+    fn secret_lines_absent_by_default() {
+        // 默认整行不出现——既无明文，也没有「已遮挡」这类内部行话
+        assert!(
+            secret_lines("s3cret-pass", Some("s3cret-token"), false).is_empty(),
+            "默认不得出现任何凭据行"
+        );
 
-        let shown = secret_display("s3cret-token", true);
-        assert!(shown.contains("s3cret-token"));
-        assert!(!shown.contains("已遮挡"));
+        let shown = secret_lines("s3cret-pass", Some("s3cret-token"), true);
+        assert_eq!(shown.len(), 2, "--show-secrets 才列出密码与令牌: {shown:?}");
+        assert!(shown[0].contains("s3cret-pass"));
+        assert!(shown[1].contains("s3cret-token"));
+
+        // 仅密码路径（遗留开通入口）不硬塞令牌行
+        assert_eq!(secret_lines("s3cret-pass", None, true).len(), 1);
     }
 
     #[test]
