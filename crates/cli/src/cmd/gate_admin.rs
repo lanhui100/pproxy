@@ -134,6 +134,45 @@ pub fn is_valid_identifier(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+/// 令牌形态白名单：`usr_live_` + base64url（含 `-` `_`）+ `.` 段分隔。
+/// 令牌会进入远端 shell 的 JSON body，因此仍做字符集收敛（纵深防御）。
+pub fn is_valid_token_shape(t: &str) -> bool {
+    !t.is_empty()
+        && t.len() <= 4096
+        && t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// 为已签发令牌申请订阅短码（`POST /api/admin/shortlink`）。
+///
+/// 短码让订阅 URL 从 ~390 字节压到 ~42 字节，终端二维码因此从版本 13（71 列 × 35 行）
+/// 降到版本 3（37 列 × 19 行）。管理通道未配置/不可达时返回 `Err`，
+/// 调用方回退到长令牌 URL —— 功能不变，只是二维码更大。
+pub fn request_short_code(token: &str) -> Result<String, String> {
+    if !is_valid_token_shape(token) {
+        return Err("令牌形态非法，拒绝申请短码".to_string());
+    }
+    let body = serde_json::json!({ "token": token }).to_string();
+    let reply = admin_post("/api/admin/shortlink", &body)?;
+    if reply.status != 200 {
+        return Err(format!(
+            "网关返回 HTTP {}: {}",
+            reply.status,
+            reply.body.trim()
+        ));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&reply.body).map_err(|e| format!("短码响应不可解析: {e}"))?;
+    value
+        .get("code")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "网关未返回短码".to_string())
+}
+
 /// 一次推送的结果（供调用方打印与决定退出码）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushReport {

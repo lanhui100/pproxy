@@ -449,6 +449,45 @@ mod tests {
         assert!(!s.is_empty());
     }
 
+    /// 决策 `2026-11-13-subscription-short-code-for-qr`：终端二维码宽度 = 模块数，
+    /// 模块数只由负载长度决定；订阅短码（8 字符）必须把面积压到长令牌的约 1/4。
+    #[test]
+    fn test_render_qr_short_code_is_quarter_area() {
+        let long_url = format!(
+            "https://rn.ponygo.fun/clash?token=usr_live_{}",
+            "a".repeat(340)
+        );
+        let short_url = "https://rn.ponygo.fun/c/ab12cd34";
+        let qr_long = render_qr(&long_url).unwrap();
+        let qr_short = render_qr(short_url).unwrap();
+        let area = |qr: &str| {
+            let rows = qr.lines().count();
+            let cols = qr.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+            rows * cols
+        };
+        let (long_area, short_area) = (area(&qr_long), area(&qr_short));
+        let dims = |qr: &str| {
+            (
+                qr.lines().map(|l| l.chars().count()).max().unwrap_or(0),
+                qr.lines().count(),
+            )
+        };
+        eprintln!(
+            "qr: long {}x{} = {long_area}, short {}x{} = {short_area} ({:.0}%)",
+            dims(&qr_long).0,
+            dims(&qr_long).1,
+            dims(&qr_short).0,
+            dims(&qr_short).1,
+            short_area as f64 * 100.0 / long_area as f64
+        );
+        assert!(
+            short_area * 3 <= long_area,
+            "短码二维码面积 {short_area} 应为长链接 {long_area} 的 1/3 以下"
+        );
+        let width = qr_short.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+        assert!(width <= 35, "短码二维码宽 {width} 列，超出预期（版本 2 上限 33）");
+    }
+
     #[test]
     fn test_render_qr_fits_80_cols_for_subscription_url() {
         // 决策 user-add-silent-secrets-and-qr-fit：真实订阅 URL（usr_live_ 令牌 ~380 字节）必须落在 QR_MAX_COLS 内，

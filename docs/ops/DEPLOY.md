@@ -52,6 +52,7 @@
 | `PPROXY_CLUSTER_KEY` | 集群间通信签名密钥（跨节点转发签发 `X-Pony-Cluster-Ticket` 鉴权） |
 | `USER_VERIFYING_KEY` | 多租户 Ed25519 验签公钥 Hex（各节点本地无状态验签，只读注入）；逗号分隔可配多把，首项为主、其余为轮换窗口内的历史公钥 |
 | `GATE_ADMIN_TOKEN` | 轻量 Gate 服务管理接口 Bearer Token（用于黑名单撤销热推送）；**留空 = 管理端点恒 401** |
+| `GATE_SHORTLINK_FILE` | 订阅短码表路径，默认 `$HOME/.pony/short_links.json`；缺失/损坏按空表启动（短码仅影响二维码尺寸，不影响鉴权） |
 | `GATE_BILLING_DAY` | VPS 月度账单结算日（1-28，UTC 00:00 为结算点）：网关按此归档上一周期用量并归零，账本 `~/.pony/gate_usage.json` |
 | `GATE_ADMIN` | 网关管理端点地址（CLI 直连时用，默认 `http://127.0.0.1:3101`） |
 | `GATE_ADMIN_SSH` | 网关只监听 `127.0.0.1` 时的运维通道：CLI 经 `ssh <host>` 在网关本机 POST（口令/body 走 stdin）；也可写进 `~/.pony/gate_admin.conf` 的 `ssh=` |
@@ -610,6 +611,23 @@ ssh=racknerd     # 经 SSH 在网关本机 curl（口令与 body 走 stdin，不
 ```bash
 GATE_ADMIN_TOKEN=<32 字节 hex>   # 留空 = 管理端点恒 401，撤销只能人工改文件+重启
 ```
+
+**订阅短码（二维码尺寸）**
+
+`pproxy user add -q` 建号后会调 `POST /api/admin/shortlink`（同一管理通道、同一口令）把长令牌
+换成 8 字符短码，订阅地址变为 `https://<host>/c/<code>`（32 字节），终端二维码因此从
+69 列 × 35 行降到 33 列 × 17 行。短码解析后仍走同一套验签/撤销/过期/额度判定：
+
+```bash
+curl -s -X POST http://127.0.0.1:3101/api/admin/shortlink \
+  -H "Authorization: Bearer $GATE_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"token":"usr_live_..."}'          # → {"ok":true,"code":"ab12cd34","url_path":"/clash?token=ab12cd34"}
+curl -s http://127.0.0.1:3101/c/ab12cd34  # 与 /clash?token=<长令牌> 等价，返回同一份 YAML
+```
+
+短码表落 `~/.pony/short_links.json`（原子写）。撤销令牌时网关按 `jti`/`sub` 级联删除短码，
+因此 `user rm|disable|revoke` 之后短码立即 401；短码不会活得比令牌更久（`exp` 到期即清理）。
+改动短码不落盘以外的语义为零——删掉该文件只会让新二维码变回长链接。
 
 **执行与回显**
 

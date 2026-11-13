@@ -12,6 +12,7 @@
 //!    - Reports token hash presence & length for alignment check
 
 pub mod connect_proxy;
+pub mod shortlink;
 pub mod usage;
 
 use std::collections::HashSet;
@@ -51,6 +52,8 @@ pub struct ServerConfig {
     pub revoked_tokens: Arc<dashmap::DashSet<String>>, // 黑名单撤销表（存储已废止的 jti 或 sub）
     pub gate_admin_token: String, // 管理端点鉴权（POST /api/revoke 等），来源于 ENV GATE_ADMIN_TOKEN
     pub usage_manager: Option<Arc<usage::UsageManager>>,
+    /// 订阅短码表（长令牌 → 8 字符短码）：让终端二维码从版本 13 降到版本 3。
+    pub short_links: Arc<shortlink::ShortLinkStore>,
 }
 
 impl ServerConfig {
@@ -183,6 +186,7 @@ pub fn build_router(cfg: Arc<ServerConfig>) -> Router {
     Router::new()
         .route("/clash", get(handle_clash_subscription))
         .route("/api/clash", get(handle_clash_subscription))
+        .route("/c/:code", get(handle_short_path_subscription))
         .route("/debug", get(handle_debug))
         .route("/ws", get(handle_ws))
         .route("/api/ws", get(handle_ws))
@@ -190,6 +194,7 @@ pub fn build_router(cfg: Arc<ServerConfig>) -> Router {
         .route("/api/user/revoke", post(handle_revoke))
         .route("/api/admin/usage", post(handle_admin_usage))
         .route("/api/admin/reset-usage", post(handle_admin_reset_usage))
+        .route("/api/admin/shortlink", post(handle_admin_shortlink))
         .route("/api/client/telemetry", post(handle_telemetry))
         .route("/proxy", any(handle_proxy))
         .route("/api/proxy", any(handle_proxy))
@@ -267,8 +272,87 @@ async fn handle_revoke(
         let _ = writeln!(f, "{identifier}");
     }
 
+    // 短码与令牌等权：撤销必须级联删除，否则短码会继续换出已废止令牌
+    let removed_links = cfg.short_links.revoke(&identifier);
+    if removed_links > 0 {
+        tracing::warn!(identifier = %identifier, removed = removed_links, "short links revoked");
+    }
+
     tracing::warn!(identifier = %identifier, "token revoked via admin endpoint");
     (StatusCode::OK, serde_json::json!({ "ok": true, "identifier": identifier }).to_string()).into_response()
+}
+
+/// 管理端点：为已签发令牌申请订阅短码（`GATE_ADMIN_TOKEN` Bearer 鉴权）。
+///
+/// Body `{"token":"usr_live_..."}`；响应 `{"ok":true,"code":"ab12cd34","url_path":"/clash?token=ab12cd34"}`。
+///
+/// 短码与令牌等权（都是 bearer 凭据），因此这里只做"缩址"，不新增权限：
+/// 短码解析后仍走 `validate_subscription_token`，撤销/过期/额度语义与长令牌一致。
+async fn handle_admin_shortlink(
+    State(cfg): State<Arc<ServerConfig>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    if !admin_authorized(&cfg, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ShortLinkReq {
+        token: String,
+    }
+    let req: ShortLinkReq = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "bad_request: expect {\"token\": \"usr_live_...\"}",
+            )
+                .into_response()
+        }
+    };
+    let token = req.token.trim();
+    if token.is_empty() {
+        return (StatusCode::BAD_REQUEST, "bad_request: empty token").into_response();
+    }
+
+    let claims = match cfg.verify_user_token(token) {
+        Some(Ok(claims)) => claims,
+        Some(Err(e)) => {
+            return (StatusCode::UNAUTHORIZED, format!("invalid token: {e}")).into_response()
+        }
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "verifier not configured",
+            )
+                .into_response()
+        }
+    };
+    if cfg.revoked_tokens.contains(&claims.jti) || cfg.revoked_tokens.contains(&claims.sub) {
+        return (StatusCode::UNAUTHORIZED, "invalid token: revoked").into_response();
+    }
+
+    match cfg
+        .short_links
+        .issue(token, &claims.sub, &claims.jti, claims.exp)
+    {
+        Ok(code) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::json!({
+                "ok": true,
+                "code": code,
+                "url_path": format!("/clash?token={code}"),
+            })
+            .to_string(),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("short link issue failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "short link issue failed").into_response()
+        }
+    }
 }
 
 /// 管理端点统一鉴权：口令为空一律拒绝（fail-closed），非空时固定时间比较防时序侧信道。
@@ -596,8 +680,8 @@ async fn handle_clash_subscription(
     State(cfg): State<Arc<ServerConfig>>,
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let token = params
+) -> axum::response::Response {
+    let presented = params
         .get("token")
         .map(|s| s.trim().to_string())
         .or_else(|| {
@@ -606,10 +690,42 @@ async fn handle_clash_subscription(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .map(|s| s.trim().to_string())
-        });
+        })
+        .unwrap_or_default();
+    respond_subscription(&cfg, &headers, &presented).await
+}
 
-    let presented = token.as_deref().unwrap_or("");
-    let claims = match validate_subscription_token(&cfg, presented) {
+/// 最短订阅路径：`GET /c/<code>`，只接受短码形态。
+///
+/// 存在理由是长度：终端二维码宽度 = 模块数 = 负载字节数的函数。`/clash?token=<code>`
+/// 是 42 字节（版本 3，37 列），`/c/<code>` 是 32 字节（版本 2，33 列）。
+/// 路由复用同一个 `respond_subscription`，不新增鉴权面。
+async fn handle_short_path_subscription(
+    State(cfg): State<Arc<ServerConfig>>,
+    headers: HeaderMap,
+    axum::extract::Path(code): axum::extract::Path<String>,
+) -> axum::response::Response {
+    respond_subscription(&cfg, &headers, code.trim()).await
+}
+
+/// 供移动端（Clash Meta / Mihomo / 小火箭）订阅的公网端点
+/// 支持通过 GET /clash?token=... 或 GET /api/clash?token=... 直接拉取对齐公网隧道的 YAML 配置。
+/// C5：`/clash` 与 `/api/clash` 共用本 handler，令牌校验对两者同时生效——
+/// 拉取成功不再是无鉴权的假信号（缺失 → 401 `missing token`，无效 → 401 `invalid token`）。
+async fn respond_subscription(
+    cfg: &ServerConfig,
+    headers: &HeaderMap,
+    presented_raw: &str,
+) -> axum::response::Response {
+    // 短码优先：二维码里放的是 8 字符短码，这里还原成真实令牌后走同一套校验，
+    // 因此撤销/过期/额度语义对短码与长令牌完全一致（不存在第二套鉴权）。
+    let resolved = if shortlink::looks_like_code(presented_raw) {
+        cfg.short_links.resolve(presented_raw)
+    } else {
+        None
+    };
+    let presented = resolved.as_deref().unwrap_or(presented_raw);
+    let claims = match validate_subscription_token(cfg, presented) {
         Ok(claims) => claims,
         Err(reason) => {
             tracing::warn!(reason, "subscription request rejected");
@@ -648,8 +764,8 @@ async fn handle_clash_subscription(
     // 而不是只表现为连接失败。
     let (used, quota, expire) = match claims.as_ref() {
         // admin：total=0 是 Clash 约定语义（0 = 不限额展示）
-        Some(c) if is_admin_claims(c) => (user_used_bytes_of(&cfg, &c.sub), 0, 0),
-        Some(c) => (user_used_bytes_of(&cfg, &c.sub), c.quota_bytes, c.exp),
+        Some(c) if is_admin_claims(c) => (user_used_bytes_of(cfg, &c.sub), 0, 0),
+        Some(c) => (user_used_bytes_of(cfg, &c.sub), c.quota_bytes, c.exp),
         // 单口令兼容模式无租户语义：展示 VPS 整机基线与该账本周期聚合用量
         None => (
             cfg.usage_manager
@@ -1224,6 +1340,9 @@ pub async fn run_server(addr: SocketAddr, token_hash: String, proxy_secret: Stri
         revoked_tokens,
         gate_admin_token,
         usage_manager: Some(usage_manager.clone()),
+        short_links: Arc::new(shortlink::ShortLinkStore::open(
+            shortlink::ShortLinkStore::default_path(),
+        )),
     });
 
     // 契约 C1：标准 HTTP CONNECT 正向代理裸 TCP 监听（env GATE_CONNECT_LISTEN，未设置则不启动）。
