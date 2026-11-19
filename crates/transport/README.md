@@ -10,9 +10,11 @@
 
 | 常量 / 参数 | 值 | 语义 |
 |---|---|---|
-| `proto::DIAL_TIMEOUT` | 8 s（`cfg(test)` 800 ms） | WS 拨号上限；跨国链路 + TLS 握手需足够窗口 |
+| `proto::DIAL_TIMEOUT` | 8 s（`cfg(test)` 800 ms） | **交互路径** WS 拨号上限（有人在等，守延迟预算） |
+| `proto::PREWARM_DIAL_TIMEOUT` | 15 s（`cfg(test)` 1500 ms） | **后台补给**拨号上限（没人在等，宁可慢也别砍会话）；恒大于 `DIAL_TIMEOUT` |
 | `proto::FIRST_FRAME_TIMEOUT` | 8 s（`cfg(test)` 600 ms） | 升级后等首帧的上限 |
-| `pool` 缺省节奏 | idle TTL 25 s / refill 2 s / backoff 5 s | 待命池的保活、补池、失败退避 |
+| `pool` 缺省节奏 | idle TTL 25 s / refill 2 s / backoff 5 s / 补货提前量 `min(2×refill, TTL/2)` | 待命池的保活、**过期前**补建、失败退避 |
+| `pool` 补给并发度 | `pool.size`（有界并行） | 单轮缺口并发拨号；单条失败不阻断其它端点 |
 | `pool::TunnelPool::with_size` / `with_timing` | 构造参数 | 池容量与节奏可按宿主覆盖 |
 | `route::COMPLIANT_EGRESS_SUFFIXES` | 3 项（Cloud Code 系 `googleapis.com`） | 必须走合规机房出口的 host |
 | `route::YOUTUBE_SUFFIXES` / `AI_TARGET_SUFFIXES` / `GOOGLE_BASE_SUFFIXES` | 见 `route.rs` | 分流与出口调序的判据表 |
@@ -24,6 +26,8 @@
   HeaderValue 错误）。两个稳定错误标记供上层自愈：`AUTH_401_MARKER`、`QUOTA_402_MARKER`。
 - **待命池**（`pool.rs`）：`TunnelPool` 维持若干预建 idle 会话，`checkout` 取用、`invalidate` 作废、
   `pool_stats` / `idle_total` 观测；按 `token_fp8_of`（令牌指纹前 8 位）区分不同租约的池，便于排障而不泄明文。
+  缺口按「剩余寿命 > 补货提前量」计数而非「未过期」——到期才补会让池在过期瞬间见底；同一批并行建连的
+  `born` 还要按可用寿命均分**前移错峰**，否则整批同秒过期同样会成段清空。
 - **中继**（`relay.rs`）：`relay_bidir_ws` / `relay_bidir_ws_bounded` 双向搬运 WS 帧与 TCP 字节，
   经 `TrafficCounter` 计数（计量归属由宿主传入）。
 - **路由判据**（`route.rs`）：`classify_egress` / `is_youtube_host` / `requires_compliant_egress` /

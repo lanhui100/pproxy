@@ -16,8 +16,8 @@ pub mod route;
 pub use pool::{IdleSession, PoolStats, TunnelPool, token_fp8_of};
 pub use probe::{probe_gate_rtt, probe_via_gate};
 pub use proto::{
-    bind_target, connect_ws, io_err, try_establish_url, AUTH_401_MARKER, DIAL_TIMEOUT,
-    FIRST_FRAME_TIMEOUT, WsPair, WsSink, WsStream,
+    bind_target, connect_ws, connect_ws_with_timeout, io_err, try_establish_url, AUTH_401_MARKER,
+    DIAL_TIMEOUT, FIRST_FRAME_TIMEOUT, PREWARM_DIAL_TIMEOUT, WsPair, WsSink, WsStream,
 };
 pub use relay::{
     relay_bidir_ws, relay_bidir_ws_bounded, AtomicTrafficStats, NoopTrafficCounter,
@@ -201,5 +201,186 @@ mod tests {
         assert_eq!(pool.idle_total(), 0, "Vercel 端点不得预建待命连接");
         assert_eq!(conns.load(Ordering::SeqCst), 0, "Vercel 端点不得发起预连接");
         assert!(pool.checkout(&[&vercel_url], None).is_none());
+    }
+
+    /// 握手被延迟的 mock gate：验证补给预算能覆盖超出交互预算的长尾握手。
+    async fn spawn_slow_mock_gate(
+        delay: Duration,
+        conns: Arc<AtomicUsize>,
+    ) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                conns.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if let Ok(mut ws) = accept_async(stream).await {
+                        while let Some(Ok(msg)) = ws.next().await {
+                            match msg {
+                                Message::Text(_) => {
+                                    let resp =
+                                        serde_json::json!({ "ok": true }).to_string();
+                                    let _ = ws.send(Message::Text(resp)).await;
+                                }
+                                Message::Close(_) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// 门禁：补给预算必须宽于交互预算，否则长尾拨号又会被砍掉。
+    #[test]
+    fn test_prewarm_budget_wider_than_interactive() {
+        assert!(
+            PREWARM_DIAL_TIMEOUT > DIAL_TIMEOUT,
+            "补给拨号预算 {PREWARM_DIAL_TIMEOUT:?} 必须宽于交互预算 {DIAL_TIMEOUT:?}"
+        );
+    }
+
+    /// 回归：握手耗时介于交互预算与补给预算之间时，补给仍须成功。
+    /// 旧实现复用 `DIAL_TIMEOUT`（生产 8s），实测跨境 p99 长尾被稳定切掉 → 池见底 → 冷建连穿透。
+    #[tokio::test]
+    async fn test_pool_refill_tolerates_slow_handshake() {
+        // 超出交互预算、仍在补给预算内
+        let delay = DIAL_TIMEOUT + Duration::from_millis(200);
+        let conns = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_slow_mock_gate(delay, Arc::clone(&conns)).await;
+        let url = format!("ws://{addr}");
+        let (_tx, rx) = watch::channel((Some(url.clone()), Some("token".into())));
+
+        let pool = TunnelPool::with_size(rx, 1);
+        pool.start_maintain();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_total() < 1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "慢握手（{delay:?}）应被补给预算容忍，实际池仍为空"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// 回归：补给轮内某端点失败不得阻断其它端点补池。
+    /// 旧实现失败即 `break` 退出端点循环，造成队头阻塞——排在前面的坏端点会让后面的健康端点永远补不上。
+    #[tokio::test]
+    async fn test_pool_refill_isolates_failing_endpoint() {
+        let conns = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock_gate(true, Arc::clone(&conns)).await;
+
+        // 取一个必然拒绝连接的端口：绑定后立即释放
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+
+        let dead_url = format!("ws://{dead_addr}");
+        let good_url = format!("ws://{addr}");
+        let urls = format!("{dead_url},{good_url}");
+        let (_tx, rx) = watch::channel((Some(urls), Some("token".into())));
+
+        let pool = TunnelPool::with_size(rx, 1);
+        pool.start_maintain();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if pool
+                .checkout(&[&good_url], Some(&token_fp8_of("token")))
+                .is_some()
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "失败端点不得阻断健康端点的补给"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// 回归：补给必须在会话过期**之前**触发（提前量 `2 × refill_interval`）。
+    /// 旧口径按“未过期”计数 → 缺口在过期前一刻恒为 0 → 池在每轮过期瞬间见底，
+    /// 直到下一轮 refill 才恢复，窗口内到达的请求 100% 冷建连。
+    #[tokio::test]
+    async fn test_pool_refills_before_expiry() {
+        let conns = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock_gate(true, Arc::clone(&conns)).await;
+        let url = format!("ws://{addr}");
+        let (_tx, rx) = watch::channel((Some(url.clone()), Some("token".into())));
+
+        // ttl 600ms / refill 50ms → 提前量 100ms；size=1 让“池是否见底”无歧义
+        let pool = TunnelPool::with_timing(
+            rx,
+            1,
+            Duration::from_millis(600),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        );
+        pool.start_maintain();
+
+        // 等首条就位（首轮预建完成前的空池不算稳态）
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.fresh_total() < 1 {
+            assert!(tokio::time::Instant::now() < deadline, "首轮预建超时");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // 覆盖 3 个 TTL；5ms 采样 ≪ 100ms 提前量，过期空洞必被发现
+        let end = tokio::time::Instant::now() + Duration::from_millis(1800);
+        let mut samples = 0usize;
+        while tokio::time::Instant::now() < end {
+            let n = pool.fresh_total();
+            samples += 1;
+            assert!(
+                n >= 1,
+                "稳态下池不得见底，第 {samples} 次采样可用会话 = {n}"
+            );
+            assert!(n <= 2, "补建过量：单端点 size=1 时不应有 {n} 条未过期会话");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(samples > 200, "采样数过少（{samples}），判据失效");
+        assert!(
+            conns.load(Ordering::SeqCst) >= 3,
+            "应跨越 ≥3 个 TTL 周期，实际建连 {}",
+            conns.load(Ordering::SeqCst)
+        );
+    }
+
+    /// 回归：同一批预建的会话必须错开出生时间。
+    /// 旧实现整批 `born = now()` → 25s 后集体过期 → 池成段清空（生产 pooled=false 的直接来源之一）。
+    #[tokio::test]
+    async fn test_pool_staggers_same_batch_birth() {
+        let conns = Arc::new(AtomicUsize::new(0));
+        let addr = spawn_mock_gate(true, Arc::clone(&conns)).await;
+        let url = format!("ws://{addr}");
+        let (_tx, rx) = watch::channel((Some(url.clone()), Some("token".into())));
+
+        // ttl 600ms / refill 50ms → 提前量 100ms、可用寿命 500ms；size 3 → 步长 ≈166ms
+        let pool = TunnelPool::with_timing(
+            rx,
+            3,
+            Duration::from_millis(600),
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        );
+        pool.start_maintain();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while pool.idle_total() < 3 {
+            assert!(tokio::time::Instant::now() < deadline, "首轮预建超时");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let ages = pool.ages();
+        let spread = ages[ages.len() - 1] - ages[0];
+        assert!(
+            spread >= Duration::from_millis(120),
+            "同批 3 条会话的出生时间未错峰（spread={spread:?}，期望 ≥120ms）: {ages:?}"
+        );
     }
 }
