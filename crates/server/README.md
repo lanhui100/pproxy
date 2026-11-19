@@ -21,7 +21,8 @@
 
 ## 语义
 
-- **CONNECT 数据面**（`connect.rs`）：隧道待命池 `POOL_SIZE = 4`、建连尝试 `MAX_ATTEMPTS = 5`；
+- **CONNECT 数据面**（`connect.rs`）：隧道待命池 `POOL_SIZE = 8`（按 10 s 窗口建连峰值取值，
+  实测 1 s 峰值 4 / 10 s 峰值 8）、建连尝试 `MAX_ATTEMPTS = 5`；
   allowlist 仅记日志（不作拦截门）；出口顺序由 `pproxy-transport` 按目标 host 决定；YouTube 目标经
   `PPROXY_YOUTUBE_PROXY` 直出，避免消耗原生 VPS 流量与 429 风险。relay 有**双向**期限（空闲 + 绝对），
   两者都可经环境变量缩短（契约与默认值见 `docs/ops/API.md`）。

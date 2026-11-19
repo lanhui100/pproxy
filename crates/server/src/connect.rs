@@ -304,7 +304,10 @@ pub struct TunnelPool {
     _tx: tokio::sync::watch::Sender<(Option<String>, Option<String>)>,
 }
 
-const POOL_SIZE: usize = 4;
+/// 每端点待命会话数。生产实测剔除压测后的真实建连密度：1s 窗口峰值 4、5s 6、10s 8、60s 21。
+/// 取值 4 时恰好等于 1s 峰值、零余量，5s 以上窗口必然穿透成冷建连（`pooled=false`）——
+/// 故按 10s 窗口峰值取 8。常驻 8 条 WS 在 rn 侧 2048 worker_connections 下无压力。
+const POOL_SIZE: usize = 8;
 
 impl TunnelPool {
     pub fn new(cfg: TunnelConfig) -> Arc<Self> {

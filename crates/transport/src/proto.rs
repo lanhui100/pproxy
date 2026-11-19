@@ -27,6 +27,17 @@ pub const DIAL_TIMEOUT: Duration = Duration::from_millis(800);
 #[cfg(test)]
 pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_millis(600);
 
+/// 后台补给（prewarm）拨号预算：比交互路径宽松，因为**没有人在等它**。
+///
+/// 交互路径的 `DIAL_TIMEOUT` 是用户可感知的延迟预算，必须守住；待命池补给是后台行为，
+/// 一次慢拨号被砍掉只是少一条待命会话，下一轮 2s 后再补即可，代价远小于「被砍 → 池空 →
+/// 后续请求退化为冷建连」。实测 dev→rn 跨境链路 WS 建连 p99≈7~11s、max≈20s，
+/// 8s 会稳定切掉 p99 长尾，正是 `tunnel pool refill ... dial timeout after 8s` 的来源。
+#[cfg(not(test))]
+pub const PREWARM_DIAL_TIMEOUT: Duration = Duration::from_millis(15000);
+#[cfg(test)]
+pub const PREWARM_DIAL_TIMEOUT: Duration = Duration::from_millis(1500);
+
 pub type WsSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 pub type WsStream = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
 pub type WsPair = (WsSink, WsStream);
@@ -38,6 +49,18 @@ pub fn io_err<E: Into<Box<dyn std::error::Error + Send + Sync>>>(e: E) -> Error 
 /// 单端点 WS Upgrade（仅建立热态 WS 管道，不声明目标）：供待命池预建复用。
 /// P0：token 先 trim + 非空校验（人肉粘贴/旧文件带入的尾换行不得变成难查的 HeaderValue 错误）。
 pub async fn connect_ws(url_str: &str, token: &str) -> Result<WsPair> {
+    connect_ws_with_timeout(url_str, token, DIAL_TIMEOUT).await
+}
+
+/// 同 [`connect_ws`]，但拨号预算由调用方给定。
+///
+/// 交互路径用 [`DIAL_TIMEOUT`]（有人在等，必须守住延迟预算）；
+/// 后台补给用 [`PREWARM_DIAL_TIMEOUT`]（没人在等，宁可慢一点也别砍掉会话后让池见底）。
+pub async fn connect_ws_with_timeout(
+    url_str: &str,
+    token: &str,
+    budget: Duration,
+) -> Result<WsPair> {
     let token = token.trim();
     if token.is_empty() {
         return Err(io_err("tunnel token is empty: refusing WS upgrade"));
@@ -50,10 +73,10 @@ pub async fn connect_ws(url_str: &str, token: &str) -> Result<WsPair> {
         HeaderValue::from_str(&format!("Bearer {token}")).map_err(io_err)?,
     );
 
-    let dial_deadline = tokio::time::Instant::now() + DIAL_TIMEOUT;
+    let dial_deadline = tokio::time::Instant::now() + budget;
     let upgrade = tokio::time::timeout_at(dial_deadline, tokio_tungstenite::connect_async(req))
         .await
-        .map_err(|_| io_err(format!("dial timeout after {DIAL_TIMEOUT:?}")))?;
+        .map_err(|_| io_err(format!("dial timeout after {budget:?}")))?;
 
     let (ws, _resp) = match upgrade {
         Ok(pair) => pair,

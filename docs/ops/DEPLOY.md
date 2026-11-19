@@ -159,6 +159,30 @@ curl -x https://<gate域名>:8443 -U "$TOKEN:$TOKEN" -sS -o /dev/null -w '%{http
 边界：既有 443 的 `server` 块**不改**（nginx 的 http 核心不转发 CONNECT 方法，443 上
 无法承载该语义）；`GATE_CONNECT_LISTEN` 不设置时监听根本不启动（fail-closed）。
 
+#### 容量参数（worker / conntrack）
+
+默认 `worker_connections 768` 是发行版给的，`nproc=1` 时它就是**全机**连接总量；
+stream 与 http 共享该配额，每条 CONNECT 占 2 槽（client + upstream）→ 默认上限约 384 条。
+实测（rn，1 核 / 458MB）该配置 400 并发即 336 成 / 64 败；抬到 2048 后 1000 并发全成。
+完整片段与实测数据见 `deploy/nginx/nginx.conf.capacity`，决策见
+`.agents/notes/implemented/bug-fix/2026-11-13-rn-nginx-worker-capacity.md`。三条硬要求：
+
+1. `worker_rlimit_nofile 8192` —— worker 默认继承软限制 1024，不抬 fd 则连接数抬高后
+   会先撞 EMFILE，报错比连接数告警更难查。
+2. `worker_shutdown_timeout 30s` —— 否则 reload 时老 worker 持长连接滞留 30min+（每个
+   ~18MB）。代价是超 30s 的长连接被强制断开，由客户端重连兜底。
+3. `nf_conntrack_max 16384`（`/etc/sysctl.d/99-pproxy-conntrack.conf`）—— 默认 4096 在
+   ~650 并发即打满；实测 1000 并发时 count=3412（21%）。
+
+**reload 抑制**：`ponygo-pull.timer` 每 5 分钟拉 dist 时**不得**无条件 `systemctl reload nginx`。
+静态文件更新不需要 reload，而无谓 reload 会不断 fork 新 worker 并滞留老 worker。
+判据用 `rsync --itemize-changes | wc -l`，0 项变化则跳过（日志 `[pull] dist 无变化 → 跳过 reload`）。
+
+> 注意：以上容量参数**不能**改善 `/ws` refill 的 `dial timeout after 8s`。该症状的
+> nginx 报错全部来自本机回环压测（`client: 127.0.0.1`），真实故障时段 rn 侧零日志，
+> 属跨境链路质量问题，与连接容量无关。该超时的修法在客户端侧（拆分补给预算 + 补给并行），
+> 见 `2026-11-14-pool-refill-prewarm-budget.md`。
+
 ### 更新 server（本机）
 ```bash
 cd /home/USER/pproxy

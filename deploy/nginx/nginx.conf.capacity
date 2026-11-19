@@ -1,0 +1,38 @@
+# deploy/nginx/nginx.conf.capacity —— rn 侧 nginx 全局容量参数（可复现片段）
+#
+# 背景与实证：见 .agents/notes/implemented/bug-fix/2026-11-13-rn-nginx-worker-capacity.md
+# 这是 /etc/nginx/nginx.conf **顶层**（main 上下文）的指令，不是 server 块指令，
+# 不能放进 sites-enabled/ 或 conf.d/（那是 http 上下文）。
+#
+# 落地方式（rn 实测有效，幂等）：
+#   1) 备份：cp -a /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak-cap-$(date +%Y%m%d-%H%M%S)
+#   2) 把下面三行按位置插入 /etc/nginx/nginx.conf：
+#        worker_processes auto;      # 已有，保持
+#        worker_rlimit_nofile 8192;  # 紧随其后
+#        worker_shutdown_timeout 30s;# 紧随其后
+#      并把 events {} 内的 worker_connections 从 768 改成 2048。
+#   3) 校验并零停机应用：nginx -t && systemctl reload nginx
+#
+# 为什么是这三个数（2026-11-13 rn 实测，1 核 / 458MB）：
+#   * worker_connections 768 是 Ubuntu 默认值；nproc=1 时它就是**全机**连接总量。
+#     stream 与 http 共享，每条 CONNECT 占 2 槽（client + upstream）→ 默认上限约 384 条。
+#     抬到 2048 后实测 1000 并发 CONNECT 全部成功（改动前 400 并发即 336 成 / 64 败）。
+#   * worker_rlimit_nofile 8192：worker 默认继承软限制 1024。不抬这个，
+#     worker_connections 抬高后会被 fd 先卡住，且报错是 EMFILE 而非清晰的连接数告警。
+#   * worker_shutdown_timeout 30s：reload 时老 worker 若持有 /ws 隧道或 8443 CONNECT
+#     长连接会滞留 30min+（每个 RSS ~18MB）。实测该指令生效：reload 后 +30s 老 worker 被清。
+#     代价是超过 30s 的长连接被强制断开，由客户端重连兜底。
+#
+# 配套（不在本文件内，需单独落）：
+#   /etc/sysctl.d/99-pproxy-conntrack.conf:
+#       net.netfilter.nf_conntrack_max = 16384
+#   默认 4096 在 ~650 并发即打满；实测 1000 并发 CONNECT 时 count=3412（21%）。
+#
+# 注意：改这些参数**不会**改善 /ws refill 的 `dial timeout after 8s`。
+# 该症状的报错全部来自本机压测（client=127.0.0.1），rn 侧在真实故障时段零日志，
+# 属跨境链路质量问题，与本文件无关。
+
+worker_rlimit_nofile 8192;
+worker_shutdown_timeout 30s;
+
+# events { worker_connections 2048; }

@@ -8,10 +8,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::proto::{connect_ws, WsSink, WsStream};
+use crate::proto::{connect_ws_with_timeout, WsSink, WsStream, PREWARM_DIAL_TIMEOUT};
 use crate::route::{classify_egress, is_native_vps_endpoint, Egress};
 
 // 默认生产连接生命周期与补给频率（Gate 等待首帧为 60s，客户端 TTL 设为 25s 确保绝不命中对端超时）
@@ -61,6 +62,10 @@ pub struct TunnelPool {
     idle_ttl: Duration,
     /// 常态补给检测间隔
     refill_interval: Duration,
+    /// 补货提前量：剩余寿命已不足该值的会话不再计入“可用”，提前补建。
+    /// 取值 `2 × refill_interval`，并夹在 `idle_ttl / 2` 以内——节拍与 TTL 相当时，
+    /// 无上限的提前量会让每条会话一出生就“不可用”，退化成自激补池。
+    refill_lead: Duration,
     /// 失败退避间隔
     refill_backoff: Duration,
     /// 可观测计数
@@ -104,6 +109,9 @@ impl TunnelPool {
         refill_interval: Duration,
         refill_backoff: Duration,
     ) -> Arc<Self> {
+        // 提前一个补给周期（×2 留一次错过的余量）开始补建，保证新会话在旧会话
+        // 过期前就位；上界 idle_ttl/2 防节拍与 TTL 相当时退化成自激补池。
+        let refill_lead = (refill_interval * 2).min(idle_ttl / 2);
         Arc::new(Self {
             idle: Mutex::new(HashMap::new()),
             // size=0 即"禁池化"（server main.rs 的 PPROXY_TUNNEL_POOL=0 回滚开关）：
@@ -114,6 +122,7 @@ impl TunnelPool {
             started: AtomicBool::new(false),
             idle_ttl,
             refill_interval,
+            refill_lead,
             refill_backoff,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -213,6 +222,62 @@ impl TunnelPool {
             .sum()
     }
 
+    /// 会话剩余寿命（已过期返回 zero）。
+    fn remaining(&self, s: &IdleSession) -> Duration {
+        self.idle_ttl.saturating_sub(s.born.elapsed())
+    }
+
+    /// 计入目标容量的会话数：剩余寿命必须大于 `refill_lead`。
+    ///
+    /// 旧口径按“未过期”计数，缺口 `target - 未过期数` 在过期前一刻恒为 0，
+    /// 于是补建只在过期**之后**才开始 → 过期瞬间池见底、直到下一轮 refill 才恢复，
+    /// 窗口内到达的请求 100% 冷建连（生产实测 `pooled=false` 占 3%）。
+    fn available_count(&self, sessions: &[IdleSession]) -> usize {
+        sessions
+            .iter()
+            .filter(|s| self.remaining(s) > self.refill_lead)
+            .count()
+    }
+
+    /// 同批建连的出生错峰量（第 `index` 条 / 共 `batch` 条）。
+    ///
+    /// 一轮并行补给建出的会话 `born` 几乎相同 → 整批在同一瞬间过期 → 池成段清空。
+    /// 把 `born` 按“可用寿命”均分前移（即视为更老）后，过期点被摊开，稳态退化为
+    /// 每次只补 1 条。只允许前移：会话被视为更老只会提前废弃（安全方向）；
+    /// 反向偏移会让会话活得比 TTL 更久，越过 Gate 的首帧等待上限。
+    fn stagger_offset(&self, index: usize, batch: usize) -> Duration {
+        if batch <= 1 {
+            return Duration::ZERO;
+        }
+        let usable = self.idle_ttl.saturating_sub(self.refill_lead);
+        usable * (index as u32) / (batch as u32)
+    }
+
+    /// 未过期会话数（仅测试：`idle_total` 含已过期但尚未清理的残留）
+    #[cfg(test)]
+    pub(crate) fn fresh_total(&self) -> usize {
+        let g = self.idle.lock().unwrap_or_else(|p| p.into_inner());
+        g.values()
+            .map(|v| {
+                v.iter()
+                    .filter(|s| self.remaining(s) > Duration::ZERO)
+                    .count()
+            })
+            .sum()
+    }
+
+    /// 各会话年龄升序（仅测试：验证同批建连的出生错峰）
+    #[cfg(test)]
+    pub(crate) fn ages(&self) -> Vec<Duration> {
+        let g = self.idle.lock().unwrap_or_else(|p| p.into_inner());
+        let mut out: Vec<Duration> = g
+            .values()
+            .flat_map(|v| v.iter().map(|s| s.born.elapsed()))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
     /// 后台补给任务：Weak 自引用防泄漏 + 主动清理过期连接 + Token 变动清池。
     /// 已知取舍（B-P1-3）：401 熔断计数跨端点全局累加——一端持续 401 会连带熔断另一端
     ///（双端同熔最多 60s，多一次冷建连延迟）。按端点隔离需重构计数结构，留待后续专项。
@@ -262,6 +327,10 @@ impl TunnelPool {
                     // 若已配置独立原生 VPS，CF Anycast 仅作 Fallback，无需浪费资源预池化避免 Anycast 握手超时拖慢主池）
                     let has_vps = endpoints.iter().any(|ep| is_native_vps_endpoint(ep));
                     let mut healthy = true;
+                    // 本轮缺口清单：(端点, 待补条数)。先一次性算清再并发拨号——
+                    // 串行 await 时单条慢拨号会阻塞整轮（实测跨境 p99≈7~11s、max≈20s），
+                    // 期间池被抽空，后续请求全部退化为冷建连。
+                    let mut wants: Vec<(String, usize)> = Vec::new();
                     for ep in &endpoints {
                         let target_size = if classify_egress(ep) == Egress::Vercel {
                             0
@@ -272,64 +341,97 @@ impl TunnelPool {
                         };
                         let need = {
                             let g = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
-                            target_size.saturating_sub(g.get(ep).map(|v| v.len()).unwrap_or(0))
+                            let ready = g.get(ep).map(|v| pool.available_count(v)).unwrap_or(0);
+                            target_size.saturating_sub(ready)
                         };
-                        for _ in 0..need {
-                            match connect_ws(ep, &token).await {
-                                Ok((tx, rx)) => {
-                                    if weak.upgrade().is_none() {
-                                        return;
+                        if need > 0 {
+                            wants.push((ep.clone(), need));
+                        }
+                    }
+
+                    // 有界并行：并发度取池容量（每端点目标条数），不额外放大对 gate 的压力。
+                    // 每条拨号带上“批次内序号/批次长度”，建连落地时据此错开 born（见 stagger_offset）。
+                    let concurrency = pool.size.max(1);
+                    let mut dials: Vec<(String, usize, usize)> = Vec::new();
+                    for (ep, n) in &wants {
+                        for i in 0..*n {
+                            dials.push((ep.clone(), i, *n));
+                        }
+                    }
+                    let mut stream = futures_util::stream::iter(dials)
+                        .map(|(ep, idx, batch)| {
+                            let token = token.clone();
+                            async move {
+                                let r = connect_ws_with_timeout(&ep, &token, PREWARM_DIAL_TIMEOUT)
+                                    .await;
+                                (ep, idx, batch, r)
+                            }
+                        })
+                        .buffer_unordered(concurrency);
+
+                    let mut fuse_now = false;
+                    while let Some((ep, idx, batch, res)) = stream.next().await {
+                        match res {
+                            Ok((tx, rx)) => {
+                                if weak.upgrade().is_none() {
+                                    return;
+                                }
+                                consec_401 = 0;
+                                let fp8 = token_fp8_of(&token);
+                                let stagger = pool.stagger_offset(idx, batch);
+                                pool.idle
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .entry(ep)
+                                    .or_default()
+                                    .push(IdleSession {
+                                        tx,
+                                        rx,
+                                        born: tokio::time::Instant::now() - stagger,
+                                        token_fp8: fp8,
+                                    });
+                            }
+                            Err(e) => {
+                                let es = e.to_string();
+                                if es.contains(crate::proto::AUTH_401_MARKER) {
+                                    consec_401 += 1;
+                                    tracing::warn!("tunnel pool refill {ep} failed: {e} (consec_401={consec_401})");
+                                    if consec_401 >= 5 {
+                                        fuse_now = true;
                                     }
+                                } else {
                                     consec_401 = 0;
-                                    let fp8 = token_fp8_of(&token);
-                                    pool.idle
-                                        .lock()
-                                        .unwrap_or_else(|p| p.into_inner())
-                                        .entry(ep.clone())
-                                        .or_default()
-                                        .push(IdleSession {
-                                            tx,
-                                            rx,
-                                            born: tokio::time::Instant::now(),
-                                            token_fp8: fp8,
-                                        });
+                                    tracing::warn!("tunnel pool refill {ep} failed: {e}");
                                 }
-                                Err(e) => {
-                                    let es = e.to_string();
-                                    if es.contains(crate::proto::AUTH_401_MARKER) {
-                                        consec_401 += 1;
-                                        tracing::warn!("tunnel pool refill {ep} failed: {e} (consec_401={consec_401})");
-                                        if consec_401 >= 5 {
-                                            pool.fused401.fetch_add(1, Ordering::Relaxed);
-                                            tracing::warn!("tunnel pool refill {ep} fused by 401 x{consec_401}: pause 60s");
-                                            // 熔断等待 60s：只听 watch 变化（token/端点轮换）提前醒，
-                                            // 不听 checkout-notify——持续建连 miss 的唤醒不得击穿熔断，
-                                            // 否则回到 5s 级重试风暴（A-P0-5 / B-P1-3）。
-                                            // 熔断期间仍做 TTL 清理（过期会话不滞留），只是不新建连。
-                                            {
-                                                let mut g = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
-                                                for vec in g.values_mut() {
-                                                    vec.retain(|s| s.born.elapsed() < pool.idle_ttl);
-                                                }
-                                            }
-                                            tokio::select! {
-                                                _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-                                                _ = async {
-                                                    let mut rx = pool.tunnel_watch.lock().await;
-                                                    let _ = rx.changed().await;
-                                                } => {}
-                                            }
-                                            consec_401 = 0;
-                                        }
-                                    } else {
-                                        consec_401 = 0;
-                                        tracing::warn!("tunnel pool refill {ep} failed: {e}");
-                                    }
-                                    healthy = false;
-                                    break;
-                                }
+                                healthy = false;
                             }
                         }
+                    }
+                    drop(stream);
+
+                    if fuse_now {
+                        pool.fused401.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            "tunnel pool refill fused by 401 x{consec_401}: pause 60s"
+                        );
+                        // 熔断等待 60s：只听 watch 变化（token/端点轮换）提前醒，
+                        // 不听 checkout-notify——持续建连 miss 的唤醒不得击穿熔断，
+                        // 否则回到 5s 级重试风暴（A-P0-5 / B-P1-3）。
+                        // 熔断期间仍做 TTL 清理（过期会话不滞留），只是不新建连。
+                        {
+                            let mut g = pool.idle.lock().unwrap_or_else(|p| p.into_inner());
+                            for vec in g.values_mut() {
+                                vec.retain(|s| s.born.elapsed() < pool.idle_ttl);
+                            }
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+                            _ = async {
+                                let mut rx = pool.tunnel_watch.lock().await;
+                                let _ = rx.changed().await;
+                            } => {}
+                        }
+                        consec_401 = 0;
                     }
 
                     let wait = if healthy { pool.refill_interval } else { pool.refill_backoff };
