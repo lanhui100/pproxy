@@ -872,10 +872,20 @@ fn run(cli: Cli) -> Result<i32, RunError> {
         .clone()
         .or_else(|| cfg.data_plane.clone().filter(|s| !s.is_empty()))
         .or_else(|| config::derive_data_plane(&cfg).ok());
-    // doctor 第 5 段 CONNECT 探针目标：仅显式 --data-plane（本地自检 → 本机网关，
-    // spec §3.7）；cfg.data_plane 是远程 tunnel gate（CF worker 路径），对裸 CONNECT
-    // 永不回 200，不得传入探针段（第 4 段数据面抽样仍用 data_plane_base）。
-    let explicit_data_plane: Option<String> = cli.data_plane.clone();
+    // doctor 第 5 段 CONNECT 探针目标：优先命令行 --data-plane；
+    // 若未显式指定，但 cfg.data_plane 为有效且非占位符的本地回环地址（如 http://127.0.0.1:8899），
+    // 亦可安全作为探针目标；远程 tunnel gate（如 edge.example.com）则保留 None，留给 doctor 内部推导。
+    let explicit_data_plane: Option<String> = cli
+        .data_plane
+        .clone()
+        .or_else(|| {
+            cfg.data_plane.clone().filter(|s| {
+                let trimmed = s.trim();
+                !trimmed.is_empty()
+                    && !trimmed.contains("example.com")
+                    && (trimmed.contains("127.0.0.1") || trimmed.contains("localhost") || trimmed.contains("[::1]"))
+            })
+        });
 
     // cmd/* 层错误统一为 Msg 类别（退出码 1）；本地配置错误只可能出自 load()
     let dispatched: Result<i32, String> = match &cli.command {

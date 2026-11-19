@@ -266,7 +266,49 @@ fn tunnel_probe(data_plane: &Option<String>, host: &str) -> TunnelProbeResult {
 
     let status = status_line.split_whitespace().nth(1).and_then(|s| s.parse::<u16>().ok());
     let sl = status_line.trim();
-    classify_probe_result(status, &headers, sl)
+    let result = classify_probe_result(status, &headers, sl);
+
+    // 回环免密容错（S-P2-数据面）：
+    // 若推导目标为非回环（例如从 Tailscale 管理面 base 推导得到的非回环 IP），
+    // 服务端按安全设计严禁非回环免密 CONNECT，因而会返回 407。
+    // 此时若本机 127.0.0.1:8899 正常监听且通过，则采纳本机回环的自检结果。
+    if status == Some(407) && !sock_addr.ip().is_loopback() {
+        let loopback: std::net::SocketAddr = "127.0.0.1:8899".parse().unwrap();
+        if let Ok(mut loop_stream) = TcpStream::connect_timeout(&loopback, Duration::from_millis(500)) {
+            loop_stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            loop_stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+            if loop_stream.write_all(req.as_bytes()).is_ok() {
+                let mut loop_reader = BufReader::new(&loop_stream);
+                let mut loop_status_line = String::new();
+                if loop_reader.read_line(&mut loop_status_line).is_ok() {
+                    let mut loop_headers = String::new();
+                    loop {
+                        let mut line = String::new();
+                        match loop_reader.read_line(&mut line) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                if line.trim().is_empty() {
+                                    break;
+                                }
+                                loop_headers.push_str(&line);
+                            }
+                        }
+                    }
+                    let loop_status = loop_status_line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|s| s.parse::<u16>().ok());
+                    let loop_sl = loop_status_line.trim();
+                    let loop_res = classify_probe_result(loop_status, &loop_headers, loop_sl);
+                    if matches!(loop_res, TunnelProbeResult::Pass) {
+                        return loop_res;
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// 纯函数：将 CONNECT 探针响应（状态码 + x-pproxy-reason 响应头）映射为结果。
