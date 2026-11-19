@@ -34,6 +34,7 @@ pub struct ForwardRequest {
 impl EdgeClient {
     pub fn new(worker_url: &str, secret: &str) -> anyhow::Result<Self> {
         let http = Client::builder()
+            .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED))
             .connect_timeout(std::time::Duration::from_secs(5))
             .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
             .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
@@ -169,3 +170,33 @@ impl EdgeClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_client_builds_with_ipv4_local_address() {
+        let client = EdgeClient::new("https://edge.example.com", "test-secret");
+        assert!(client.is_ok(), "EdgeClient 初始化失败: {:?}", client.err());
+        let client = client.unwrap();
+        assert_eq!(client.worker_url, "https://edge.example.com");
+        assert_eq!(client.secret, "test-secret");
+    }
+
+    #[test]
+    fn sanitize_headers_strips_hop_by_hop() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "example.com".parse().unwrap());
+        headers.insert("connection", "keep-alive".parse().unwrap());
+        headers.insert("x-custom-header", "custom-value".parse().unwrap());
+
+        let sanitized = EdgeClient::sanitize_headers(&headers);
+        assert!(!sanitized.contains_key("connection"));
+        assert_eq!(
+            sanitized.get("x-custom-header").and_then(|v| v.to_str().ok()),
+            Some("custom-value")
+        );
+    }
+}
+
