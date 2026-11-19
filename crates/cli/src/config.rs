@@ -254,10 +254,12 @@ pub(crate) fn redact(token: &str) -> String {
 }
 
 /// data_plane 推导（M2 §3）：显式配置优先；否则 server 的 scheme+host、端口换 8899。
+/// 若显式配置包含开源占位符（如 example.com），自动忽略并回退推导，避免模板污染探测。
 pub fn derive_data_plane(cfg: &PonyConfig) -> Result<String, ConfigError> {
     if let Some(dp) = &cfg.data_plane {
-        if !dp.is_empty() {
-            return Ok(dp.clone());
+        let trimmed = dp.trim();
+        if !trimmed.is_empty() && !trimmed.contains("example.com") {
+            return Ok(trimmed.to_string());
         }
     }
     derive_from_server(&cfg.server).ok_or_else(|| ConfigError::Parse(format!(
@@ -368,6 +370,10 @@ mod tests {
         assert_eq!(
             derive_data_plane(&mk("http://127.0.0.1:8900", Some("http://10.0.0.5:9999"))).unwrap(),
             "http://10.0.0.5:9999"
+        );
+        assert_eq!(
+            derive_data_plane(&mk("http://127.0.0.1:8900", Some("https://edge.example.com"))).unwrap(),
+            "http://127.0.0.1:8899"
         );
         assert!(derive_data_plane(&mk("ftp://x", None)).is_err());
     }
