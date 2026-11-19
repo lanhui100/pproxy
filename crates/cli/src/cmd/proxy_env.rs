@@ -435,7 +435,7 @@ pub fn probe_connectivity(data_plane: &str) -> (Vec<(&'static str, Result<u128, 
 
         let client = match reqwest::blocking::Client::builder()
             .proxy(proxy)
-            .timeout(std::time::Duration::from_millis(2000))
+            .timeout(std::time::Duration::from_millis(5000))
             .build()
         {
             Ok(c) => c,
