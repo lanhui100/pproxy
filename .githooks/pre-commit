@@ -5,8 +5,9 @@ if [ -f "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" ]; then
 fi
 # <<< ponygo-gate: adr-verify v1 <<<
 # >>> backlog-gate: ledger v1 >>>
-# backlog 账本门（pg-backlog v2 随仓判据）：判定真源是 scripts/backlog.mjs（lint + doctor 跨归档对账），
-# 本块只做接线。迁移期语义由门自己承担：backlog/tasks.jsonl 未落盘 → 门内打印"跳过"并 exit 0。
+# backlog 账本门（pg-backlog v3 随仓判据）：判定真源是 scripts/backlog.mjs
+#（lint 记录/事件不变量 + doctor 跨批次租约对账 + verify-archive 归档封存），本块只做接线。
+# 语义由门自己承担：账本缺失 → 门内打印"跳过"并 exit 0；布局不一致（有 log 缺 MODEL）→ 拒绝。
 # 门缺失 = 判据不在场，无法判定即不冒充通过 → fail-closed 拒绝提交（不许静默放行）。
 if [ -f .meta/gates/backlog-gate.sh ]; then
   bash .meta/gates/backlog-gate.sh || exit 1

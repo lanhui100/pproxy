@@ -2,6 +2,9 @@
 
 Status: implemented
 
+> 账本载体部分已被 `implemented/process/2026-11-22-backlog-v3-batch-log.md` 取代（v2 单文件 →
+> v3 批次日志）；「编号 identity 保留」「实例门登记在实例文件」「evidence 必须可复跑」三条继续有效。
+
 ## Problem
 
 旧 `backlog/backlog.md` 是单文件 markdown 看板，24 个事项全靠标题里的手写标记
