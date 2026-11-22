@@ -1,31 +1,54 @@
 #!/usr/bin/env node
 /**
- * backlog —— 单一 JSONL 任务账本 CLI（v3）
+ * backlog —— 批次日志任务账本 CLI（v3 / write-per-batch, fold-on-read）
  *
- * 真源：<repo-root>/backlog/tasks.jsonl（一行一任务，git-tracked）
- * 归档：<repo-root>/backlog/archive/tasks-<YYYY>.jsonl（滚动切片，幂等追加）
- * 高水位：<repo-root>/backlog/.next-id（单调不减，永不回退）
+ * 为什么是 v3（2026-11-22 起）：v2 把全部任务写进同一个 `backlog/tasks.jsonl`，并用
+ * `backlog/.next-id` 做全局计数器。只要两个并发会话/PR 都记账，就必然在同一文件的行尾与
+ * 同一计数器上撞车（实证：#40 与 #41 的账本冲突）。v3 把「一次会话按发布面选出的任务批次」
+ * 做成账本的一等写入单元：
  *
- * 作用域：账本按「仓库」单例。解析根时使用 git common dir，使同一仓库的
- * 所有 worktree（含 detached / 临时 worktree）读写同一份账本，杜绝任务在不同
- * 工作树之间混淆。测试可用 PONY_BACKLOG_ROOT 覆盖。
+ *   写：`backlog/log/<批次>.jsonl`（只追加；不同会话 = 不同文件 ⇒ 合并零冲突）
+ *   读：把所有批次 + 归档批次按时间折叠（fold）出现行视图，不落盘
  *
- * 设计约束（来自三路对抗审查结论）：
- * - 校验只看记录不变量，不解析 git log（避免自锁与 fail-open）；
- * - done 只需 evidence + closed_at，不写入自指的 closing_commit；
- * - ID 由持久高水位分配：归档/删除都不会让编号复用；
- * - 归档追加幂等：同 id 已存在则跳过，重放安全；
- * - 只做整文件原子替换（tmp + rename），不做跨文件"原子剪切"承诺。
+ * 布局（git-tracked 除 .locks/.state 外）：
+ *   backlog/MODEL                              模型标记（内容 v3）
+ *   backlog/log/<batchId>.jsonl                活跃批次日志（本会话只写自己的文件）
+ *   backlog/archive/batches/<year>/<batchId>.jsonl  已归档批次（只读，按批封存）
+ *   backlog/archive/batches/<year>/manifest.sha256  归档清单（sha256 + 相对路径，追加）
+ *   backlog/archive/tasks-<YYYY>.jsonl         v2 遗留归档（只读，fold 时并入）
+ *   backlog/.locks/<ID>.lock                   任务租约（本地运行时，不入仓）
+ *   backlog/.state/batch                       当前工作区活动批次 id（本地运行时，不入仓）
+ *
+ * 事件（每行一个 JSON）：
+ *   batch.start  {batch_id, surface, release?, created_at, session_id?}
+ *   record       {at, task:<完整任务行>}
+ *   dedup        {at, id, context?}            同 fingerprint 去重命中
+ *   start        {at, id, owner, paths[], session_id?}
+ *   release      {at, id, owner?}
+ *   annotate     {at, id, description?, priority?}
+ *   resolve      {at, id, evidence}
+ *
+ * 根解析：默认取**当前 worktree 顶层**（不是 git common dir）——每个分支/工作树写自己的
+ * 批次日志并随 PR 提交；归档从各自检出树只读加载。`PONY_BACKLOG_ROOT` 可覆盖（测试/夹具）。
+ *
+ * 兼容：v2 仓不迁移也能继续用旧工具；本工具遇到 `tasks.jsonl` 且无 `MODEL` 时明确指向
+ * `scripts/backlog-migrate-v2-v3.mjs`，绝不静默猜模型。
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+export const MODEL = 'v3';
+export const MODEL_FILE = 'MODEL';
+export const BATCH_MODEL = 'backlog-v3';
 export const ID_RE = /^B\d{3,}$/;
+export const BATCH_ID_RE = /^\d{8}T\d{6}Z-[a-z0-9][a-z0-9-]{0,40}-[a-z0-9]{4}$/;
 export const CATEGORIES = ['Defect', 'Task', 'Debt'];
 export const PRIORITIES = ['P0', 'P1', 'P2', 'P3'];
 export const STATUSES = ['todo', 'in_progress', 'done'];
+const EVENT_KINDS = new Set(['batch.start', 'record', 'dedup', 'start', 'release', 'annotate', 'resolve']);
 const TOP_KEYS = new Set([
   'id', 'category', 'priority', 'status', 'title', 'description',
   'created_at', 'updated_at', 'owner', 'touched_paths', 'evidence',
@@ -35,24 +58,32 @@ const TOP_KEYS = new Set([
 const META_KEYS = new Set(['fingerprint', 'occurred_count', 'triage_context']);
 const MAX_CONTEXT_BYTES = 8 * 1024;
 const MAX_DESCRIPTION_CHARS = 2000;
+export const DEFAULT_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 
-/** 解析仓库根：优先环境变量，其次 git common dir 的父目录（跨 worktree 单例）。 */
+const SURFACE_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/** 解析账本根：默认当前 worktree 顶层；`PONY_BACKLOG_ROOT` 覆盖（夹具/测试）。 */
 export function resolveLedgerRoot(env = process.env, cwd = process.cwd()) {
   if (env.PONY_BACKLOG_ROOT) return path.resolve(env.PONY_BACKLOG_ROOT);
-  const commonDir = execFileSync('git', ['rev-parse', '--git-common-dir'], {
-    cwd, encoding: 'utf8'
-  }).trim();
-  const abs = path.isAbsolute(commonDir) ? commonDir : path.resolve(cwd, commonDir);
-  return path.dirname(abs);
+  const top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' }).trim();
+  return path.resolve(top);
 }
 
 export function ledgerPaths(root) {
+  const backlogDir = path.join(root, 'backlog');
   return {
     root,
-    tasks: path.join(root, 'backlog', 'tasks.jsonl'),
-    archiveDir: path.join(root, 'backlog', 'archive'),
-    nextId: path.join(root, 'backlog', '.next-id'),
-    locksDir: path.join(root, 'backlog', '.locks')
+    backlogDir,
+    model: path.join(backlogDir, MODEL_FILE),
+    logsDir: path.join(backlogDir, 'log'),
+    archiveDir: path.join(backlogDir, 'archive'),
+    archivedBatchesDir: path.join(backlogDir, 'archive', 'batches'),
+    locksDir: path.join(backlogDir, '.locks'),
+    stateDir: path.join(backlogDir, '.state'),
+    stateBatch: path.join(backlogDir, '.state', 'batch'),
+    // v2 遗留（只读）
+    legacyTasks: path.join(backlogDir, 'tasks.jsonl'),
+    legacyNextId: path.join(backlogDir, '.next-id')
   };
 }
 
@@ -67,6 +98,12 @@ function atomicWrite(file, content) {
     fs.closeSync(fd);
   }
   fs.renameSync(tmp, file);
+}
+
+/** 追加一行到批次日志（append-only；每行独立 JSON，不重写历史）。 */
+function appendLine(file, row) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, JSON.stringify(row) + '\n');
 }
 
 export function readJsonl(file) {
@@ -87,41 +124,347 @@ export function writeJsonl(file, rows) {
   atomicWrite(file, rows.map(row => JSON.stringify(row)).join('\n') + (rows.length ? '\n' : ''));
 }
 
-/** `.next-id` 语义：**下一个候选编号**（不是最后已用编号），保证删除归档也不会回退复用。 */
-export function readHighWater(paths) {
-  if (!fs.existsSync(paths.nextId)) return 0;
-  const raw = fs.readFileSync(paths.nextId, 'utf8').trim();
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+/** 模型判定：`v3` / `v2`（有 tasks.jsonl 无 MODEL）/ `null`（未启用账本）。 */
+export function readModel(paths) {
+  if (fs.existsSync(paths.model)) {
+    const value = fs.readFileSync(paths.model, 'utf8').trim();
+    return value || MODEL;
+  }
+  if (fs.existsSync(paths.legacyTasks)) return 'v2';
+  return null;
 }
 
-/** 单调推进高水位：把 `.next-id` 提升到 `usedId + 1`，永不回退。 */
-export function writeHighWater(paths, usedId) {
-  const used = Number.parseInt(String(usedId).replace(/^B/, ''), 10);
-  if (!Number.isFinite(used)) return;
-  const prev = readHighWater(paths);
-  const next = used + 1;
-  if (next > prev) atomicWrite(paths.nextId, `${next}\n`);
+function requireModel(paths, { write = false } = {}) {
+  const model = readModel(paths);
+  if (model === MODEL) return;
+  if (model === 'v2') {
+    throw new Error(
+      '检测到 v2 单文件账本（backlog/tasks.jsonl）。请先运行 `node scripts/backlog-migrate-v2-v3.mjs` 完成迁移' +
+      (write ? '（写操作已拒绝）' : '')
+    );
+  }
+  throw new Error('账本未启用（缺 backlog/MODEL）；新仓请先执行迁移脚本或按文档创建 v3 布局');
 }
 
-export function archiveFileFor(paths, year = new Date().getUTCFullYear()) {
-  return path.join(paths.archiveDir, `tasks-${year}.jsonl`);
+// ───────────────────────────── 批次 ─────────────────────────────
+
+export function sanitizeSurface(raw, fallback = 'general') {
+  const value = String(raw ?? '').trim().toLowerCase();
+  if (!value) return fallback;
+  const cleaned = value.replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  if (!cleaned) return fallback;
+  return cleaned.slice(0, 40);
 }
 
-export function readArchives(paths) {
-  if (!fs.existsSync(paths.archiveDir)) return [];
-  return fs.readdirSync(paths.archiveDir)
-    .filter(name => /^tasks-\d{4}\.jsonl$/.test(name))
+function batchTimestamp(now = Date.now()) {
+  return new Date(now).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+}
+
+function randomSuffix() {
+  return crypto.randomBytes(2).toString('hex').slice(0, 4);
+}
+
+export function newBatchId({ surface = 'general', now = Date.now() } = {}) {
+  const s = sanitizeSurface(surface);
+  return `${batchTimestamp(now)}-${s}-${randomSuffix()}`;
+}
+
+export function batchFile(paths, batchId) {
+  return path.join(paths.logsDir, `${batchId}.jsonl`);
+}
+
+function archivedBatchFile(paths, year, batchId) {
+  return path.join(paths.archivedBatchesDir, String(year), `${batchId}.jsonl`);
+}
+
+export function readCurrentBatchId(paths) {
+  if (!fs.existsSync(paths.stateBatch)) return null;
+  const value = fs.readFileSync(paths.stateBatch, 'utf8').trim();
+  return value || null;
+}
+
+function setCurrentBatchId(paths, batchId) {
+  atomicWrite(paths.stateBatch, `${batchId}\n`);
+}
+
+/** 打开（或按需创建）本工作区的活动批次；写命令共用同一批次文件。 */
+export function ensureBatch(paths, { surface, release, sessionId } = {}) {
+  const current = readCurrentBatchId(paths);
+  if (current) {
+    const file = batchFile(paths, current);
+    if (fs.existsSync(file)) return { batchId: current, file, created: false };
+  }
+  const batchId = newBatchId({ surface });
+  const file = batchFile(paths, batchId);
+  appendLine(file, {
+    kind: 'batch.start',
+    model: BATCH_MODEL,
+    batch_id: batchId,
+    surface: sanitizeSurface(surface),
+    ...(release ? { release } : {}),
+    ...(sessionId ? { session_id: sessionId } : {}),
+    created_at: new Date().toISOString()
+  });
+  setCurrentBatchId(paths, batchId);
+  return { batchId, file, created: true };
+}
+
+function currentSessionId() {
+  return process.env.DSH_SESSION_ID ?? process.env.PONY_BACKLOG_SESSION ?? null;
+}
+
+/** 向活动批次追加一条事件（自动创建批次）。 */
+export function appendEvent(paths, event, options = {}) {
+  const { batchId, file } = ensureBatch(paths, {
+    surface: options.surface,
+    release: options.release,
+    sessionId: currentSessionId()
+  });
+  appendLine(file, event);
+  return { batchId, file };
+}
+
+// ───────────────────────────── 读模型：fold ─────────────────────────────
+
+function listFiles(dir, pattern) {
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter(name => pattern.test(name))
     .sort()
-    .flatMap(name => readJsonl(path.join(paths.archiveDir, name)));
+    .map(name => path.join(dir, name));
 }
 
-/** 单条记录校验：返回错误数组（空数组 = 合法）。 */
-export function validateRecord(row, { archived = false } = {}) {
+/** 解析一个批次文件：`{ batchId, meta, events, problems, file, archived }`。 */
+function parseBatch(file, { archived = false } = {}) {
+  const problems = [];
+  const rows = readJsonl(file);
+  const stem = path.basename(file, '.jsonl');
+  const first = rows[0];
+  if (!first || first.kind !== 'batch.start') {
+    problems.push(`批次 ${stem}: 首行必须是 batch.start`);
+    return { batchId: stem, meta: null, events: [], problems, file, archived };
+  }
+  if (first.batch_id !== stem) problems.push(`批次 ${stem}: batch.start.batch_id=${first.batch_id} 与文件名不一致`);
+  if (first.model !== BATCH_MODEL) problems.push(`批次 ${stem}: batch.start.model 必须是 ${BATCH_MODEL}`);
+  if (!SURFACE_RE.test(String(first.surface ?? ''))) problems.push(`批次 ${stem}: surface 非法（${first.surface}）`);
+  if (typeof first.created_at !== 'string' || Number.isNaN(Date.parse(first.created_at))) {
+    problems.push(`批次 ${stem}: batch.start.created_at 必须是 ISO 时间`);
+  }
+  let lastAt = 0;
+  const events = rows.slice(1);
+  for (const [index, event] of events.entries()) {
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      problems.push(`批次 ${stem}:${index + 2} 事件必须是对象`);
+      continue;
+    }
+    if (!EVENT_KINDS.has(event.kind)) problems.push(`批次 ${stem}:${index + 2} 未知事件 \`${event.kind}\``);
+    if (typeof event.at === 'string') {
+      const at = Date.parse(event.at);
+      if (Number.isNaN(at)) problems.push(`批次 ${stem}:${index + 2} at 非法时间`);
+      else if (at < lastAt) problems.push(`批次 ${stem}:${index + 2} 事件时间倒退`);
+      else lastAt = at;
+    } else {
+      problems.push(`批次 ${stem}:${index + 2} 事件缺 at（ISO 时间）`);
+    }
+  }
+  return { batchId: stem, meta: first, events, problems, file, archived };
+}
+
+function collectBatches(paths) {
+  const active = listFiles(paths.logsDir, /\.jsonl$/).map(file => parseBatch(file));
+  const archived = [];
+  if (fs.existsSync(paths.archivedBatchesDir)) {
+    for (const year of fs.readdirSync(paths.archivedBatchesDir).sort()) {
+      const dir = path.join(paths.archivedBatchesDir, year);
+      if (!fs.statSync(dir).isDirectory()) continue;
+      for (const file of listFiles(dir, /\.jsonl$/)) archived.push(parseBatch(file, { archived: true }));
+    }
+  }
+  return [...active, ...archived];
+}
+
+function legacyArchiveRows(paths) {
+  return listFiles(paths.archiveDir, /^tasks-\d{4}\.jsonl$/).flatMap(file => readJsonl(file));
+}
+
+function applyEvent(state, event, batch) {
+  const problems = [];
+  const at = event.at;
+  switch (event.kind) {
+    case 'record': {
+      const task = event.task;
+      if (!task || typeof task !== 'object') {
+        problems.push(`批次 ${batch.batchId} record 缺 task`);
+        break;
+      }
+      if (state.rows.has(task.id)) {
+        problems.push(`重复 record：${task.id}（已出现于批次 ${state.rows.get(task.id)._batch}）`);
+      } else {
+        state.rows.set(task.id, {
+          ...JSON.parse(JSON.stringify(task)),
+          _batch: batch.batchId,
+          _surface: batch.meta.surface,
+          _recorded_at: at
+        });
+      }
+      break;
+    }
+    case 'dedup': {
+      const row = state.rows.get(event.id);
+      if (!row) { problems.push(`dedup 指向不存在的任务：${event.id}`); break; }
+      row.metadata = row.metadata ?? { fingerprint: 'unknown', occurred_count: 1 };
+      row.metadata.occurred_count = (row.metadata.occurred_count ?? 1) + 1;
+      row.updated_at = at;
+      if (event.context) row.metadata.triage_context = event.context;
+      break;
+    }
+    case 'start': {
+      const row = state.rows.get(event.id);
+      if (!row) { problems.push(`start 指向不存在的任务：${event.id}`); break; }
+      if (row.status === 'done') { problems.push(`已闭环任务不得再次 start：${event.id}`); break; }
+      row.status = 'in_progress';
+      row.owner = event.owner;
+      row.touched_paths = Array.isArray(event.paths) ? event.paths : [];
+      row.leased_at = row.leased_at ?? at;
+      row.heartbeat_at = at;
+      row.updated_at = at;
+      break;
+    }
+    case 'release': {
+      const row = state.rows.get(event.id);
+      if (!row) { problems.push(`release 指向不存在的任务：${event.id}`); break; }
+      if (row.status === 'done') { problems.push(`已闭环任务不得 release：${event.id}`); break; }
+      row.status = 'todo';
+      row.updated_at = at;
+      break;
+    }
+    case 'annotate': {
+      const row = state.rows.get(event.id);
+      if (!row) { problems.push(`annotate 指向不存在的任务：${event.id}`); break; }
+      if (event.description !== undefined) row.description = event.description;
+      if (event.priority !== undefined) row.priority = event.priority;
+      row.updated_at = at;
+      break;
+    }
+    case 'resolve': {
+      const row = state.rows.get(event.id);
+      if (!row) { problems.push(`resolve 指向不存在的任务：${event.id}`); break; }
+      if (row.status === 'done') { problems.push(`重复 resolve：${event.id}`); break; }
+      row.status = 'done';
+      row.evidence = event.evidence;
+      row.closed_at = at;
+      row.archived_at = at;
+      row.updated_at = at;
+      break;
+    }
+    default:
+      break;
+  }
+  return problems;
+}
+
+/**
+ * 折叠出当前视图（模型无关入口）：v3 → 批次日志；v2 → 单文件只读视图。
+ *
+ * 返回 `{ rows: Map(id → row), active: [...], done: [...], batches: [...], problems, notes, counts, model }`。
+ * v3 排序口径：批次 `created_at` 升序，同刻按 batchId 字典序；批内按行序。
+ */
+export function fold(paths) {
+  const model = readModel(paths);
+  if (model === 'v2') return foldV2(paths);
+  return foldV3(paths);
+}
+
+/** v2 单文件账本 → 只读视图（迁移前/迁移对账用；不做任何写入）。 */
+export function foldV2(paths) {
+  const problems = [];
+  const active = readJsonl(paths.legacyTasks).map(row => ({ ...row, _batch: 'v2-tasks', _surface: 'legacy-v2' }));
+  const done = legacyArchiveRows(paths).map(row => ({ ...row, _batch: 'v2-archive', _surface: 'legacy-v2' }));
+  const rows = new Map();
+  for (const row of [...active, ...done]) {
+    if (!row || typeof row.id !== 'string') continue;
+    if (rows.has(row.id)) problems.push(`ID 重复：${row.id}（同时出现于活跃池/归档）`);
+    rows.set(row.id, row);
+  }
+  for (const row of active) {
+    if (row.status === 'done') problems.push(`${row.id} 活跃池不得残留 done（应走 resolve 归档）`);
+  }
+  return {
+    rows,
+    active,
+    done,
+    batches: [],
+    problems,
+    notes: [],
+    model: 'v2',
+    counts: { active: active.length, done: done.length, batches: 0, archivedBatches: 0, legacyArchived: done.length }
+  };
+}
+
+/** v3 批次日志 → 折叠视图。 */
+export function foldV3(paths) {
+  const problems = [];
+  const notes = [];
+  const batches = collectBatches(paths);
+  for (const batch of batches) problems.push(...batch.problems);
+  batches.sort((a, b) => {
+    const at = String(a.meta?.created_at ?? '').localeCompare(String(b.meta?.created_at ?? ''));
+    return at !== 0 ? at : a.batchId.localeCompare(b.batchId);
+  });
+
+  const rows = new Map();
+  // v2 遗留归档：只读历史，先入表（done 终态）。
+  for (const row of legacyArchiveRows(paths)) {
+    if (!row || typeof row.id !== 'string') continue;
+    rows.set(row.id, { ...row, _batch: 'legacy-archive', _surface: 'legacy' });
+  }
+  const state = { rows };
+  for (const batch of batches) {
+    if (!batch.meta) continue;
+    for (const event of batch.events) {
+      problems.push(...applyEvent(state, event, batch));
+    }
+  }
+  const active = [...rows.values()].filter(row => row.status !== 'done');
+  const done = [...rows.values()].filter(row => row.status === 'done');
+  for (const row of active) {
+    for (const e of validateTask(row)) problems.push(`${row.id} ${e}`);
+  }
+  for (const batch of batches) {
+    const touched = new Set();
+    for (const event of batch.events) {
+      if (event.id) touched.add(event.id);
+      if (event.kind === 'record' && event.task?.id) touched.add(event.task.id);
+    }
+    batch.touched = [...touched];
+    batch.all_done = touched.size > 0 && [...touched].every(id => rows.get(id)?.status === 'done');
+  }
+  return {
+    rows,
+    active,
+    done,
+    batches,
+    problems,
+    notes,
+    model: 'v3',
+    counts: {
+      active: active.length,
+      done: done.length,
+      batches: batches.filter(b => !b.archived).length,
+      archivedBatches: batches.filter(b => b.archived).length,
+      legacyArchived: legacyArchiveRows(paths).length
+    }
+  };
+}
+
+// ───────────────────────────── 记录校验 ─────────────────────────────
+
+/** 单条任务校验：返回错误数组（空数组 = 合法）。字段口径与 v2 完全一致。 */
+export function validateTask(row, { archived = false } = {}) {
   const errors = [];
-  const at = row && typeof row === 'object' ? 'record' : 'record';
-  if (!row || typeof row !== 'object' || Array.isArray(row)) return [`${at}: 必须是对象`];
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return ['必须是对象'];
   for (const key of Object.keys(row)) {
+    if (key.startsWith('_')) continue; // fold 附加标记
     if (!TOP_KEYS.has(key)) errors.push(`未知字段 \`${key}\``);
   }
   if (typeof row.id !== 'string' || !ID_RE.test(row.id)) errors.push(`id 必须匹配 ${ID_RE}`);
@@ -130,7 +473,7 @@ export function validateRecord(row, { archived = false } = {}) {
   if (!STATUSES.includes(row.status)) errors.push(`status 必须是 ${STATUSES.join('|')}`);
   if (typeof row.title !== 'string' || !row.title.trim()) errors.push('title 必填');
   if (typeof row.created_at !== 'string' || Number.isNaN(Date.parse(row.created_at))) {
-    errors.push('created_at 必填且为 ISO 时间（顶层字段）');
+    errors.push('created_at 必填且为 ISO 时间');
   }
   if (!row.metadata || typeof row.metadata !== 'object') {
     errors.push('metadata 必填（含 fingerprint）');
@@ -167,96 +510,7 @@ export function validateRecord(row, { archived = false } = {}) {
   return errors;
 }
 
-export function lintAll(paths) {
-  const problems = [];
-  const active = readJsonl(paths.tasks);
-  const archived = readArchives(paths);
-  for (const [i, row] of active.entries()) {
-    for (const e of validateRecord(row)) problems.push(`tasks.jsonl:${i + 1} (${row?.id ?? '?'}) ${e}`);
-    if (row.status === 'done') {
-      problems.push(`tasks.jsonl:${i + 1} (${row.id}) 活跃池不得残留 done（应走 resolve 归档）`);
-    }
-  }
-  for (const row of archived) {
-    for (const e of validateRecord(row, { archived: true })) problems.push(`archive/${row?.id ?? '?'} ${e}`);
-  }
-  const seen = new Map();
-  for (const row of [...active, ...archived]) {
-    if (!row || typeof row.id !== 'string') continue;
-    if (seen.has(row.id)) {
-      problems.push(`ID 重复：${row.id}（同时出现于活跃池/归档，需人工裁决）`);
-    } else {
-      seen.set(row.id, true);
-    }
-  }
-  const leaseProblems = leaseConsistency(paths, active);
-  problems.push(...leaseProblems.problems);
-  const nextId = readHighWater(paths);
-  if (nextId > 0) {
-    for (const row of [...active, ...archived]) {
-      const n = Number.parseInt(String(row?.id ?? '').replace(/^B/, ''), 10);
-      if (Number.isFinite(n) && n >= nextId) {
-        problems.push(`ID ${row.id} 越过高水位（下一个候选 B${String(nextId).padStart(3, '0')}），疑似手工改号`);
-      }
-    }
-  }
-  return {
-    ok: problems.length === 0,
-    problems,
-    notes: leaseProblems.notes,
-    counts: { active: active.length, archived: archived.length }
-  };
-}
-
-/** 分配下一个 ID：持久高水位与扫描值取大，保证单调不减。 */
-function allocateId(paths) {
-  const rows = [...readJsonl(paths.tasks), ...readArchives(paths)];
-  const maxSeen = rows.reduce((max, row) => {
-    const n = Number.parseInt(String(row?.id ?? '').replace(/^B/, ''), 10);
-    return Number.isFinite(n) ? Math.max(max, n) : max;
-  }, 0);
-  const candidate = Math.max(readHighWater(paths), maxSeen + 1, 56);
-  atomicWrite(paths.nextId, `${candidate + 1}\n`);
-  return `B${String(candidate).padStart(3, '0')}`;
-}
-
-export function record(paths, { category, priority = 'P1', title, description, fingerprint, context, sessionId }) {
-  if (!CATEGORIES.includes(category)) throw new Error(`category 必须是 ${CATEGORIES.join('|')}`);
-  if (!PRIORITIES.includes(priority)) throw new Error(`priority 必须是 ${PRIORITIES.join('|')}`);
-  if (!title || !title.trim()) throw new Error('title 必填');
-  if (!fingerprint || !fingerprint.trim()) throw new Error('fingerprint 必填（用于去重）');
-  const rows = readJsonl(paths.tasks);
-  const now = new Date().toISOString();
-  const existing = rows.find(row =>
-    row.metadata?.fingerprint === fingerprint && (row.status === 'todo' || row.status === 'in_progress'));
-  if (existing) {
-    existing.metadata.occurred_count = (existing.metadata.occurred_count ?? 1) + 1;
-    existing.updated_at = now;
-    if (context) existing.metadata.triage_context = context;
-    writeJsonl(paths.tasks, rows);
-    return { type: 'dedup', row: existing };
-  }
-  const row = {
-    id: allocateId(paths),
-    category,
-    priority,
-    status: 'todo',
-    title: title.trim(),
-    created_at: now,
-    metadata: { fingerprint, occurred_count: 1, ...(context ? { triage_context: context } : {}) },
-    ...(description ? { description } : {}),
-    ...(sessionId ? { source_ref: sessionId } : {})
-  };
-  const errors = validateRecord(row);
-  if (errors.length) throw new Error(`记录非法：${errors.join('；')}`);
-  rows.push(row);
-  writeJsonl(paths.tasks, rows);
-  return { type: 'created', row };
-}
-
-
-/** 任务级租约：同一任务同时只允许一个会话持有；不同任务可并行。 */
-export const DEFAULT_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
+// ───────────────────────────── 租约（与 v2 同语义） ─────────────────────────────
 
 function lockFile(paths, id) {
   return path.join(paths.locksDir, `${id}.lock`);
@@ -272,63 +526,10 @@ export function readLease(paths, id) {
   }
 }
 
-/**
- * 本工作区是否在跟踪租约。
- *
- * `backlog/.locks/` 是**本地运行时目录**（不入仓，见 .gitignore）：租约内容含
- * pid / session_id / 心跳时间戳，入仓只会带来每次 start 的 diff 噪音与并发冲突，
- * 因此干净克隆、CI、他人工作区里必然不存在。
- *
- * 只有它存在时，「记录为 in_progress 却缺锁文件」才可能是本地手改状态；
- * 不存在时该信号在干净环境恒为真，会让 governance lint 在任何克隆上恒红（B069）。
- */
 export function isLeaseTrackingActive(paths) {
   return fs.existsSync(paths.locksDir);
 }
 
-/**
- * 记录状态与本地租约的一致性校验。
- *
- * 返回 `{ problems, notes }`：`problems` 阻断门禁，`notes` 只提示不阻断。
- * owner 冲突是硬错（两侧数据都在手，可比对）；锁文件缺失在无租约跟踪的工作区
- * 只能是提示——否则干净克隆恒红。
- */
-export function leaseConsistency(paths, rows) {
-  const problems = [];
-  const notes = [];
-  const tracking = isLeaseTrackingActive(paths);
-  for (const row of rows) {
-    const lease = readLease(paths, row.id);
-    if (row.status !== 'in_progress') {
-      // 反向缺口（D1/D2）：锁还在、记录却不是 in_progress——手改状态降级，或 start 取锁后 update 失败。
-      // 只在本工作区确有租约目录时判硬错；干净克隆 .locks/ 不存在，lease 恒为 null。
-      if (lease && tracking) {
-        problems.push(`tasks.jsonl (${row.id}) 存在租约锁但记录状态为 ${row.status}（疑似手改状态或 start 中断；确认后 reap --id ${row.id} --minutes 0 只清该锁，或手动删除 .locks/${row.id}.lock）`);
-      }
-      continue;
-    }
-    if (lease) {
-      if (row.owner && lease.owner !== row.owner) {
-        problems.push(`tasks.jsonl (${row.id}) 租约与记录 owner 冲突：记录=${row.owner} 锁=${lease.owner}`);
-      }
-      continue;
-    }
-    if (!row.heartbeat_at) continue;
-    const beat = Date.parse(row.heartbeat_at);
-    if (!Number.isFinite(beat) || Date.now() - beat >= DEFAULT_LEASE_TTL_MS) continue;
-    if (tracking) {
-      problems.push(`tasks.jsonl (${row.id}) 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
-    } else {
-      notes.push(`tasks.jsonl (${row.id}) in_progress 无本地租约目录（干净克隆/CI 常态：租约不入仓，跳过锁文件校验）`);
-    }
-  }
-  return { problems, notes };
-}
-
-/**
- * 获取任务租约（O_EXCL 原子创建）。
- * 已有他人租约且未过期 → 抛错；同 owner 重入 → 刷新心跳。
- */
 export function acquireLease(paths, id, { owner, sessionId, ttlMs = DEFAULT_LEASE_TTL_MS, now = Date.now() } = {}) {
   if (!owner) throw new Error('租约必须提供 owner（会话标识）');
   const existing = readLease(paths, id);
@@ -380,7 +581,6 @@ export function releaseLease(paths, id, { owner } = {}) {
   return { released: true, previous: cur };
 }
 
-/** 回收超龄租约（会话崩溃/无心跳）：返回被回收的任务 id 列表。`onlyId` 限定单个任务（并发 lane 安全）。 */
 export function reapStaleLeases(paths, { maxAgeMs = DEFAULT_LEASE_TTL_MS, now = Date.now(), dryRun = false, onlyId } = {}) {
   if (!fs.existsSync(paths.locksDir)) return [];
   const reaped = [];
@@ -398,74 +598,34 @@ export function reapStaleLeases(paths, { maxAgeMs = DEFAULT_LEASE_TTL_MS, now = 
   return reaped;
 }
 
-const TRANSITIONS = new Map([
-  ['todo', new Set(['in_progress'])],
-  ['in_progress', new Set(['in_progress', 'todo'])]
-]);
-
-export function update(paths, id, { status, owner, touchedPaths }) {
-  const rows = readJsonl(paths.tasks);
-  const row = rows.find(r => r.id === id);
-  if (!row) throw new Error(`未找到 ${id}`);
-  if (status === 'done') throw new Error('done 必须走 resolve（需 evidence 并归档）');
-  if (status && !TRANSITIONS.get(row.status)?.has(status)) {
-    throw new Error(`非法跃迁 ${row.status} → ${status}`);
+/** 记录状态与本地租约的一致性；口径与 v2 一致（干净克隆只提示，不罚）。 */
+export function leaseConsistency(paths, rows) {
+  const problems = [];
+  const notes = [];
+  const tracking = isLeaseTrackingActive(paths);
+  for (const row of rows) {
+    const lease = readLease(paths, row.id);
+    if (row.status !== 'in_progress') {
+      if (lease && tracking) {
+        problems.push(`${row.id} 存在租约锁但记录状态为 ${row.status}（疑似手改状态或 start 中断；确认后 reap --id ${row.id} --minutes 0 只清该锁）`);
+      }
+      continue;
+    }
+    if (lease) {
+      if (row.owner && lease.owner !== row.owner) {
+        problems.push(`${row.id} 租约与记录 owner 冲突：记录=${row.owner} 锁=${lease.owner}`);
+      }
+      continue;
+    }
+    if (tracking) {
+      problems.push(`${row.id} 记录为 in_progress 但缺少租约锁文件（疑似手动改状态）`);
+    } else {
+      notes.push(`${row.id} in_progress 无本地租约目录（干净克隆/CI 常态：租约不入仓，跳过锁文件校验）`);
+    }
   }
-  if (status) row.status = status;
-  if (status === 'in_progress') {
-    if (!owner) throw new Error('进入 in_progress 必须提供 owner');
-    if (!touchedPaths?.length) throw new Error('进入 in_progress 必须提供 touched_paths');
-    row.owner = owner;
-    row.touched_paths = [...new Set(touchedPaths)];
-    row.leased_at = row.leased_at ?? new Date().toISOString();
-    row.heartbeat_at = new Date().toISOString();
-  }
-  row.updated_at = new Date().toISOString();
-  const errors = validateRecord(row);
-  if (errors.length) throw new Error(`记录非法：${errors.join('；')}`);
-  writeJsonl(paths.tasks, rows);
-  return row;
+  return { problems, notes };
 }
 
-export function resolve(paths, id, evidence) {
-  if (!evidence || !evidence.trim()) throw new Error('resolve 必须提供 evidence');
-  const rows = readJsonl(paths.tasks);
-  const index = rows.findIndex(r => r.id === id);
-  if (index === -1) throw new Error(`未找到 ${id}`);
-  const row = { ...rows[index], status: 'done', evidence: evidence.trim(), closed_at: new Date().toISOString() };
-  row.updated_at = row.closed_at;
-  row.archived_at = row.closed_at;
-  const errors = validateRecord(row);
-  if (errors.length) throw new Error(`记录非法：${errors.join('；')}`);
-  // 先写归档（幂等）再删活跃：重放安全，断电最坏是「双份」，doctor 可发现。
-  const archiveFile = archiveFileFor(paths, Number(row.closed_at.slice(0, 4)));
-  const archived = readJsonl(archiveFile);
-  if (!archived.some(item => item.id === id)) {
-    archived.push(row);
-    writeJsonl(archiveFile, archived);
-  }
-  rows.splice(index, 1);
-  writeJsonl(paths.tasks, rows);
-  // 闭环同样推进高水位：`.next-id` 是「下一个候选编号」，若闭环最高编号的任务后不回写，
-  // `.next-id` 会落后于「活跃∪归档」的最大编号，`lint` 随即判「ID 越过高水位（疑似手工改号）」
-  // ——governance CI 因此在每次「闭环最高编号任务且未再开新任务」后恒红（实测 B066 案例）。
-  writeHighWater(paths, id);
-  // 闭环是终态，租约随之失效（B081）：resolve 只归档不清锁，会让 `.locks/` 里的
-  // `<ID>.lock` 一直留到 TTL 被 reap 回收——期间该 ID 对其它会话是「被占用」的假信号，
-  // 且 `isLeaseTrackingActive` 因目录常驻而永久走 lint 严格支。
-  // 释放排在归档落盘之后：反过来（先清锁再归档）一旦中途失败，会留下「仍在活跃池却无人持锁」
-  // 的伪手改态；当前顺序最坏只是多留一个可 reap 的锁，方向安全。
-  const lease = releaseLease(paths, id);
-  return { row, archiveFile, lease };
-}
-
-/**
- * 残留锁判定：`.locks/<ID>.lock` 存在、但活跃池已无该 id（B081）。
- *
- * 正常路径下 `resolve` 归档时会即时释放租约，能走到这里的只剩「会话在归档后崩溃」或
- * 「本单修复前的历史遗留」。残留锁要等 TTL（默认 2h）才被 reap，期间任何会话复用该 id
- * 都会撞锁，而空目录 git 不可见 ⇒ 只有 doctor 能提前发现。
- */
 function orphanLeaseIds(paths, activeRows) {
   if (!fs.existsSync(paths.locksDir)) return [];
   const live = new Set(activeRows.map(row => row.id));
@@ -475,90 +635,300 @@ function orphanLeaseIds(paths, activeRows) {
     .filter(id => !live.has(id));
 }
 
+// ───────────────────────────── 写命令 ─────────────────────────────
+
+function allocateId(state) {
+  let candidate = Date.now();
+  while (state.rows.has(`B${candidate}`)) candidate += 1;
+  return `B${candidate}`;
+}
+
+function requireActiveRow(state, id) {
+  const row = state.rows.get(id);
+  if (!row) throw new Error(`未找到 ${id}（fold 视图里没有这条任务）`);
+  return row;
+}
+
+export function recordTask(paths, { category, priority = 'P1', title, description, fingerprint, context, surface, release, sessionId }) {
+  requireModel(paths, { write: true });
+  if (!CATEGORIES.includes(category)) throw new Error(`category 必须是 ${CATEGORIES.join('|')}`);
+  if (!PRIORITIES.includes(priority)) throw new Error(`priority 必须是 ${PRIORITIES.join('|')}`);
+  if (!title || !title.trim()) throw new Error('title 必填');
+  if (!fingerprint || !fingerprint.trim()) throw new Error('fingerprint 必填（用于去重）');
+  const state = fold(paths);
+  const now = new Date().toISOString();
+  const existing = state.active.find(row =>
+    row.metadata?.fingerprint === fingerprint && (row.status === 'todo' || row.status === 'in_progress'));
+  if (existing) {
+    const { batchId } = appendEvent(paths, { kind: 'dedup', at: now, id: existing.id, ...(context ? { context } : {}) }, { surface });
+    return { type: 'dedup', row: existing, batchId };
+  }
+  const row = {
+    id: allocateId(state),
+    category,
+    priority,
+    status: 'todo',
+    title: title.trim(),
+    created_at: now,
+    metadata: { fingerprint, occurred_count: 1, ...(context ? { triage_context: context } : {}) },
+    ...(description ? { description } : {}),
+    ...(sessionId ? { source_ref: sessionId } : {})
+  };
+  const errors = validateTask(row);
+  if (errors.length) throw new Error(`记录非法：${errors.join('；')}`);
+  const { batchId } = appendEvent(paths, { kind: 'record', at: now, task: row }, { surface, release });
+  return { type: 'created', row, batchId };
+}
+
+export function startTask(paths, { id, owner, sessionId, touchedPaths, surface }) {
+  requireModel(paths, { write: true });
+  const state = fold(paths);
+  const row = requireActiveRow(state, id);
+  if (row.status === 'done') throw new Error(`${id} 已闭环（done 是终态，回归请开新任务并引用旧 ID）`);
+  if (!owner) throw new Error('进入 in_progress 必须提供 owner');
+  if (!touchedPaths?.length) throw new Error('进入 in_progress 必须提供 touched_paths');
+  const lease = acquireLease(paths, id, { owner, sessionId: sessionId ?? owner });
+  const now = new Date().toISOString();
+  const { batchId } = appendEvent(paths, {
+    kind: 'start',
+    at: now,
+    id,
+    owner,
+    paths: [...new Set(touchedPaths)],
+    ...(sessionId ? { session_id: sessionId } : {})
+  }, { surface });
+  return { id, owner, batchId, lease };
+}
+
+export function releaseTask(paths, { id, owner, surface }) {
+  requireModel(paths, { write: true });
+  const state = fold(paths);
+  const row = requireActiveRow(state, id);
+  if (row.status === 'done') throw new Error(`${id} 已闭环，无需释放`);
+  const lease = releaseLease(paths, id, { owner });
+  const now = new Date().toISOString();
+  const { batchId } = appendEvent(paths, { kind: 'release', at: now, id, ...(owner ? { owner } : {}) }, { surface });
+  return { id, batchId, lease };
+}
+
+export function annotateTask(paths, { id, description, priority, surface }) {
+  requireModel(paths, { write: true });
+  const state = fold(paths);
+  requireActiveRow(state, id);
+  if (description === undefined && priority === undefined) throw new Error('annotate 至少提供 --description 或 --priority');
+  if (priority !== undefined && !PRIORITIES.includes(priority)) throw new Error(`priority 必须是 ${PRIORITIES.join('|')}`);
+  const now = new Date().toISOString();
+  const { batchId } = appendEvent(paths, {
+    kind: 'annotate',
+    at: now,
+    id,
+    ...(description !== undefined ? { description } : {}),
+    ...(priority !== undefined ? { priority } : {})
+  }, { surface });
+  return { id, batchId };
+}
+
+export function resolveTask(paths, { id, evidence, surface }) {
+  requireModel(paths, { write: true });
+  if (!evidence || !evidence.trim()) throw new Error('resolve 必须提供 evidence');
+  const state = fold(paths);
+  const row = requireActiveRow(state, id);
+  if (row.status === 'done') throw new Error(`重复 resolve：${id} 已是 done`);
+  const now = new Date().toISOString();
+  const { batchId } = appendEvent(paths, { kind: 'resolve', at: now, id, evidence: evidence.trim() }, { surface });
+  const lease = releaseLease(paths, id);
+  return { id, batchId, lease };
+}
+
+// ───────────────────────────── 校验与对账 ─────────────────────────────
+
+/** 校验入口（模型无关）：v3 → 批次+租约+归档清单；v2 → 单文件只读校验（迁移期兼容）。 */
+export function lintAll(paths) {
+  const model = readModel(paths);
+  if (model === 'v2') return lintV2(paths);
+  if (model !== MODEL) {
+    return { ok: false, problems: ['账本未启用（缺 backlog/MODEL 与 tasks.jsonl）'], notes: [], counts: {} };
+  }
+  return lintV3(paths);
+}
+
+/** v2 单文件只读校验：字段不变量 + 活跃池 done 残留 + ID 重复 + 高水位 + 租约一致性。 */
+export function lintV2(paths) {
+  const problems = [];
+  const state = foldV2(paths);
+  problems.push(...state.problems);
+  for (const row of state.active) {
+    for (const e of validateTask(row)) problems.push(`tasks.jsonl (${row?.id ?? '?'}) ${e}`);
+  }
+  for (const row of state.done) {
+    for (const e of validateTask(row, { archived: true })) problems.push(`archive/${row?.id ?? '?'} ${e}`);
+  }
+  const leaseProblems = leaseConsistency(paths, state.active);
+  problems.push(...leaseProblems.problems);
+  const highWater = fs.existsSync(paths.legacyNextId)
+    ? Number.parseInt(fs.readFileSync(paths.legacyNextId, 'utf8').trim(), 10)
+    : 0;
+  if (highWater > 0) {
+    for (const row of [...state.active, ...state.done]) {
+      const n = Number.parseInt(String(row?.id ?? '').replace(/^B/, ''), 10);
+      if (Number.isFinite(n) && n >= highWater) {
+        problems.push(`ID ${row.id} 越过高水位（下一个候选 B${String(highWater).padStart(3, '0')}），疑似手工改号`);
+      }
+    }
+  }
+  return {
+    ok: problems.length === 0,
+    problems,
+    notes: leaseProblems.notes,
+    counts: state.counts
+  };
+}
+
+/** v3 批次日志校验：批次结构 + fold 不变量 + 遗留归档 + 租约一致性 + 批次 id 唯一。 */
+export function lintV3(paths) {
+  const problems = [];
+  const state = foldV3(paths);
+  problems.push(...state.problems);
+  for (const row of state.active) {
+    if (row.status === 'done') problems.push(`${row.id} 活跃视图残留 done`);
+  }
+  for (const row of legacyArchiveRows(paths)) {
+    for (const e of validateTask(row, { archived: true })) problems.push(`遗留归档 ${row?.id ?? '?'} ${e}`);
+  }
+  const leaseProblems = leaseConsistency(paths, state.active);
+  problems.push(...leaseProblems.problems);
+  const stems = new Map();
+  for (const batch of state.batches) {
+    const seen = stems.get(batch.batchId) ?? 0;
+    if (seen > 0) problems.push(`批次 id 重复：${batch.batchId}（同时出现在活跃与归档目录）`);
+    stems.set(batch.batchId, seen + 1);
+  }
+  return {
+    ok: problems.length === 0,
+    problems,
+    notes: leaseProblems.notes,
+    counts: state.counts
+  };
+}
+
+export function verifyArchive(paths) {
+  const problems = [];
+  const checked = [];
+  if (!fs.existsSync(paths.archivedBatchesDir)) return { ok: true, problems, checked };
+  const listed = new Set();
+  for (const year of fs.readdirSync(paths.archivedBatchesDir).sort()) {
+    const dir = path.join(paths.archivedBatchesDir, year);
+    if (!fs.statSync(dir).isDirectory()) continue;
+    const manifestFile = path.join(dir, 'manifest.sha256');
+    if (!fs.existsSync(manifestFile)) {
+      problems.push(`归档目录缺清单：${path.relative(paths.root, manifestFile)}`);
+      continue;
+    }
+    for (const line of fs.readFileSync(manifestFile, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      const match = /^([0-9a-f]{64})\s{2}(.+)$/.exec(line);
+      if (!match) { problems.push(`清单行非法：${path.relative(paths.root, manifestFile)} → ${line}`); continue; }
+      const [, sha, rel] = match;
+      listed.add(rel);
+      const abs = path.resolve(paths.root, rel);
+      if (!fs.existsSync(abs)) { problems.push(`清单登记但文件缺失：${rel}`); continue; }
+      const actual = crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
+      if (actual !== sha) problems.push(`归档文件被改动（sha256 不符）：${rel}`);
+      checked.push(rel);
+    }
+    for (const file of listFiles(dir, /\.jsonl$/)) {
+      const rel = path.relative(paths.root, file).split(path.sep).join('/');
+      if (!listed.has(rel)) problems.push(`归档文件未入清单：${rel}`);
+    }
+  }
+  return { ok: problems.length === 0, problems, checked };
+}
+
 export function doctor(paths) {
-  const report = { ok: true, issues: [], counts: {} };
-  const active = readJsonl(paths.tasks);
-  const archived = readArchives(paths);
-  report.counts = { active: active.length, archived: archived.length, highWater: readHighWater(paths) };
+  const report = { ok: true, issues: [], counts: {}, archive: null, notes: [] };
+  const model = readModel(paths);
+  report.counts.model = model;
+  const state = fold(paths);
+  report.counts = { ...report.counts, ...state.counts };
+  if (model !== MODEL && model !== 'v2') report.issues.push(`账本未启用（模型=${model ?? 'null'}）`);
+  report.issues.push(...state.problems);
   const ids = new Map();
-  for (const row of [...active, ...archived]) {
-    ids.set(row.id, (ids.get(row.id) ?? 0) + 1);
-  }
+  for (const row of state.rows.values()) ids.set(row.id, (ids.get(row.id) ?? 0) + 1);
   for (const [id, n] of ids) if (n > 1) report.issues.push(`ID 重复 ${id}×${n}`);
-  for (const row of active) if (row.status === 'done') report.issues.push(`${row.id} 活跃池残留 done`);
-  const maxSeen = [...ids.keys()].reduce((max, id) => {
-    const n = Number.parseInt(id.replace(/^B/, ''), 10);
-    return Number.isFinite(n) ? Math.max(max, n) : max;
-  }, 0);
-  const nextId = readHighWater(paths);
-  if (nextId === 0 && maxSeen > 0) report.issues.push('高水位文件缺失（.next-id）');
-  if (nextId > 0 && nextId <= maxSeen) report.issues.push(`高水位 B${String(nextId).padStart(3, '0')}（下一候选）未越过最大编号 B${String(maxSeen).padStart(3, '0')}`);
-  report.leases = active
-    .map(row => ({ id: row.id, lease: readLease(paths, row.id) }))
-    .filter(item => item.lease);
-  for (const id of orphanLeaseIds(paths, active)) {
-    report.issues.push(`残留租约 ${id}.lock：活跃池无此记录（node scripts/backlog.mjs reap --id ${id} --minutes 0 清理，或手动删除 .locks/${id}.lock）`);
+  for (const id of orphanLeaseIds(paths, state.active)) {
+    report.issues.push(`残留租约 ${id}.lock：活跃视图无此记录（node scripts/backlog.mjs reap --id ${id} --minutes 0 清理）`);
   }
+  report.archive = verifyArchive(paths);
+  report.issues.push(...report.archive.problems);
   const lint = lintAll(paths);
   report.issues.push(...lint.problems);
-  report.notes = lint.notes;
+  report.notes = lint.notes ?? [];
   report.ok = report.issues.length === 0;
   return report;
 }
 
-/** 一次性迁移：把旧 triage 账本的 7 条记录重编号为高水位段并规范化字段。 */
-export function normalizeLegacy(legacyRows, { startId = 56 } = {}) {
-  return legacyRows.map((row, index) => {
-    const created = row.created_at ?? row.metadata?.created_at ?? new Date().toISOString();
-    const base = {
-      id: `B${String(startId + index).padStart(3, '0')}`,
-      category: (row.metadata?.triage_context ?? row.context) ? 'Defect' : (row.category ?? 'Task'),
-      priority: row.priority ?? 'P1',
-      status: ['done', 'resolved', 'closed'].includes(row.status)
-        ? 'done'
-        : (['in_progress', 'doing'].includes(row.status) ? 'in_progress' : 'todo'),
-      title: row.title,
-      created_at: created,
-      metadata: {
-        fingerprint: row.metadata?.fingerprint ?? row.fingerprint ?? 'unknown',
-        occurred_count: row.metadata?.occurred_count ?? row.occurred_count ?? 1,
-        ...(row.metadata?.triage_context ?? row.context
-          ? { triage_context: row.metadata?.triage_context ?? row.context }
-          : {})
-      },
-      source_ref: row.session_id ?? row.source_ref ?? 'legacy-triage'
-    };
-    if (base.status === 'done') {
-      base.evidence = row.evidence ?? 'legacy triage: 迁移前已闭环（见 .agents/issue-triage/archive）';
-      base.closed_at = row.updated_at ?? created;
-      base.archived_at = base.closed_at;
+// ───────────────────────────── 归档 ─────────────────────────────
+
+/**
+ * 按批次归档：把「该批次引用到的任务全部 done」的活跃批次搬进归档目录并封存。
+ *
+ * 时机（ADR 约定）：批次随某个版本发布之后，由发版 housekeeping 或每周兜底任务执行；
+ * 未闭环批次一律不归档（否则要在归档后开新批次补正）。归档只动**已全部闭环**的批次，
+ * 因此在途分支的活跃批次文件与归档目录永不重叠 ⇒ 仍然零冲突。
+ */
+export function archiveBatches(paths, { release, before, dryRun = false } = {}) {
+  requireModel(paths, { write: true });
+  const state = fold(paths);
+  const candidates = [];
+  for (const batch of state.batches) {
+    if (batch.archived || !batch.meta) continue;
+    if (!batch.all_done) continue;
+    if (release && batch.meta.release !== release) continue;
+    if (before) {
+      const at = Date.parse(batch.meta.created_at);
+      if (!Number.isFinite(at) || at >= Date.parse(before)) continue;
     }
-    if (base.status === 'in_progress') {
-      base.owner = 'legacy-triage';
-      base.touched_paths = ['crates/pony-agent-core'];
-    }
-    return base;
-  });
+    candidates.push(batch);
+  }
+  const moved = [];
+  for (const batch of candidates) {
+    const year = String(batch.meta.created_at).slice(0, 4);
+    const target = archivedBatchFile(paths, year, batch.batchId);
+    const rel = path.relative(paths.root, target).split(path.sep).join('/');
+    if (dryRun) { moved.push(rel); continue; }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.renameSync(batch.file, target);
+    const sha = crypto.createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+    const manifest = path.join(path.dirname(target), 'manifest.sha256');
+    fs.appendFileSync(manifest, `${sha}  ${rel}\n`);
+    if (readCurrentBatchId(paths) === batch.batchId) fs.rmSync(paths.stateBatch, { force: true });
+    moved.push(rel);
+  }
+  return { ok: true, problems: [], moved, candidates: candidates.map(b => b.batchId), dryRun };
 }
 
-export function loadLedger(root) {
-  const paths = ledgerPaths(root);
-  return { paths, active: readJsonl(paths.tasks) };
-}
+// ───────────────────────────── 视图 ─────────────────────────────
 
 function formatRow(row) {
   const owner = row.owner ? ` @${row.owner}` : '';
-  return `${row.id} [${row.priority}/${row.status}] ${row.category}${owner} — ${row.title}`;
+  const surface = row._surface && row._surface !== 'legacy' ? ` ·${row._surface}` : '';
+  return `${row.id} [${row.priority}/${row.status}] ${row.category}${owner}${surface} — ${row.title}`;
 }
 
-export function list(paths) {
-  const rows = readJsonl(paths.tasks);
+export function listRows(paths, { surface } = {}) {
+  const model = readModel(paths);
+  if (model !== MODEL && model !== 'v2') throw new Error('账本未启用（缺 backlog/MODEL）');
+  const state = fold(paths);
+  let rows = [...state.active];
+  if (surface) rows = rows.filter(row => row._surface === sanitizeSurface(surface));
   const order = { in_progress: 0, todo: 1, done: 2 };
   rows.sort((a, b) => (order[a.status] - order[b.status]) ||
     PRIORITIES.indexOf(a.priority) - PRIORITIES.indexOf(b.priority) ||
-    a.id.localeCompare(b.id));
+    String(a.id).localeCompare(String(b.id)));
   return rows;
 }
+
+// ───────────────────────────── CLI ─────────────────────────────
 
 export function main(argv = process.argv.slice(2)) {
   const root = resolveLedgerRoot();
@@ -568,44 +938,41 @@ export function main(argv = process.argv.slice(2)) {
     const i = rest.indexOf(`--${name}`);
     return i === -1 ? fallback : rest[i + 1];
   };
+  const surface = arg('surface', process.env.PONY_BACKLOG_SURFACE);
   switch (command) {
     case 'record': {
-      const res = record(paths, {
+      const res = recordTask(paths, {
         category: arg('category', arg('type', 'Task')),
         priority: arg('priority', 'P1'),
         title: arg('title', rest.filter(x => !x.startsWith('--'))[0]),
         description: arg('description'),
         fingerprint: arg('fingerprint', 'manual'),
-        sessionId: arg('session')
+        surface,
+        release: arg('release'),
+        sessionId: arg('session', currentSessionId() ?? undefined)
       });
       console.log(res.type === 'dedup'
-        ? `[backlog] 去重命中：${res.row.id}（频次 ${res.row.metadata.occurred_count}）`
-        : `[backlog] 已登记 ${res.row.id}：${res.row.title}`);
-      return 0;
-    }
-    case 'list': {
-      const rows = list(paths);
-      console.log(`=== backlog (${rows.length} 条活跃) ===`);
-      for (const row of rows) console.log(formatRow(row));
+        ? `[backlog] 去重命中：${res.row.id}（频次 ${res.row.metadata.occurred_count}，批次 ${res.batchId}）`
+        : `[backlog] 已登记 ${res.row.id}：${res.row.title}（批次 ${res.batchId}）`);
+      console.log(`[backlog] 记得把 backlog/log/${res.batchId}.jsonl 与本 PR 一起提交`);
       return 0;
     }
     case 'start': {
       const id = rest[0];
-      const owner = arg('owner', process.env.DSH_SESSION_ID ?? process.env.USER ?? 'me');
-      acquireLease(paths, id, { owner, sessionId: arg('session', owner) });
-      const row = update(paths, id, {
-        status: 'in_progress',
+      const owner = arg('owner', currentSessionId() ?? process.env.USER ?? 'me');
+      const res = startTask(paths, {
+        id,
         owner,
-        touchedPaths: (arg('paths') ?? '').split(',').map(s => s.trim()).filter(Boolean)
+        sessionId: arg('session', owner),
+        touchedPaths: (arg('paths') ?? '').split(',').map(s => s.trim()).filter(Boolean),
+        surface
       });
-      console.log(`[backlog] ${row.id} → in_progress @${row.owner}（租约已获取）`);
+      console.log(`[backlog] ${res.id} → in_progress @${res.owner}（租约已获取，批次 ${res.batchId}）`);
       return 0;
     }
     case 'release': {
-      const id = rest[0];
-      releaseLease(paths, id, { owner: arg('owner') });
-      const row = update(paths, id, { status: 'todo' });
-      console.log(`[backlog] ${row.id} → todo（租约已释放）`);
+      const res = releaseTask(paths, { id: rest[0], owner: arg('owner'), surface });
+      console.log(`[backlog] ${res.id} → todo（租约已释放，批次 ${res.batchId}）`);
       return 0;
     }
     case 'heartbeat': {
@@ -614,8 +981,6 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     case 'reap': {
-      // 破坏性清理：参数白名单解析。未知 token（--id=B056 / --ide / -id / 位置参数）一律 exit 2，
-      // 绝不静默回落为「清全部」。
       const usage = '用法: backlog reap [--id <B###>] [--minutes N] [--dry-run]（未知参数一律拒绝，不会回落为全局清理）';
       let onlyId;
       let minutes = '120';
@@ -636,15 +1001,11 @@ export function main(argv = process.argv.slice(2)) {
         console.error(usage);
         return 2;
       }
-      const reaped = reapStaleLeases(paths, {
-        maxAgeMs: Number(minutes) * 60_000,
-        dryRun,
-        onlyId
-      });
+      const reaped = reapStaleLeases(paths, { maxAgeMs: Number(minutes) * 60_000, dryRun, onlyId });
       const scope = onlyId ? `（仅 ${onlyId}）` : '（全部租约）';
       if (reaped.length) {
         console.log(dryRun
-          ? `[backlog] [dry-run] 将回收超龄租约${scope}（未执行，未删除任何锁）：${reaped.join(', ')}`
+          ? `[backlog] [dry-run] 将回收超龄租约${scope}（未执行）：${reaped.join(', ')}`
           : `[backlog] 回收超龄租约${scope}：${reaped.join(', ')}`);
       } else {
         console.log(dryRun ? `[backlog] [dry-run] 无超龄租约${scope}` : `[backlog] 无超龄租约${scope}`);
@@ -652,27 +1013,46 @@ export function main(argv = process.argv.slice(2)) {
       return 0;
     }
     case 'annotate': {
-      const id = rest[0];
-      const rows = readJsonl(paths.tasks);
-      const row = rows.find(r => r.id === id);
-      if (!row) throw new Error(`未找到 ${id}`);
-      const description = arg('description');
-      if (description !== undefined) row.description = description;
-      const priority = arg('priority');
-      if (priority !== undefined) row.priority = priority;
-      row.updated_at = new Date().toISOString();
-      const errors = validateRecord(row);
-      if (errors.length) throw new Error(`记录非法：${errors.join('；')}`);
-      writeJsonl(paths.tasks, rows);
-      console.log(`[backlog] ${row.id} 已更新注释`);
+      const res = annotateTask(paths, {
+        id: rest[0],
+        description: arg('description'),
+        priority: arg('priority'),
+        surface
+      });
+      console.log(`[backlog] ${res.id} 已更新注释（批次 ${res.batchId}）`);
       return 0;
     }
     case 'resolve': {
       const evidence = arg('evidence', rest.slice(1).filter(x => !x.startsWith('--')).join(' '));
-      const { row, archiveFile, lease } = resolve(paths, rest[0], evidence);
-      console.log(`[backlog] ${row.id} 已闭环并归档 → ${path.relative(root, archiveFile)}`);
-      if (lease.released) console.log(`[backlog] 租约已释放（原持有者 @${lease.previous.owner}）`);
+      const res = resolveTask(paths, { id: rest[0], evidence, surface });
+      console.log(`[backlog] ${res.id} 已闭环（批次 ${res.batchId}）`);
+      if (res.lease.released) console.log(`[backlog] 租约已释放（原持有者 @${res.lease.previous.owner}）`);
       return 0;
+    }
+    case 'list': {
+      const rows = listRows(paths, { surface });
+      console.log(`=== backlog (${rows.length} 条活跃${surface ? `，surface=${sanitizeSurface(surface)}` : ''}) ===`);
+      for (const row of rows) console.log(formatRow(row));
+      return 0;
+    }
+    case 'fold': {
+      const state = fold(paths);
+      console.log(JSON.stringify({
+        model: readModel(paths),
+        counts: state.counts,
+        active: state.active.map(row => ({ id: row.id, status: row.status, surface: row._surface, batch: row._batch })),
+        batches: state.batches.map(batch => ({
+          batchId: batch.batchId,
+          surface: batch.meta?.surface,
+          release: batch.meta?.release,
+          created_at: batch.meta?.created_at,
+          archived: batch.archived,
+          touched: batch.touched,
+          all_done: batch.all_done
+        })),
+        problems: state.problems
+      }, null, 2));
+      return state.problems.length ? 1 : 0;
     }
     case 'lint': {
       const res = lintAll(paths);
@@ -682,7 +1062,7 @@ export function main(argv = process.argv.slice(2)) {
         console.error(`[backlog-lint] FAIL（${res.problems.length} 项）`);
         return 1;
       }
-      console.log(`[backlog-lint] PASS（活跃 ${res.counts.active} / 归档 ${res.counts.archived}）`);
+      console.log(`[backlog-lint] PASS（活跃 ${res.counts.active} / 已闭环 ${res.counts.done} / 批次 ${res.counts.batches} 活跃 + ${res.counts.archivedBatches} 归档）`);
       return 0;
     }
     case 'doctor': {
@@ -690,34 +1070,54 @@ export function main(argv = process.argv.slice(2)) {
       console.log(JSON.stringify({ root, ...report }, null, 2));
       return report.ok ? 0 : 1;
     }
-    case 'import-triage': {
-      const legacyFile = path.resolve(arg('from', '.agents/backlog/tasks.jsonl'));
-      const legacyRows = readJsonl(legacyFile);
-      const normalized = normalizeLegacy(legacyRows, { startId: Number(arg('start', '56')) });
-      const doneRows = normalized.filter(r => r.status === 'done');
-      const activeRows = normalized.filter(r => r.status !== 'done');
-      const existingArchive = readArchives(paths);
-      const appended = doneRows.filter(r => !existingArchive.some(a => a.id === r.id));
-      if (appended.length) {
-        const perYear = new Map();
-        for (const row of appended) {
-          const year = row.closed_at.slice(0, 4);
-          perYear.set(year, [...(perYear.get(year) ?? []), row]);
-        }
-        for (const [year, rows] of perYear) {
-          const file = path.join(paths.archiveDir, `tasks-${year}.jsonl`);
-          writeJsonl(file, [...readJsonl(file), ...rows]);
-        }
+    case 'archive': {
+      const res = archiveBatches(paths, {
+        release: arg('release'),
+        before: arg('before'),
+        dryRun: rest.includes('--dry-run')
+      });
+      if (!res.moved.length) {
+        console.log('[backlog] 没有可归档批次（需要批次内任务全部 done）');
+        return 0;
       }
-      const merged = [...readJsonl(paths.tasks), ...activeRows];
-      writeJsonl(paths.tasks, merged);
-      for (const row of normalized) writeHighWater(paths, row.id);
-      console.log(`[backlog] 迁移完成：活跃 +${activeRows.length}，归档 +${appended.length}（${normalized.map(r => r.id).join(',')}）`);
+      for (const rel of res.moved) console.log(`[backlog] ${res.dryRun ? '[dry-run] 将归档' : '已归档'} ${rel}`);
+      console.log(`[backlog] 共 ${res.moved.length} 个批次${res.dryRun ? '（dry-run，未改动磁盘）' : '，清单已追加'}`);
       return 0;
     }
+    case 'verify-archive': {
+      const res = verifyArchive(paths);
+      if (!res.ok) {
+        for (const p of res.problems) console.error(`[backlog-archive] ${p}`);
+        console.error(`[backlog-archive] FAIL（${res.problems.length} 项）`);
+        return 1;
+      }
+      console.log(`[backlog-archive] PASS（校验 ${res.checked.length} 个归档批次）`);
+      return 0;
+    }
+    case 'batch': {
+      const [sub] = rest;
+      if (sub === 'show') {
+        const id = readCurrentBatchId(paths);
+        if (!id) { console.log('[backlog] 当前工作区没有活动批次（首次 record/start 时自动创建）'); return 0; }
+        console.log(id);
+        return 0;
+      }
+      if (sub === 'new') {
+        fs.rmSync(paths.stateBatch, { force: true });
+        const { batchId, file } = ensureBatch(paths, {
+          surface,
+          release: arg('release'),
+          sessionId: currentSessionId() ?? undefined
+        });
+        console.log(`[backlog] 已创建批次 ${batchId} → ${path.relative(root, file)}`);
+        return 0;
+      }
+      console.log('用法: backlog batch {new [--surface <s>] [--release <v>]|show}');
+      return 1;
+    }
     default:
-      console.log('用法: backlog {record|list|start|heartbeat|release|resolve|annotate|lint|doctor|reap [--id <ID>] [--minutes N] [--dry-run]|import-triage}');
-  return 1;
+      console.log('用法: backlog {record|list [--surface <s>]|start|heartbeat|release|resolve|annotate|reap|fold|lint|doctor|archive [--release <v>] [--before <ISO>] [--dry-run]|verify-archive|batch {new|show}}');
+      return 1;
   }
 }
 
@@ -725,13 +1125,8 @@ export function main(argv = process.argv.slice(2)) {
  * 是否作为 CLI 直接执行（`node scripts/backlog.mjs <cmd>`）而非被 import。
  *
  * 旧写法 `path.resolve(new URL(import.meta.url).pathname)` 在 Windows 上把
- * `/C:/repo/scripts/backlog.mjs` 这类**带前导斜杠的 URL pathname** 交给 `path.resolve`，
- * 得到一个与 `process.argv[1]`（`C:\repo\scripts\backlog.mjs`）永不相等的结果：
- * isDirect 恒 false ⇒ CLI 静默不执行（空 stdout、exit 0、账本不落盘），
- * 这正是 tests/backlog-cli.spec.ts 在 Windows CI 上两例恒红的根因。
- *
- * 现口径：两侧都先解析为真实路径再转 file URL 逐字比较；Windows 文件系统大小写
- * 不敏感，故仅在 win32 下做小写归一（POSIX 保留大小写敏感性）。
+ * `/C:/repo/scripts/backlog.mjs` 这类带前导斜杠的 URL pathname 交给 path.resolve，
+ * 得到与 `process.argv[1]` 永不相等的结果（CLI 静默不执行）。现两侧都先 realpath 再比。
  */
 function isDirectInvocation() {
   const entry = process.argv[1];
