@@ -15,7 +15,7 @@
 | `PPROXY_TUNNEL_POOL=0` | 关闭待命池（调试/受限环境） | 未设 = 开启 |
 | `PPROXY_EDGE_KEEPALIVE=1` | 开启边缘保活 | 未设 = 关闭 |
 | `PPROXY_YOUTUBE_PROXY` | YouTube / `googlevideo` 目标的专属上游（`http://` 或 `socks5://host:port`）；命中即分流，**单条失败回落常规隧道并打 WARN** | 空 = 关闭分流 |
-| `PPROXY_RELAY_IDLE_TIMEOUT_MS` / `PPROXY_RELAY_ABSOLUTE_TIMEOUT_MS` | CONNECT relay 空闲 / 绝对生命周期上限（非法/0 回落） | `30000` / `21600000`（6 h） |
+| `PPROXY_RELAY_IDLE_TIMEOUT_MS` / `PPROXY_RELAY_ABSOLUTE_TIMEOUT_MS` | CONNECT relay 空闲 / 绝对生命周期上限（非法/0 回落） | `300000`（5 min） / `21600000`（6 h） |
 | `PPROXY_ALERT_WEBHOOK_URL` | 配额告警 webhook | 空 = 只落库不外发 |
 | `PPROXY_DESKTOP_DIST_DIR` | `/dsk/` 桌面端安装包分发目录 | `/opt/pony-desktop-releases` |
 
