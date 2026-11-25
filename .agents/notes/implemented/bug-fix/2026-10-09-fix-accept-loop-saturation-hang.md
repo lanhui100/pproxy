@@ -99,3 +99,6 @@ admin 端点。
 - 相关既有决策：`implemented/bug-fix/2026-10-09-fix-tunnel-pool-dead-session-and-timeout.md`
   （待命池/首帧超时生命周期）；本条补齐 relay 有界生命周期与 accept 循环根治，二者
   同属"连接生命周期治理"族。
+- 后续修订：本文第 2 项中 `RELAY_IDLE_DEFAULT_MS` 的默认 30s 取值已由
+  `implemented/bug-fix/2026-11-25-raise-relay-idle-default-timeout.md` 上调至 300s（5 min），
+  其余有界生命周期与饱和治理语义保持不变。

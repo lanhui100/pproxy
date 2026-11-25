@@ -676,10 +676,11 @@ async fn bind_target(tx: WsTx, rx: WsRx, host: &str, port: u16) -> Result<(WsTx,
         })
 }
 
-/// CONNECT relay 有界生命周期默认值（契约 §3）：空闲超时 30s = 10×外部调用基准 3s；
-/// 绝对上限 6h（单 relay 从写 200 起的总时长硬界）。均经 env 注入缩短供测试：
+/// CONNECT relay 有界生命周期默认值：空闲超时 300s = 5 min（对齐 gate-server `IDLE_TIMEOUT` 300s），
+/// 容忍大上下文 LLM SSE prefill / 思考停顿，同时保留死隧道有界回收；
+/// 绝对上限 6h（单 relay 从写 200 起的总时长硬界）。均经 env 注入调整：
 /// `PPROXY_RELAY_IDLE_TIMEOUT_MS` / `PPROXY_RELAY_ABSOLUTE_TIMEOUT_MS`。
-const RELAY_IDLE_DEFAULT_MS: u64 = 30_000;
+const RELAY_IDLE_DEFAULT_MS: u64 = 300_000;
 const RELAY_ABSOLUTE_DEFAULT_MS: u64 = 21_600_000;
 
 /// relay 期限注入（契约 §2.3）：env > 默认；非法/0 → 回落默认并 warn（含 raw）。
@@ -1690,5 +1691,17 @@ mod tests {
         assert_eq!(cf.conns.load(Ordering::SeqCst), cf_conns_before, "合规 host 绝不得触碰 CF 端点");
         // rn 必须参与过建连
         assert!(rn_conns_before >= 1, "rn 必须被预热建连");
+    }
+
+    #[test]
+    fn relay_idle_default_is_300s_and_env_falls_back_to_default() {
+        assert_eq!(RELAY_IDLE_DEFAULT_MS, 300_000);
+        assert_eq!(
+            relay_timeout_from_env(
+                "PPROXY_TEST_RELAY_TIMEOUT_DEFAULT_CHECK",
+                RELAY_IDLE_DEFAULT_MS
+            ),
+            Duration::from_secs(300)
+        );
     }
 }
